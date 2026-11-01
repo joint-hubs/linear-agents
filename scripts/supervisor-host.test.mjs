@@ -21,6 +21,12 @@
 //     means the prompt was taken (busy, idle or needs-input — a fast turn can
 //     start AND end between two polls); an unconfirmed send during a running
 //     turn is queued, never retried;
+//   · the same text already queued behind a running turn is refused as a
+//     duplicate (sent:false, duplicate:true) and never pasted twice
+//     (FOC-1111): the key frees on delivery evidence — a busy hook write
+//     after the queue time; idle/needs-input writes do not prove delivery —
+//     and a TTL backstops keys orphaned without evidence (Esc-cancelled
+//     turns); a fresh session start drops every key;
 //   · dialogs are answered from the pane (FOC-810): GET /dialog parses the
 //     capture; /dialog/answer presses only an option that carries the exact
 //     choice (an auto-mode option is never pressed), deny Escapes and with a
@@ -71,7 +77,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
-import { createHost, MAX_MESSAGE_BYTES, BODY_CAP_BYTES } from "./supervisor-host.mjs";
+import { createHost, MAX_MESSAGE_BYTES, BODY_CAP_BYTES, MAX_QUEUED_KEYS, QUEUED_DEDUPE_TTL_MS } from "./supervisor-host.mjs";
 import { extractCommandOutput, parseDialog } from "./session-dialog.mjs";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "session-dialogs");
@@ -753,6 +759,197 @@ test("a tmux step failing mid-sequence → 500 with the stderr; send-keys never 
   eq(r.body.error, "tmux", "error");
   eq(r.body.detail, "paste-buffer blew up", "detail is stderr");
   assert.ok(!tmux.calls.some((c) => c.args[0] === "send-keys"), "Enter never sent after a failed paste");
+});
+
+// ── sendMessage: duplicate guard (FOC-1111) ──────────────────────────────────
+
+console.log("\nsupervisor-host: duplicate guard (FOC-1111)");
+
+// A busy hook with a STALE updatedAt (the running turn wrote before our
+// send) plus a drawn prompt: the paste queues, confirmed stays false.
+const busyStale = () => ({ state: "busy", updatedAt: "1970-01-01T00:00:00.000Z", notification: null });
+const pastes = (tmux) => tmux.calls.filter((c) => c.args[0] === "load-buffer").length;
+
+test("first send while busy queues; the identical resend answers duplicate:true and is NOT pasted again", async () => {
+  const { host, tmux } = build({ tmux: fakeTmux({ present: true }), stateNow: busyStale });
+  const r1 = await host.sendMessage("hello");
+  eq(r1.status, 200, "first send");
+  eq(r1.body, { sent: true, confirmed: false, queued: true }, "queued behind the turn");
+  const before = tmux.calls.length;
+  const r2 = await host.sendMessage("hello");
+  eq(r2.status, 200, "duplicate is not an error");
+  eq(r2.body, { sent: false, duplicate: true, queued: false }, "the response says duplicate (queued stays false: nothing was pasted)");
+  eq(pastes(tmux), 1, "the text was never pasted a second time");
+  eq(tmux.calls.slice(before).map((c) => c.args[0]), ["has-session", "capture-pane"],
+    "the guard refuses right after the pane check — no paste, no confirm wait");
+});
+
+test("delivered message frees the key: a busy hook write AFTER the queue → the resend goes through", async () => {
+  const clk = fakeClock();
+  let hook = busyStale(); // the running turn's write predates the queue
+  const { host, tmux } = build({ tmux: fakeTmux({ present: true }), clk, stateNow: () => hook });
+  const r1 = await host.sendMessage("hello");
+  eq(r1.body, { sent: true, confirmed: false, queued: true }, "queued");
+  // The turn ended and took the queued input: UserPromptSubmit wrote busy
+  // with a fresh updatedAt — the only delivery proof the host can observe.
+  clk.t += 60_000;
+  hook = { state: "busy", updatedAt: iso(clk), notification: null };
+  const r2 = await host.sendMessage("hello");
+  eq(r2.status, 200, "resend status");
+  eq(r2.body, { sent: true, confirmed: false, queued: true }, "a legitimate resend queues again");
+  eq(pastes(tmux), 2, "pasted again");
+});
+
+test("an idle hook write after the queue does NOT free the key (Stop of the old turn is not delivery)", async () => {
+  const clk = fakeClock();
+  let hook = busyStale();
+  const { host, tmux } = build({ tmux: fakeTmux({ present: true }), clk, stateNow: () => hook });
+  await host.sendMessage("hello");
+  clk.t += 60_000;
+  hook = { state: "idle", updatedAt: iso(clk), notification: null }; // Stop fired, input not consumed yet
+  const r2 = await host.sendMessage("hello");
+  eq(r2.body, { sent: false, duplicate: true, queued: false }, "still a duplicate");
+  eq(pastes(tmux), 1, "no second paste");
+});
+
+test("a different text still queues normally beside a queued one", async () => {
+  const { host, tmux } = build({ tmux: fakeTmux({ present: true }), stateNow: busyStale });
+  const r1 = await host.sendMessage("hello");
+  eq(r1.body, { sent: true, confirmed: false, queued: true }, "first queued");
+  const r2 = await host.sendMessage("other question");
+  eq(r2.body, { sent: true, confirmed: false, queued: true }, "second queues too");
+  eq(pastes(tmux), 2, "both pasted");
+  const r3 = await host.sendMessage("hello");
+  eq(r3.body, { sent: false, duplicate: true, queued: false }, "the first text is still guarded");
+});
+
+test("one busy write frees only the OLDEST queued key — a second queued text stays guarded (F1)", async () => {
+  const clk = fakeClock();
+  let hook = busyStale(); // both sends queue behind this stale write
+  const { host, tmux } = build({ tmux: fakeTmux({ present: true }), clk, stateNow: () => hook });
+  eq((await host.sendMessage("hello")).body, { sent: true, confirmed: false, queued: true }, "first queued");
+  eq((await host.sendMessage("other")).body, { sent: true, confirmed: false, queued: true }, "second queued");
+  eq(pastes(tmux), 2, "both pasted once");
+  // The turn ended and its queue drained ONE input: UserPromptSubmit wrote a
+  // fresh busy write — evidence for exactly one consumed text, not two.
+  clk.t += 60_000;
+  hook = { state: "busy", updatedAt: iso(clk), notification: null };
+  eq(
+    (await host.sendMessage("other")).body,
+    { sent: false, duplicate: true, queued: false },
+    "the second text is STILL guarded — one busy write must not free both keys",
+  );
+  eq(pastes(tmux), 2, "nothing was pasted for the guarded text");
+  eq((await host.sendMessage("hello")).body, { sent: true, confirmed: false, queued: true }, "the oldest key was the one freed");
+  eq(pastes(tmux), 3, "only the freed text was re-pastable");
+  // The hook file keeps only the LAST write: the same busy write is re-read
+  // on every send and must never free a second key.
+  eq(
+    (await host.sendMessage("other")).body,
+    { sent: false, duplicate: true, queued: false },
+    "a re-observed busy write is spent evidence",
+  );
+  eq(pastes(tmux), 3, "still nothing pasted for the guarded text");
+  // The drained "hello" starts its own turn — a NEW busy write frees the next key.
+  clk.t += 60_000;
+  hook = { state: "busy", updatedAt: iso(clk), notification: null };
+  eq((await host.sendMessage("other")).body, { sent: true, confirmed: false, queued: true }, "the next key frees on the NEXT busy write");
+  eq(pastes(tmux), 4, "pasted");
+});
+
+test("the queued-key map is FIFO-capped: past MAX_QUEUED_KEYS the oldest key is evicted (F5)", async () => {
+  const { host, tmux } = build({ tmux: fakeTmux({ present: true }), stateNow: busyStale });
+  const texts = Array.from({ length: MAX_QUEUED_KEYS + 1 }, (_, i) => `queued text ${i}`);
+  for (const text of texts) {
+    const r = await host.sendMessage(text);
+    eq(r.body.queued, true, `${text} queued`);
+  }
+  eq(pastes(tmux), MAX_QUEUED_KEYS + 1, "each unique text pasted once");
+  eq(
+    (await host.sendMessage(texts[0])).body,
+    { sent: true, confirmed: false, queued: true },
+    "the oldest key was evicted — the text is sendable again",
+  );
+  eq(pastes(tmux), MAX_QUEUED_KEYS + 2, "pasted again");
+  eq(
+    (await host.sendMessage(texts[MAX_QUEUED_KEYS])).body,
+    { sent: false, duplicate: true, queued: false },
+    "the newest key is still guarded",
+  );
+  eq(pastes(tmux), MAX_QUEUED_KEYS + 2, "still nothing pasted for the guarded text");
+});
+
+test("TTL boundary is strict >: a key exactly QUEUED_DEDUPE_TTL_MS old is held, +1 ms drops it (F7)", async () => {
+  const clk = fakeClock();
+  // The key's queue time is the host clock at the send (no sleep runs between
+  // the guard's hookNow read and the paste), so the SECOND stateNow call of
+  // the first send observes it exactly.
+  const hookReads = [];
+  const { host, tmux } = build({
+    tmux: fakeTmux({ present: true }),
+    clk,
+    stateNow: () => {
+      hookReads.push(clk.t);
+      return busyStale();
+    },
+  });
+  eq((await host.sendMessage("hello")).body, { sent: true, confirmed: false, queued: true }, "queued");
+  const queuedAt = hookReads[1]; // hookNow of the first send — read just before sendAt
+  clk.t = queuedAt + QUEUED_DEDUPE_TTL_MS; // exactly the TTL — the key is still held
+  eq(
+    (await host.sendMessage("hello")).body,
+    { sent: false, duplicate: true, queued: false },
+    "at exactly the TTL the key is still held",
+  );
+  clk.t += 1; // the first clock reading past the TTL
+  eq((await host.sendMessage("hello")).body, { sent: true, confirmed: false, queued: true }, "dropped after the TTL");
+  eq(pastes(tmux), 2, "pasted again");
+});
+
+test("a confirmed send never gains a key: resending a delivered text goes through", async () => {
+  const clk = fakeClock();
+  let sent = false;
+  let hookAt = null; // the first send's hook write, frozen (the clock keeps advancing)
+  const { host, tmux } = build({
+    tmux: fakeTmux({ present: true }),
+    clk,
+    stateNow: () => (sent
+      ? { state: "busy", updatedAt: hookAt, notification: null }
+      : busyStale()),
+  });
+  tmux.onCall = (args) => {
+    if (args[0] === "send-keys" && !sent) {
+      sent = true;
+      hookAt = iso(clk);
+    }
+  };
+  const r1 = await host.sendMessage("hello");
+  eq(r1.body, { sent: true, confirmed: true, queued: false }, "confirmed — the pane took it");
+  const r2 = await host.sendMessage("hello");
+  eq(r2.body, { sent: true, confirmed: false, queued: true }, "a repeat of a delivered text is legitimate");
+  eq(pastes(tmux), 2, "pasted both times");
+});
+
+test("a key older than the TTL is dropped even without delivery evidence (the Esc backstop)", async () => {
+  const clk = fakeClock();
+  const { host, tmux } = build({ tmux: fakeTmux({ present: true }), clk, stateNow: busyStale });
+  await host.sendMessage("hello");
+  clk.t += 15 * 60_000 + 1; // past QUEUED_DEDUPE_TTL_MS (15 min)
+  const r2 = await host.sendMessage("hello");
+  eq(r2.body, { sent: true, confirmed: false, queued: true }, "the orphaned key no longer blocks");
+  eq(pastes(tmux), 2, "pasted again");
+});
+
+test("a fresh session start clears the guard: the old pane's queue died with it", async () => {
+  const clk = fakeClock();
+  const tmux = fakeTmux({ present: true });
+  const { host } = build({ tmux, clk, stateNow: busyStale });
+  await host.sendMessage("hello"); // queued on the old pane
+  tmux.capture = READY_PANE; // the fresh session draws its prompt
+  eq(await host.ensureSession({ fresh: true }), { ready: true }, "fresh start ready");
+  const r2 = await host.sendMessage("hello");
+  eq(r2.body, { sent: true, confirmed: false, queued: true }, "no stale duplicate refusal across a restart");
+  eq(pastes(tmux), 2, "pasted again");
 });
 
 // ── alive ─────────────────────────────────────────────────────────────────────

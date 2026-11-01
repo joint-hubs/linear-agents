@@ -462,3 +462,125 @@ export function answerResultText(result) {
   }
   return 'Answer sent.';
 }
+
+// ===== Chat send feedback (FOC-1111) =====
+
+// sendFeedback(res) -> { kind, state } for a POST …/supervisor/message
+// response. The server is the source of truth and the UI never guesses:
+// `duplicate` — the text is already queued behind the running turn and was
+// NOT pasted again; `confirmed` — the pane took the message (a hook write
+// proved the prompt), i.e. delivered; `queued` — pasted behind a running
+// turn, delivered when the turn ends; anything else (plain `sent`, an
+// unrecognized shape) degrades honestly to 'sent' — pasted, no confirmation
+// yet. state labels the pending line (null for a duplicate: no line).
+export function sendFeedback(res) {
+  const r = res || {};
+  if (r.duplicate) return { kind: 'duplicate', state: null };
+  if (r.confirmed) return { kind: 'delivered', state: 'delivered' };
+  if (r.queued) return { kind: 'queued', state: 'queued' };
+  return { kind: 'sent', state: 'sent' };
+}
+
+// pendingAfterSend(prev, res, id) -> the pending lines after the send
+// response arrived. The line this send added moves to its response state; a
+// duplicate removes it instead — the server refused to paste the text, so
+// it must not show as queued (the composer keeps the text and a warning
+// banner explains; see duplicateWarning). Other lines pass through untouched.
+export function pendingAfterSend(prev, res, id) {
+  const fb = sendFeedback(res);
+  const lines = prev || [];
+  if (fb.kind === 'duplicate') return lines.filter((p) => p.id !== id);
+  return lines.map((p) => (p.id === id ? { ...p, state: fb.state } : p));
+}
+
+// duplicateWarning(res, refusedText) -> the banner payload for a
+// duplicate-send response, null for anything else. `refused` carries the
+// refused text — the warning's identity: the banner must stop claiming
+// "already queued" once that queued copy is delivered or the composer moves
+// off the text (see dupWarnStillApplies).
+export function duplicateWarning(res, refusedText) {
+  if (!res || !res.duplicate) return null;
+  return {
+    text: 'Already queued — it will be delivered when the current turn ends.',
+    refused: typeof refusedText === 'string' ? refusedText : null,
+  };
+}
+
+// dupWarnStillApplies(dupWarn, pending, draft) -> whether the duplicate-send
+// banner still tells the truth. It is a receipt for a REFUSED send: the
+// server did not paste the text because an identical copy is already queued
+// behind the running turn — so the warning applies only while
+// - a pending line with that exact text still exists (the queued copy has
+//   not been delivered / dropped yet — once it is, "already queued" would
+//   claim something false), and
+// - the composer still holds exactly that text (trimmed; the human may edit
+//   away, and a warning about a message they are no longer sending is noise).
+// The identity is the refused text, not the refused send's pending-line id —
+// that line is removed on the refusal itself (pendingAfterSend), so it cannot
+// anchor the rule; the queued copy it refers to is only identifiable by its
+// text. A different send clears the banner outright in the send path; the
+// composer text is NOT auto-cleared here — only the warning stops.
+export function dupWarnStillApplies(dupWarn, pending, draft) {
+  const refused = dupWarn && typeof dupWarn.refused === 'string' ? dupWarn.refused : null;
+  if (refused == null) return false;
+  const copyStillPending = (pending || []).some((p) => p && p.text === refused);
+  if (!copyStillPending) return false;
+  return typeof draft === 'string' && draft.trim() === refused;
+}
+
+// pendingChip(state) -> the chip label of a pending chat line.
+export function pendingChip(state) {
+  if (state === 'queued') return 'queued — after the current turn';
+  if (state === 'delivered') return 'delivered';
+  return 'sent — not confirmed yet';
+}
+
+// newPendingEntry({ id, text, entries, sentAt }) -> a pending chat line
+// carrying what the drop rule needs to react only to a delivery that happens
+// AFTER this send: seenUserUuids — the uuids of the user entries with the
+// SAME text the local transcript view already holds at send time (a repeated
+// question is a normal conversation; matching by text alone dropped a queued
+// copy on an earlier identical line — FOC-1111 review F2) — and sentAt, the
+// client clock at the send. The snapshot can be STALE: the local view lags
+// the server (first page still loading, or the 2 s poll mid-flight), so an
+// identical line delivered just BEFORE the send may merge in later with a
+// uuid outside the snapshot. The ts floor closes that: the transcript is
+// append-only and server-stamped, so an entry stamped at or before sentAt
+// existed before the send and is never this send's delivery — only a line
+// stamped AFTER it can drop the pending copy. Trade-off (clock skew): a
+// client clock ahead of the server delays the drop until the queued copy's
+// own entry lands (the chip then disappears at the true delivery, never
+// early); same-host compose clocks make this negligible.
+export function newPendingEntry({ id, text, entries, sentAt }) {
+  const seenUserUuids = new Set();
+  for (const en of entries || []) {
+    if (en && en.role === 'user' && en.text === text && en.uuid != null) seenUserUuids.add(en.uuid);
+  }
+  return { id, text, state: 'sent', seenUserUuids, sentAt };
+}
+
+// dropDeliveredPending(pending, entries) -> the pending lines still waiting
+// for delivery. A line drops when the transcript now holds a user entry with
+// its text that the line had NOT already seen at send time AND that is
+// stamped after the send (see newPendingEntry for why the uuid snapshot alone
+// is not enough). Re-reads of older history (the same uuids) never drop
+// anything; a ts-less entry (defensive) still counts as a new delivery. A
+// line without the send-time snapshot (defensive) falls back to the uuid-only
+// rule, and without either to the text-only rule.
+export function dropDeliveredPending(pending, entries) {
+  const es = entries || [];
+  const stampedAfter = (en, sentAt) => {
+    if (typeof en.ts !== 'string') return true; // defensive: no stamp — count it
+    const at = Date.parse(en.ts);
+    return !Number.isFinite(at) ? true : at > sentAt;
+  };
+  return (pending || []).filter((p) => {
+    if (!p) return false;
+    const sameText = es.filter((en) => en && en.role === 'user' && en.text === p.text);
+    const seen = p.seenUserUuids;
+    if (!(seen instanceof Set)) return sameText.length === 0;
+    const isNew = (en) => en.uuid != null && !seen.has(en.uuid)
+      && (typeof p.sentAt !== 'number' ? true : stampedAfter(en, p.sentAt));
+    return !sameText.some(isNew);
+  });
+}

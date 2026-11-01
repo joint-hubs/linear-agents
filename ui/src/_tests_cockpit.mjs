@@ -13,8 +13,11 @@
 // inboxPrimaryAction,
 // FOC-810), the inbox list shapers (inboxQuestionLines / inboxFactLines —
 // the generic lists render strings only; the ask category never leaks its
-// question objects into a <li>, React error #31). Fixtures only — no network,
-// no DOM.
+// question objects into a <li>, React error #31) and the chat send feedback
+// (sendFeedback / pendingAfterSend / duplicateWarning / dupWarnStillApplies /
+// pendingChip — the queued→delivered classification off the server response
+// and the duplicate-send warning with its truth window, FOC-1111). Fixtures
+// only — no network, no DOM.
 
 import assert from 'node:assert/strict';
 
@@ -40,6 +43,13 @@ import {
   askAnswers,
   answerResultText,
   childCostLabel,
+  sendFeedback,
+  pendingAfterSend,
+  duplicateWarning,
+  dupWarnStillApplies,
+  pendingChip,
+  newPendingEntry,
+  dropDeliveredPending,
 } from './cockpitModel.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) -------------------
@@ -918,6 +928,208 @@ await test('inboxFactLines missing facts / other shapes -> []', () => {
   eq(inboxFactLines({ facts: 'not-a-list' }), []);
   eq(inboxFactLines({ facts: 42 }), []);
   eq(inboxFactLines(null), []);
+});
+
+// --- sendFeedback / pendingAfterSend (FOC-1111 queued→delivered, duplicate) --
+
+// The server response is the source of truth; the model only classifies it.
+
+await test('sendFeedback confirmed -> delivered (the pane took the message)', () => {
+  eq(sendFeedback({ sent: true, confirmed: true, queued: false }), { kind: 'delivered', state: 'delivered' });
+});
+
+await test('sendFeedback queued -> queued (pasted behind a running turn)', () => {
+  eq(sendFeedback({ sent: true, confirmed: false, queued: true }), { kind: 'queued', state: 'queued' });
+});
+
+await test('sendFeedback plain sent -> sent (pasted, no confirmation yet)', () => {
+  eq(sendFeedback({ sent: true, confirmed: false, queued: false }), { kind: 'sent', state: 'sent' });
+});
+
+await test('sendFeedback duplicate -> duplicate with no line state', () => {
+  eq(sendFeedback({ sent: false, duplicate: true, queued: false }), { kind: 'duplicate', state: null });
+});
+
+await test('sendFeedback(null) / unrecognized shape -> honest sent fallback', () => {
+  eq(sendFeedback(null), { kind: 'sent', state: 'sent' });
+  eq(sendFeedback({}), { kind: 'sent', state: 'sent' });
+  eq(sendFeedback({ unexpected: true }), { kind: 'sent', state: 'sent' });
+});
+
+await test('pendingAfterSend moves the sent line to its response state', () => {
+  const prev = [
+    { id: 'a', text: 'earlier', state: 'queued' },
+    { id: 'b', text: 'mine', state: 'sent' },
+  ];
+  eq(pendingAfterSend(prev, { sent: true, confirmed: true, queued: false }, 'b'), [
+    { id: 'a', text: 'earlier', state: 'queued' },
+    { id: 'b', text: 'mine', state: 'delivered' },
+  ]);
+  eq(pendingAfterSend(prev, { sent: true, confirmed: false, queued: true }, 'b'), [
+    { id: 'a', text: 'earlier', state: 'queued' },
+    { id: 'b', text: 'mine', state: 'queued' },
+  ]);
+});
+
+await test('pendingAfterSend duplicate removes the line — never a second queued copy', () => {
+  const prev = [{ id: 'b', text: 'mine', state: 'sent' }];
+  eq(pendingAfterSend(prev, { sent: false, duplicate: true, queued: false }, 'b'), []);
+});
+
+await test('pendingAfterSend tolerates a null prev', () => {
+  eq(pendingAfterSend(null, { sent: true, confirmed: true, queued: false }, 'b'), []);
+  eq(pendingAfterSend(null, { sent: false, duplicate: true, queued: false }, 'b'), []);
+});
+
+await test('duplicateWarning duplicate -> the banner payload with the refused text; anything else -> null', () => {
+  eq(duplicateWarning({ sent: false, duplicate: true, queued: false }, 'same question'), {
+    text: 'Already queued — it will be delivered when the current turn ends.',
+    refused: 'same question',
+  });
+  eq(duplicateWarning({ sent: true, confirmed: true, queued: false }, 'x'), null);
+  eq(duplicateWarning(null, 'x'), null);
+});
+
+// --- dupWarnStillApplies (FOC-1111 UX round: the banner must not outlive
+// --- its truth) --------------------------------------------------------------
+// The banner claims "already queued" — a claim that goes FALSE the moment the
+// queued copy is delivered or the composer moves off the refused text.
+
+await test('dupWarnStillApplies keeps the banner while its copy is still queued', () => {
+  const warn = { text: 'Already queued — it will be delivered when the current turn ends.', refused: 'same question' };
+  const pending = [{ id: 'a', text: 'same question', state: 'queued' }];
+  eq(dupWarnStillApplies(warn, pending, 'same question'), true,
+    'copy pending, composer holds the refused text — the warning is still true');
+  eq(dupWarnStillApplies(warn, pending, '  same question  '), true,
+    'whitespace around the draft is the same message');
+});
+
+await test('dupWarnStillApplies clears the banner once the queued copy is delivered', () => {
+  const warn = { text: 'w', refused: 'same question' };
+  eq(dupWarnStillApplies(warn, [], 'same question'), false,
+    'the copy came off the pending list — "already queued" is now false');
+  eq(dupWarnStillApplies(warn, [{ id: 'b', text: 'other', state: 'queued' }], 'same question'), false,
+    'only a DIFFERENT text pending — the warned copy is gone');
+});
+
+await test('dupWarnStillApplies clears the banner when the draft moves away from the refused text', () => {
+  const warn = { text: 'w', refused: 'same question' };
+  const pending = [{ id: 'a', text: 'same question', state: 'queued' }];
+  eq(dupWarnStillApplies(warn, pending, 'a different question'), false);
+  eq(dupWarnStillApplies(warn, pending, ''), false, 'an emptied composer stops the warning');
+  eq(dupWarnStillApplies(warn, pending, undefined), false, 'no draft at all — no warning');
+});
+
+await test('dupWarnStillApplies is exact about identity: text A is not cleared by text B (and never the reverse)', () => {
+  const warnA = { text: 'w', refused: 'A' };
+  // B's copy delivered (B came off the list) while A's copy is still queued —
+  // the warning about A must survive B's delivery.
+  eq(dupWarnStillApplies(warnA, [{ id: 'a', text: 'A', state: 'queued' }], 'A'), true,
+    'only B was delivered; A is still queued');
+  // And symmetric: a warning about B is not kept by A's pending copy.
+  eq(dupWarnStillApplies({ text: 'w', refused: 'B' }, [{ id: 'a', text: 'A', state: 'queued' }], 'B'), false,
+    'the warned text has no pending copy — cleared despite A still queued');
+});
+
+await test('dupWarnStillApplies defensive shapes -> no warning', () => {
+  eq(dupWarnStillApplies(null, [{ id: 'a', text: 'x', state: 'queued' }], 'x'), false);
+  eq(dupWarnStillApplies({ text: 'w' }, [{ id: 'a', text: 'x', state: 'queued' }], 'x'), false,
+    'no refused identity — the rule cannot verify, so it does not warn');
+  eq(dupWarnStillApplies({ text: 'w', refused: 'x' }, null, 'x'), false,
+    'no pending list — nothing queued to warn about');
+});
+
+await test('pendingChip labels queued, delivered and the sent fallback', () => {
+  eq(pendingChip('queued'), 'queued — after the current turn');
+  eq(pendingChip('delivered'), 'delivered');
+  eq(pendingChip('sent'), 'sent — not confirmed yet');
+  eq(pendingChip(undefined), 'sent — not confirmed yet');
+});
+
+// --- pending-drop with a repeated text (FOC-1111 review F2) ------------------
+// The drop rule may only react to a delivery that happens AFTER the send: an
+// identical line delivered EARLIER in the session must never drop a queued
+// copy before it is delivered. Entries are uuid-keyed, so the send-time
+// snapshot of already-seen uuids is the "already there" marker — and the
+// send-time ts (sentAt) is the floor: the transcript is append-only and
+// server-stamped, so an entry stamped at or before sentAt existed before the
+// send even if the stale snapshot missed it (first page still loading, or the
+// 2 s poll mid-flight).
+
+const iso = (ms) => new Date(ms).toISOString();
+
+await test('newPendingEntry snapshots the uuids of same-text user entries at send time', () => {
+  const entries = [
+    { uuid: 'u1', role: 'user', text: 'same question', ts: iso(5_000) },
+    { uuid: 'u2', role: 'assistant', text: 'same question', ts: iso(6_000) }, // not a user line
+    { uuid: 'u3', role: 'user', text: 'other', ts: iso(7_000) },
+  ];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries, sentAt: 10_000 });
+  eq(p.id, 'p1');
+  eq(p.text, 'same question');
+  eq(p.state, 'sent');
+  eq(p.sentAt, 10_000, 'the send-time clock is carried for the ts floor');
+  eq([...p.seenUserUuids], ['u1'], 'only the earlier SAME-TEXT user line is pre-seen');
+});
+
+await test('dropDeliveredPending keeps a queued copy whose text was delivered EARLIER (F2)', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'same question', ts: iso(5_000) }];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries, sentAt: 10_000 });
+  // Any later entries update — the transcript re-read, unrelated lines — must
+  // NOT drop the line while only the pre-send copy exists.
+  eq(dropDeliveredPending([p], entries), [p], 'the earlier copy never drops the queued line');
+  eq(dropDeliveredPending([p], [...entries, { uuid: 'u9', role: 'assistant', text: 'same question', ts: iso(12_000) }]), [p],
+    'an assistant line with the same text is not a delivery');
+});
+
+await test('dropDeliveredPending drops on a NEW user entry with the text — the actual delivery', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'same question', ts: iso(5_000) }];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries, sentAt: 10_000 });
+  const delivered = [...entries, { uuid: 'u2', role: 'user', text: 'same question', ts: iso(12_000) }];
+  eq(dropDeliveredPending([p], delivered), [], 'the new uuid is the delivery — the line drops');
+});
+
+await test('dropDeliveredPending keeps the queued copy when a STALE snapshot missed a pre-send twin (F-todo)', () => {
+  // The composer is usable while the first transcript page is still loading or
+  // mid-poll, so the send-time snapshot can miss an identical line delivered
+  // just BEFORE the send. When it merges in later (uuid unseen), its ts is at
+  // or before sentAt — it is NOT this send's delivery and must not drop the
+  // queued copy; the copy's own entry (stamped after the send) does.
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries: [], sentAt: 10_000 });
+  const staleMerge = [{ uuid: 'u0', role: 'user', text: 'same question', ts: iso(10_000) }]; // delivered at the send instant
+  eq(dropDeliveredPending([p], staleMerge), [p], 'a pre-send twin (ts <= sentAt) never drops the line');
+  const delivered = [...staleMerge, { uuid: 'u2', role: 'user', text: 'same question', ts: iso(12_000) }];
+  eq(dropDeliveredPending([p], delivered), [], 'the queued copy itself (ts after the send) drops it');
+});
+
+await test('dropDeliveredPending treats a ts-less or unparseable-stamp entry as a new delivery (defensive)', () => {
+  const p = newPendingEntry({ id: 'p1', text: 'hi', entries: [], sentAt: 10_000 });
+  eq(dropDeliveredPending([p], [{ uuid: 'u1', role: 'user', text: 'hi' }]), [],
+    'no stamp: the uuid rule alone decides');
+  eq(dropDeliveredPending([p], [{ uuid: 'u1', role: 'user', text: 'hi', ts: 'not-a-date' }]), [],
+    'an unparseable stamp cannot prove the entry predates the send');
+  eq(dropDeliveredPending([p], [{ uuid: 'u1', role: 'user', text: 'hi', ts: iso(9_000) }]), [p],
+    'a parseable pre-send stamp is honored');
+});
+
+await test('dropDeliveredPending without sentAt falls back to the uuid-only rule (defensive)', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'hi' }];
+  const p = { id: 'p1', text: 'hi', state: 'sent', seenUserUuids: new Set(['u0']) };
+  eq(dropDeliveredPending([p], entries), [], 'an unseen uuid drops the line regardless of ts');
+  eq(dropDeliveredPending([p], [{ uuid: 'u0', role: 'user', text: 'hi' }]), [p],
+    'a pre-seen uuid never drops the line');
+});
+
+await test('dropDeliveredPending without a snapshot falls back to the text-only rule', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'hi' }];
+  eq(dropDeliveredPending([{ id: 'p1', text: 'hi', state: 'sent' }], entries), [],
+    'no snapshot: the old text-only rule applies');
+});
+
+await test('dropDeliveredPending tolerates null pending and null entries', () => {
+  eq(dropDeliveredPending(null, [{ uuid: 'u1', role: 'user', text: 'x' }]), []);
+  eq(dropDeliveredPending([newPendingEntry({ id: 'p', text: 'x', entries: [], sentAt: 10_000 })], null),
+    [newPendingEntry({ id: 'p', text: 'x', entries: [], sentAt: 10_000 })]);
 });
 
 // --- Summary ----------------------------------------------------------------

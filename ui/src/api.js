@@ -536,10 +536,13 @@ export async function getConversation({ after, limit, sessionId, taskKey } = {},
   return apiFetch(path + (qs ? '?' + qs : ''), signal);
 }
 
-// 200 { sent, confirmed, queued } | 400 { error } | 409 { error, notification }
-// | 503 { error }. err.data carries the body on failure. On success the body
-// may carry `output` — the on-screen result of /context or /cost, shown in the
-// chat as a command bubble. scope → POST /api/supervisor/sessions/:sid/message.
+// 200 { sent, confirmed, queued } | 200 duplicate refusal
+// { sent: false, duplicate: true, queued: false } (the same text is already
+// queued behind the running turn — nothing was pasted) | 400 { error }
+// | 409 { error, notification } | 503 { error }. err.data carries the body on
+// failure. On success the body may carry `output` — the on-screen result of
+// /context or /cost, shown in the chat as a command bubble.
+// scope → POST /api/supervisor/sessions/:sid/message.
 export function postSupervisorMessage(text, scope) {
   if (scope && scope.sessionId) {
     const body = { text };
