@@ -240,6 +240,32 @@ await test("attach_link egress screen blocks a secret-shaped URL, runner never c
   if (fake.calls.length !== 0) fail("runner called despite the screen");
 });
 
+// FOC-1075: the CLI's attach-link dedups by URL client-side now (the removed
+// attachmentLinkURL mutation did it server-side) and answers the skip in the
+// same `link attached (id=…)` shape with the existing id. The fake below
+// simulates that CLI contract; the CLI behaviour itself (the
+// attachmentCreate mutation shape and the dedup query) is pinned against the
+// real CLI + a stubbed transport in linear-ops.test.mjs. Here we prove the
+// wrapper surfaces both the create and the idempotent skip as plain ok:true.
+await test("attach_link through the wrapper: same URL twice is ok both times, the skip carries the existing id", async () => {
+  const attached = [];
+  const fake = fakeRunner({
+    default: (argv) => {
+      const url = argv[argv.indexOf("--url") + 1];
+      const id = attached.includes(url) ? "att-existing" : "att-new-1";
+      if (!attached.includes(url)) attached.push(url);
+      return { exitCode: 0, stdout: `FEN-1: link attached (id=${id})\n`, stderr: "" };
+    },
+  });
+  const server = createFenixLinearServer({ runOps: fake.run });
+  const args = { issue: "FOC-9", url: "https://github.com/org/repo/pull/123", title: "PR #123" };
+  const first = envelopeOf(await call(server, "attach_link", args));
+  const second = envelopeOf(await call(server, "attach_link", args));
+  if (first.ok !== true || second.ok !== true) fail("envelopes: " + JSON.stringify([first, second]));
+  if (first.output !== "FEN-1: link attached (id=att-new-1)") fail("create: " + first.output);
+  if (second.output !== "FEN-1: link attached (id=att-existing)") fail("skip must carry the existing id: " + second.output);
+});
+
 console.log("\nfenix-linear: input validation");
 
 await test("invalid issue 'foc-1' → invalid_input, runner not called", async () => {
