@@ -74,8 +74,28 @@ function allRows(store, sql) {
   return store.db.prepare(sql).all();
 }
 
+// Session-state seams the CLI children must never inherit from the host: this
+// suite pins only LA_AGENT_STATE_DB, so every other state seam the host
+// session may carry (the live supervisor run driving these tests) is stripped
+// first — a leaked LA_SUPERVISOR_CHILD/FENIX_STAGE flips namespaceFromEnv/
+// actorFromEnv, a leaked LA_SUPERVISOR_STATE_HOME/LA_STATE_ROOT redirects
+// agentStatePath away from the fixture db (FOC-1161).
+const HOST_SESSION_SEAMS = [
+  "LA_SUPERVISOR_RUN",
+  "LA_SUPERVISOR_CHILD",
+  "LA_TASK_OWNER",
+  "FENIX_STAGE",
+  "FENIX_SUPERVISOR_SESSION_ID",
+  "LA_SUPERVISOR_STATE_HOME",
+  "LA_STATE_ROOT",
+  "LA_DATA_HOME",
+  "LA_AGENT_STATE_NOW",
+];
+
 function cliEnv(dbPath, extra = {}) {
-  return { ...process.env, LA_AGENT_STATE_DB: dbPath, ...extra };
+  const env = { ...process.env };
+  for (const seam of HOST_SESSION_SEAMS) delete env[seam];
+  return { ...env, LA_AGENT_STATE_DB: dbPath, ...extra };
 }
 
 function runCliSync(args, env) {
@@ -1011,7 +1031,7 @@ test("runCli runs in-process against injected streams", async () => {
     const errOut = sinkStream();
     const code = await runCli(
       ["set", "--namespace", "supervisor:inproc", "--key", "k", "--value", "v", "--reason", "r", "--json"],
-      { env: { ...process.env, LA_AGENT_STATE_DB: dbPath }, stdout: out.stream, stderr: errOut.stream }
+      { env: cliEnv(dbPath), stdout: out.stream, stderr: errOut.stream }
     );
     assert.equal(code, 0);
     const ok = JSON.parse(out.text());
@@ -1023,7 +1043,7 @@ test("runCli runs in-process against injected streams", async () => {
     const refused = await runCli(
       ["set", "--namespace", "supervisor:inproc", "--key", "k2", "--value", "v", "--json"],
       {
-        env: { ...process.env, LA_AGENT_STATE_DB: dbPath },
+        env: cliEnv(dbPath),
         stdout: refusedOut.stream,
         stderr: refusedErr.stream,
       }

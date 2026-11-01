@@ -285,10 +285,15 @@ function makeFixture() {
 
   // Fixture-driven resolution must never reach the network, even on a machine
   // with a Linear key in its OS environment: strip the credential seams first.
+  // FOC-1161: the state seams this fixture does not own are pinned to the
+  // fixture root too — a host's live current-run.json pointer (read through
+  // LA_DATA_HOME, scoped by FENIX_SUPERVISOR_SESSION_ID) must never be
+  // resolved or adopted from a test.
   const env = { ...process.env };
   delete env.LINEAR_API_KEY;
   delete env.LINEAR_API_KEY_PISI;
   delete env.LINEAR_WORKSPACE;
+  delete env.FENIX_SUPERVISOR_SESSION_ID;
   Object.assign(env, {
     LA_SUPERVISOR_STATE_HOME: stateHome,
     LA_AGENT_STATE_DB: dbPath,
@@ -300,6 +305,8 @@ function makeFixture() {
     LA_SUPERVISOR_RUN: RUN,
     LA_SUPERVISOR_CHILD: "c1",
     LA_TASK_ID: "FOC-9",
+    LA_DATA_HOME: join(root, "data-home"),
+    LA_STATE_ROOT: join(root, "state-root"),
   });
 
   return { root, repo, stateHome, laRoot, sha, dbPath, registryFile, env };
