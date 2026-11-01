@@ -505,13 +505,21 @@ const readTaskClaims = (env = process.env) => {
 // conservatively true, so a queued row (pid still null) must be live:false
 // explicitly. A task key that does not resolve is "no claim we can prove",
 // never a guess.
-const claimFor = (taskId, ws, claims) => {
-  let taskKey = null;
+// The canonical taskKey for a board ticket id, from the SERVER's own
+// workspace — the same resolution the Start-preview identity (taskKeyOf) and
+// claimFor use (FOC-1110). A non-canonical id ("SUP:" pseudo ids, uuids,
+// prose) does not resolve: null, the same tolerance claimFor applies, never a
+// guess.
+const taskKeyFor = (taskId, ws) => {
   try {
-    taskKey = resolveTaskKey({ workspace: ws, issueId: taskId });
+    return resolveTaskKey({ workspace: ws, issueId: taskId });
   } catch {
-    taskKey = null;
+    return null;
   }
+};
+
+const claimFor = (taskId, ws, claims) => {
+  const taskKey = taskKeyFor(taskId, ws);
   const row = taskKey ? claims.get(taskKey) : undefined;
   if (!row) return null;
   return {
@@ -571,8 +579,12 @@ export async function handleWorkRoute(req, res, url, ctx) {
     });
     // FOC-902 §E: attach each ticket's lease (the task-sessions store's active
     // owner) — read-only, degraded to null claims when the store is absent.
+    // FOC-1110: the SERVER-derived canonical taskKey rides next to it, so the
+    // card and the panel can link the ticket's cockpit; the UI never promotes
+    // an identifier into a cockpit key itself.
     const claims = readTaskClaims();
     for (const ticket of Array.isArray(payload?.tickets) ? payload.tickets : []) {
+      ticket.taskKey = taskKeyFor(ticket.taskId, workspace);
       ticket.claimedBy = claimFor(ticket.taskId, workspace, claims);
     }
     json(res, 200, payload);

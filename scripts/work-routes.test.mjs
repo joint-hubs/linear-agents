@@ -430,6 +430,19 @@ try {
     check("board WORK-3 has no claimedBy (no store row)",
       boardFirstWork3?.claimedBy === null,
       JSON.stringify(boardFirstWork3?.claimedBy));
+    // FOC-1110: the board payload carries the SERVER-derived canonical taskKey
+    // (the same resolveTaskKey the Start-preview identity uses) so the card
+    // and the panel can link the ticket's cockpit — the UI never promotes an
+    // identifier into a cockpit key itself.
+    check("board WORK-1 taskKey: server-derived jointhubs:WORK-1",
+      boardFirstWork1?.taskKey === "jointhubs:WORK-1",
+      JSON.stringify(boardFirstWork1?.taskKey));
+    check("board WORK-2 taskKey: server-derived jointhubs:WORK-2",
+      boardFirstWork2?.taskKey === "jointhubs:WORK-2",
+      JSON.stringify(boardFirstWork2?.taskKey));
+    check("board WORK-3 taskKey: server-derived jointhubs:WORK-3 (claim not required)",
+      boardFirstWork3?.taskKey === "jointhubs:WORK-3",
+      JSON.stringify(boardFirstWork3?.taskKey));
 
     // The FIRST /api/costs request: the snapshot child has not run yet — the
     // route answers "computing" with null numbers immediately, never a
