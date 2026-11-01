@@ -346,6 +346,15 @@ export function createHost(deps = {}) {
           "set-environment", "-g", "LA_TASK_KEY", env.LA_TASK_KEY ?? "", ";",
           "set-environment", "-g", "LA_TASK_ID", env.LA_TASK_ID ?? "", ";",
           "set-environment", "-g", "LA_SUPERVISOR_SESSION_HOME", env.LA_SUPERVISOR_SESSION_HOME ?? "", ";",
+          // FOC-1088: the session's own worktree, when its controller carries
+          // one. "Global" here is per-SERVER: tmuxIdentity derives a dedicated
+          // socket (fenix-<sessionId>) per managed session, so each session's
+          // server — and therefore each pane's inheritance — is that session's
+          // own; two concurrent sessions can never see each other's value.
+          // The legacy (unscoped) host keeps today's behaviour exactly.
+          ...(env.FENIX_REPO_DIR
+            ? ["set-environment", "-g", "FENIX_REPO_DIR", env.FENIX_REPO_DIR, ";"]
+            : []),
         ]
       : [];
     // FOC-1080: Claude Code's prompt suggestion (grey ghost text on the empty

@@ -2137,6 +2137,87 @@ function withOwnership(gitRoot, result, ownerId) {
   };
 }
 
+// ── repository / start-point resolution (FOC-1088) ───────────────────────────
+//
+// The DEV-child path used to resolve these inline in supervisor-spawn.mjs.
+// The task-session host needs the SAME semantics for its per-task worktree
+// lane, so the resolution lives here — one resolver, two callers, no fork.
+
+/**
+ * Resolve which repository a worker should work in, from an ordered candidate
+ * list: first success through `resolveRoot` wins; every failure is collected
+ * into the thrown error's `tried` list so the refusal names what was
+ * considered. A candidate marked `explicit` (supervisor-spawn's `--repo`, the
+ * host lane's `deps.repo`) that is not a repo is an ERROR, never an
+ * invitation to try the next candidate — the FOC-172 lesson: an explicit
+ * answer that is wrong must fail, not silently fall through to some other
+ * checkout.
+ *
+ * @param {Array<{ value: unknown, from: string, explicit?: boolean }>} candidates
+ * @param {{ resolveRoot?: (cwd: string) => string }} [options]
+ * @returns {{ gitRoot: string, from: string }}
+ */
+export function resolveRepoFromCandidates(candidates, { resolveRoot = resolveGitRoot } = {}) {
+  const tried = [];
+  for (const candidate of candidates) {
+    if (!candidate || !candidate.value || candidate.value === true) continue;
+    try {
+      return { gitRoot: resolveRoot(candidate.value), from: candidate.from };
+    } catch (err) {
+      const firstLine = String(err?.message ?? err).split("\n")[0];
+      if (candidate.explicit) {
+        throw new Error(`${candidate.from} ${candidate.value} is not inside a git repository: ${firstLine}`);
+      }
+      tried.push(`${candidate.from}: ${candidate.value} — ${firstLine}`);
+    }
+  }
+  const err = new Error(
+    "could not determine which repository to work in — none of the candidates is a git repo",
+  );
+  err.tried = tried;
+  throw err;
+}
+
+/**
+ * Resolve the commit a NEW task-session branch starts at. An explicit
+ * `candidate` ref must resolve to exactly one commit (a tree or blob is not a
+ * start point); without one the origin default branch is the base — the same
+ * deterministic base for every session of the repo, so two sessions never
+ * diverge by whoever happened to start later. Both failures are fail-closed:
+ * an unresolved start point never falls back to some checkout's current HEAD.
+ *
+ * @param {{ gitRoot: string, candidate?: string | null }} args
+ * @returns {string} the resolved commit sha
+ */
+export function resolveBranchStartPoint({ gitRoot, candidate = null }) {
+  if (candidate != null && String(candidate).trim() !== "") {
+    const wanted = String(candidate).trim();
+    try {
+      return git(["rev-parse", "--verify", "--quiet", `${wanted}^{commit}`], gitRoot);
+    } catch {
+      throw new Error(
+        `start point '${wanted}' does not resolve to a commit in ${gitRoot} — refusing to start from an unresolved base`,
+      );
+    }
+  }
+  let ref;
+  try {
+    ref = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], gitRoot);
+  } catch (err) {
+    throw new Error(
+      `no origin default branch in ${gitRoot} (git symbolic-ref refs/remotes/origin/HEAD failed: ${String(err?.message ?? err).split("\n")[0]}) — ` +
+        `set it with \`git remote set-head origin -a\`, or pass an explicit start point; refusing to guess a base`,
+    );
+  }
+  try {
+    return git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], gitRoot);
+  } catch (err) {
+    throw new Error(
+      `origin default branch '${ref}' does not resolve to a commit in ${gitRoot} (${String(err?.message ?? err).split("\n")[0]}) — refusing to start from an unresolved base`,
+    );
+  }
+}
+
 // Reported after a kill so Mateusz can see what the child left behind. Never
 // acted on: cleanup is his call, and an auto-reset would destroy the only copy
 // of work a crashed child had not committed.

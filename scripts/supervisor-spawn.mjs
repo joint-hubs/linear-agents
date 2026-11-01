@@ -80,7 +80,7 @@ import {
   pinnedStatePrologue,
   readJsonOr,
   readRegistry,
-  resolveGitRoot,
+  resolveRepoFromCandidates,
   runDir,
   teeAbsPath,
   teeRelPath,
@@ -442,39 +442,30 @@ assertStageBudget(runId, squad, { graph: (() => {
 // --repo at a non-repo and expects a refusal: the fallback quietly reached
 // process.cwd(), found linear-agents, and started a child there. The exact
 // failure this whole change exists to remove.
-if (args.repo && args.repo !== true) {
-  try {
-    resolveGitRoot(args.repo);
-  } catch (err) {
-    failJson(`--repo ${args.repo} is not inside a git repository: ${err.message.split("\n")[0]}`);
-  }
-}
-
-const repoCandidates = [
-  { value: args.repo, from: "--repo" },
-  { value: process.env.LA_SUPERVISOR_REPO, from: "LA_SUPERVISOR_REPO (bin/supervisor.bat)" },
-  { value: process.cwd(), from: "current directory" },
-].filter((c) => c.value && c.value !== true);
-
+//
+// FOC-1088: the candidate loop is extracted (resolveRepoFromCandidates in
+// supervisor-lib.mjs) so the task-session host's worktree lane resolves its
+// repository with the SAME rules instead of a second resolver that could
+// drift. The explicit-fail-fast and first-success-wins semantics live there.
 let gitRoot;
 let repoFrom;
-const repoErrors = [];
-for (const candidate of repoCandidates) {
-  try {
-    gitRoot = resolveGitRoot(candidate.value);
-    repoFrom = candidate.from;
-    break;
-  } catch (err) {
-    repoErrors.push(`${candidate.from}: ${candidate.value} — ${err.message.split("\n")[0]}`);
-  }
-}
-if (!gitRoot) {
+try {
+  const resolved = resolveRepoFromCandidates([
+    { value: args.repo, from: "--repo", explicit: true },
+    { value: process.env.LA_SUPERVISOR_REPO, from: "LA_SUPERVISOR_REPO (bin/supervisor.bat)" },
+    { value: process.cwd(), from: "current directory" },
+  ]);
+  gitRoot = resolved.gitRoot;
+  repoFrom = resolved.from;
+} catch (err) {
   failJson(
-    "could not determine which repository this child should work in — none of the candidates is a git repo",
-    {
-      tried: repoErrors,
-      hint: "pass --repo <path>, or launch bin/supervisor.bat from the repo the task belongs to",
-    },
+    err.message,
+    Array.isArray(err.tried)
+      ? {
+          tried: err.tried,
+          hint: "pass --repo <path>, or launch bin/supervisor.bat from the repo the task belongs to",
+        }
+      : {},
   );
 }
 // Every spawn is a NEW attempt and owns its branch: the managed branch name

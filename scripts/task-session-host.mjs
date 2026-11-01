@@ -81,9 +81,20 @@ import { readTaskSessionsSettings, normalizeAutoPickup } from "./fenix-settings.
 import { repoRefName } from "./fenix-projects.mjs";
 import { startText } from "./work-board.mjs";
 import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
+import { buildBranchName } from "./dev-branch.mjs";
+import { releaseClaim as realReleaseClaim } from "./workspace-claims.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const platform = process.platform;
+
+// supervisor-lib loads lazily (its static load costs ~160 ms and only the
+// stop path and the FOC-1088 worktree lane need it), shared by every caller
+// in this module — one module-level promise memo.
+let libRef = null;
+const loadLib = async () => {
+  if (!libRef) libRef = await import("./supervisor-lib.mjs");
+  return libRef;
+};
 
 // FOC-902 §D: when the task-ownership helper exists (branch
 // fenix-task-ownership), its checkOwnership decides the pickup owner scope;
@@ -113,6 +124,99 @@ export function sessionHomePath(env, sessionId) {
     );
   }
   return join(dataHome(env, platform), "supervisor", "sessions", sessionId);
+}
+
+// ── FOC-1088: per-task workspaces ────────────────────────────────────────────
+
+// The issue identifier a task-session branch is derived from must already be
+// in the TEAM-NUM shape before buildBranchName sees it: dev-branch's parser
+// process.exit()s on a malformed identifier, and a host must fail ONE session,
+// never kill itself.
+const TASK_IDENTIFIER_RE = /^[A-Za-z]+-\d+$/;
+
+/**
+ * The per-task branch a managed session works on, derived DETERMINISTICALLY
+ * from the task — buildBranchName's shape (`<team>-<n>-<slug>`) with the fixed
+ * slug "task" (FOC-1088 → foc-1088-task). The session id NEVER appears in the
+ * name: a stopped session's next generation (resume) carries a new session id
+ * but the SAME task, so it must resolve to the SAME branch — and therefore the
+ * same worktree — to continue its predecessor's state.
+ */
+export function sessionBranchFor(record) {
+  const issueId = String(record?.issueId ?? "");
+  if (!TASK_IDENTIFIER_RE.test(issueId)) {
+    throw new Error(
+      `issueId '${issueId}' is not a TEAM-NUM identifier — refusing to derive a task-session branch from it`,
+    );
+  }
+  return buildBranchName(issueId, "task");
+}
+
+/**
+ * The real FOC-1088 workspace lane: resolve the task's repository, ensure a
+ * per-task worktree on a task-derived branch, claim it in the workspace-claims
+ * registry, and hand the worktree path back for the controller env.
+ *
+ * `loadLib` is the host's lazy supervisor-lib loader — the lane only runs when
+ * the operator turned it on, so the git helpers load on first use, not at
+ * module import.
+ *
+ * @param {{ repo?: string|null, env: object, loadLib: () => Promise<object> }} args
+ */
+function createRealSessionWorkspace({ repo = null, env, loadLib }) {
+  let resolvedGitRoot = null;
+  const resolveGitRootOnce = async () => {
+    if (resolvedGitRoot) return resolvedGitRoot;
+    const lib = await loadLib();
+    // The DEV-child spawn's candidate semantics (resolveRepoFromCandidates):
+    // an explicit repo fails loudly when it is not one; the first resolvable
+    // candidate wins; all-fail fails with the tried list. process.cwd() is
+    // deliberately NOT a candidate: the host runs from the fenix stack
+    // checkout, never the task's repository — a cwd fallback would silently
+    // pick the wrong repository (the FOC-172 bug class).
+    const resolved = lib.resolveRepoFromCandidates(
+      [
+        repo ? { value: repo, from: "deps.repo", explicit: true } : null,
+        env.FENIX_REPO_DIR ? { value: env.FENIX_REPO_DIR, from: "FENIX_REPO_DIR" } : null,
+        env.LA_SUPERVISOR_REPO ? { value: env.LA_SUPERVISOR_REPO, from: "LA_SUPERVISOR_REPO" } : null,
+      ].filter(Boolean),
+    );
+    resolvedGitRoot = resolved.gitRoot;
+    return resolvedGitRoot;
+  };
+  return {
+    async ensure(record) {
+      const lib = await loadLib();
+      const gitRoot = await resolveGitRootOnce();
+      const branch = sessionBranchFor(record);
+      // The claim owner is the TASK, not the session: a resumed generation
+      // carries a new session id but the same task, and must re-claim its own
+      // branch as the SAME owner — a session-scoped owner would turn every
+      // resume into a claim conflict.
+      const ownerId = `task-session:${record.taskKey}`;
+      // ensureWorktree enforces the start point on reuse as well as creation,
+      // but a resumed tree stands at the PREVIOUS generation's HEAD — exactly
+      // the state a resume must continue from. So the start point (the origin
+      // default branch, the one deterministic base every session of the repo
+      // shares) is resolved and pinned only when the branch has no worktree
+      // yet; an existing tree is reused as it stands.
+      const existing = lib.listWorktrees(gitRoot).find((w) => w.branch === branch);
+      const startPoint = existing ? null : lib.resolveBranchStartPoint({ gitRoot, candidate: null });
+      const ensured = lib.ensureWorktree(gitRoot, branch, startPoint, { ownerId });
+      return { gitRoot, branch, worktree: ensured.worktree, ownerId, startPoint };
+    },
+    release(record) {
+      // Without a resolved repository nothing can have been claimed; a branch
+      // that cannot be derived could not have been claimed either (ensure
+      // fails the same way), so re-deriving here cannot miss a live claim.
+      if (!resolvedGitRoot) return { ok: true, released: false, claim: null };
+      return realReleaseClaim({
+        gitRoot: resolvedGitRoot,
+        branch: sessionBranchFor(record),
+        ownerId: `task-session:${record.taskKey}`,
+      });
+    },
+  };
 }
 
 // ── durable initial prompt ───────────────────────────────────────────────────
@@ -257,12 +361,20 @@ export function createTaskSessionHost(deps = {}) {
         throw err;
       }
       const sessionHome = sessionHomePath(baseEnv, sessionId);
+      // FOC-1088: the session's workspace is derived ONCE (memoized in
+      // `workspaces`) and its worktree path becomes this controller's
+      // FENIX_REPO_DIR — the entrypoint's supervisor-run branch resolves
+      // LA_SUPERVISOR_REPO from it and cds there before starting claude. A
+      // resolution failure throws: startSession marks the session `waiting`
+      // naming the reason; there is no fallback to a shared checkout.
+      const workspace = sessionWorkspace ? await ensureWorkspace(sessionId, record) : null;
       const env = {
         ...baseEnv,
         FENIX_SUPERVISOR_SESSION_ID: sessionId,
         LA_TASK_KEY: record.taskKey,
         LA_TASK_ID: record.taskId,
         LA_SUPERVISOR_SESSION_HOME: sessionHome,
+        ...(workspace ? { FENIX_REPO_DIR: workspace.worktree } : {}),
       };
       const controllerDeps = typeof deps.controllerDeps === "function"
         ? (deps.controllerDeps(sessionId) ?? {})
@@ -275,6 +387,43 @@ export function createTaskSessionHost(deps = {}) {
     creating.set(sessionId, promise);
     return promise;
   }
+
+  // The FOC-1088 lane itself. deps.sessionWorkspace replaces it wholesale
+  // ({ ensure(record), release(record) }) for tests and embedders; `null`
+  // disables it explicitly. Undefined → the real lane, active only when the
+  // operator turned it on with FENIX_TASK_WORKTREES=1 — opt-in like
+  // auto-pickup: a host that cannot resolve a repository must fail sessions
+  // closed, never silently keep the shared-checkout behaviour.
+  const sessionWorkspace = deps.sessionWorkspace !== undefined
+    ? deps.sessionWorkspace
+    : baseEnv.FENIX_TASK_WORKTREES === "1"
+      ? createRealSessionWorkspace({ repo: deps.repo ?? null, env: baseEnv, loadLib })
+      : null;
+  const workspaces = new Map(); // sessionId → lane ensure() result, derived once per session
+  const ensureWorkspace = async (sessionId, record) => {
+    const known = workspaces.get(sessionId);
+    if (known) return known;
+    const resolved = await sessionWorkspace.ensure(record);
+    workspaces.set(sessionId, resolved);
+    return resolved;
+  };
+  // Release the claim — NEVER the tree (nothing in this runtime auto-removes a
+  // worktree; cleanup is an operator decision). Called on the paths that end a
+  // session's ownership: stop (including its queued and terminal early
+  // returns) and failed starts. A `waiting` session KEEPS its claim — the
+  // generation continues after recovery (re-ensure, resume) in the same tree.
+  // A failed release, like a session that crashes mid-flight, leaves the claim
+  // in the registry naming its owner; recovery is always explicit.
+  const releaseWorkspace = (record) => {
+    if (!sessionWorkspace) return;
+    try {
+      sessionWorkspace.release(record);
+    } catch (err) {
+      console.error(
+        `task-session-host: could not release the workspace claim of ${record?.taskKey ?? record?.sessionId}: ${err?.message ?? err}`,
+      );
+    }
+  };
 
   const managedSessionCount = () => store.list().length;
 
@@ -543,6 +692,9 @@ export function createTaskSessionHost(deps = {}) {
               ? "no durable initial prompt on record; delivery cannot be proven undelivered — refusing to start or resend"
               : `initial prompt already '${pending.state}'; refusing to redeliver — re-attach via POST /sessions/:id/session and deliver manually`,
           });
+          // A failed start releases the cap slot — it releases the workspace
+          // claim with it (usually a no-op: a queued session never claimed).
+          releaseWorkspace(claimed);
           continue;
         }
         void startSessionTracked(claimed, resume ? { resume: true } : pending);
@@ -600,8 +752,12 @@ export function createTaskSessionHost(deps = {}) {
         lastError: null,
       });
     } catch (err) {
+      // A failed start no longer owns a live run: release the workspace claim
+      // (the tree stays on disk — a later generation of the same task
+      // re-claims the same branch deterministically) and surface the reason.
+      releaseWorkspace(record);
       try {
-        store.update(sessionId, { status: "waiting", lastError: "start failed; capacity reserved until scoped stop or recovery" });
+        store.update(sessionId, { status: "waiting", lastError: `start failed (${err?.message ?? err}); capacity reserved until scoped stop or recovery` });
       } catch {
         /* store gone — nothing more we can do */
       }
@@ -623,7 +779,19 @@ export function createTaskSessionHost(deps = {}) {
     const active = store.list({ includeTerminal: false });
     for (const rec of active) {
       if (rec.status === 'queued') continue;
-      const ctl = await controllerFor(rec.sessionId);
+      let ctl;
+      try {
+        ctl = await controllerFor(rec.sessionId);
+      } catch (err) {
+        // FOC-1088: a workspace that cannot be re-ensured after a restart
+        // (repository gone, claim held) must not crash the whole reconcile
+        // pass — surface the reason on the record; capacity stays reserved
+        // until an operator resolves it.
+        try {
+          store.update(rec.sessionId, { status: 'waiting', lastError: `workspace unavailable: ${err?.message ?? err}` });
+        } catch { /* record gone */ }
+        continue;
+      }
       const state = ctl.host.getState();
       const observation = processIdentity(rec.pid);
       const same = state.panePid === rec.pid && !state.paneDead && matchesProcess(rec, observation);
@@ -644,14 +812,8 @@ export function createTaskSessionHost(deps = {}) {
   }
 
   // ── stop: THIS tmux session and THIS run's children only ──────────────────
-  // The live-children enumeration imports supervisor-lib lazily; the default
-  // stopChild shells out to the EXISTING per-child CLI (graceful → force,
-  // marks the child stopped before the kill, never cleans the worktree).
-  let libRef = null;
-  const loadLib = async () => {
-    if (!libRef) libRef = await import("./supervisor-lib.mjs");
-    return libRef;
-  };
+  // The default stopChild shells out to the EXISTING per-child CLI (graceful →
+  // force, marks the child stopped before the kill, never cleans the worktree).
 
   async function stopSession(record) {
     const sessionId = record.sessionId;
@@ -659,8 +821,15 @@ export function createTaskSessionHost(deps = {}) {
     try {
       await startById.get(sessionId);
       record = store.get(sessionId);
-      if (TERMINAL_STATUSES.includes(record.status)) return { stopped: true, runId: record.runId, children: [] };
+      if (TERMINAL_STATUSES.includes(record.status)) {
+        releaseWorkspace(record);
+        return { stopped: true, runId: record.runId, children: [] };
+      }
       if (record.status === 'queued') {
+        // A queued session never started, so its claim (if any) was released
+        // earlier; the release here is the idempotent no-op that keeps that
+        // invariant true regardless of ordering.
+        releaseWorkspace(record);
         store.update(sessionId, { status: 'stopped', lastError: null });
         return { stopped: true, runId: record.runId, children: [] };
       }
@@ -696,7 +865,15 @@ export function createTaskSessionHost(deps = {}) {
       }
       results.stopped = results.tmux?.ok === true && !results.registryError && results.children.every(c => c.ok);
       store.update(sessionId, { status: results.stopped ? 'stopped' : 'waiting', lastError: results.stopped ? null : 'stop incomplete; capacity remains reserved' });
-      if (results.stopped) { controllers.delete(sessionId); uncertain.delete(sessionId); }
+      if (results.stopped) {
+        // Full success ends this generation's ownership: drop the controller,
+        // forget the memoized workspace (the next generation must re-ensure
+        // and re-claim its branch), and release the claim — the tree stays.
+        controllers.delete(sessionId);
+        workspaces.delete(sessionId);
+        uncertain.delete(sessionId);
+        releaseWorkspace(record);
+      }
       return results;
     } finally { stopping.delete(sessionId); }
   }

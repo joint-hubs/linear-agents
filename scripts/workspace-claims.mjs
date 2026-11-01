@@ -3,6 +3,7 @@
 //
 //   node scripts/workspace-claims.mjs claim --git-root <dir> --branch <b> --worktree <w> --owner <id>
 //   node scripts/workspace-claims.mjs read --git-root <dir>
+//   node scripts/workspace-claims.mjs release --git-root <dir> --branch <b> --owner <id>
 //   node scripts/workspace-claims.mjs recover --git-root <dir> --force
 //
 // WHY (P1 resource ownership). ensureWorktree reuses any existing worktree for
@@ -485,6 +486,49 @@ export function claimWorkspace({ gitRoot, branch, worktree, ownerId, baseRevisio
   });
 }
 
+/**
+ * Release a claim (FOC-1088). The task-session host releases a session's
+ * workspace claim when the session reaches a state that no longer owns a live
+ * run (stopped, terminal, a failed start) — the WORKTREE itself is never
+ * touched here: nothing in this runtime auto-removes a tree, cleanup stays an
+ * operator decision.
+ *
+ * Same discipline as claimWorkspace: the whole read-check-write runs under
+ * the repo-wide integration lock, the registry is read through the
+ * fail-closed validated path, and a claim held by ANOTHER owner is a hard
+ * refusal — claims are never stolen or released on someone's behalf. A
+ * missing claim (never claimed, or already released) is an idempotent no-op,
+ * not an error: stop paths must not fail because there is nothing to release.
+ *
+ * @returns {{ ok: true, released: boolean, claim: object|null }}
+ */
+export function releaseClaim({ gitRoot, branch, ownerId }) {
+  if (!gitRoot) throw new Error("releaseClaim: gitRoot is required");
+  if (typeof branch !== "string" || !branch.trim()) throw new Error("releaseClaim: branch must be a non-empty string");
+  if (typeof ownerId !== "string" || !ownerId.trim()) throw new Error("releaseClaim: ownerId must be a non-empty string");
+
+  const commonDir = commonGitDir(gitRoot);
+  return withIntegrationLock(gitRoot, ownerId, () => {
+    const path = claimsPathFor(commonDir);
+    if (!existsSync(path)) return { ok: true, released: false, claim: null };
+    const store = readClaimsStore(path, commonDir);
+    const idx = store.claims.findIndex((c) => c.branch === branch);
+    if (idx === -1) return { ok: true, released: false, claim: null };
+    const claim = store.claims[idx];
+    if (claim.ownerId !== ownerId) {
+      throw conflict(
+        `branch ${branch} is claimed by owner "${claim.ownerId}" (${claim.worktree}, claimed ${claim.claimedAt}) — ` +
+          `owner "${ownerId}" cannot release it. Claims are never stolen or released on someone's behalf: ` +
+          `only the owning owner releases (or recovery is an explicit human decision).`,
+        { branch, ownerId, claimedBy: claim.ownerId, claimedWorktree: claim.worktree, claimedAt: claim.claimedAt },
+      );
+    }
+    store.claims.splice(idx, 1);
+    atomicWriteJSON(path, store);
+    return { ok: true, released: true, claim };
+  });
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 // A local minimal parser (same flag semantics as supervisor-lib's parseArgs)
@@ -546,6 +590,17 @@ function main() {
     }
     return;
   }
+  if (command === "release") {
+    if (!gitRoot) failJson("release: --git-root <dir> is required");
+    if (!args.branch) failJson("release: --branch <name> is required");
+    if (!args.owner) failJson("release: --owner <id> is required");
+    try {
+      console.log(JSON.stringify(releaseClaim({ gitRoot, branch: args.branch, ownerId: args.owner }), null, 2));
+    } catch (err) {
+      failJson(err.message, { ...(err.conflict ?? {}), code: err.code ?? null });
+    }
+    return;
+  }
   if (command === "recover") {
     if (!gitRoot) failJson("recover: --git-root <dir> is required");
     if (args.force !== true) {
@@ -566,7 +621,7 @@ function main() {
     return;
   }
   failJson(
-    `unknown command: ${JSON.stringify(command ?? "")} — known commands: claim, read, recover`,
+    `unknown command: ${JSON.stringify(command ?? "")} — known commands: claim, read, release, recover`,
     { usage: "node scripts/workspace-claims.mjs claim --git-root <dir> --branch <b> --worktree <w> --owner <id>" },
   );
 }
