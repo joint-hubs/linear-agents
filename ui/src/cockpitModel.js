@@ -493,11 +493,39 @@ export function pendingAfterSend(prev, res, id) {
   return lines.map((p) => (p.id === id ? { ...p, state: fb.state } : p));
 }
 
-// duplicateWarning(res) -> the banner payload for a duplicate-send response,
-// null for anything else.
-export function duplicateWarning(res) {
+// duplicateWarning(res, refusedText) -> the banner payload for a
+// duplicate-send response, null for anything else. `refused` carries the
+// refused text — the warning's identity: the banner must stop claiming
+// "already queued" once that queued copy is delivered or the composer moves
+// off the text (see dupWarnStillApplies).
+export function duplicateWarning(res, refusedText) {
   if (!res || !res.duplicate) return null;
-  return { text: 'Already queued — it will be delivered when the current turn ends.' };
+  return {
+    text: 'Already queued — it will be delivered when the current turn ends.',
+    refused: typeof refusedText === 'string' ? refusedText : null,
+  };
+}
+
+// dupWarnStillApplies(dupWarn, pending, draft) -> whether the duplicate-send
+// banner still tells the truth. It is a receipt for a REFUSED send: the
+// server did not paste the text because an identical copy is already queued
+// behind the running turn — so the warning applies only while
+// - a pending line with that exact text still exists (the queued copy has
+//   not been delivered / dropped yet — once it is, "already queued" would
+//   claim something false), and
+// - the composer still holds exactly that text (trimmed; the human may edit
+//   away, and a warning about a message they are no longer sending is noise).
+// The identity is the refused text, not the refused send's pending-line id —
+// that line is removed on the refusal itself (pendingAfterSend), so it cannot
+// anchor the rule; the queued copy it refers to is only identifiable by its
+// text. A different send clears the banner outright in the send path; the
+// composer text is NOT auto-cleared here — only the warning stops.
+export function dupWarnStillApplies(dupWarn, pending, draft) {
+  const refused = dupWarn && typeof dupWarn.refused === 'string' ? dupWarn.refused : null;
+  if (refused == null) return false;
+  const copyStillPending = (pending || []).some((p) => p && p.text === refused);
+  if (!copyStillPending) return false;
+  return typeof draft === 'string' && draft.trim() === refused;
 }
 
 // pendingChip(state) -> the chip label of a pending chat line.

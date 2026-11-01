@@ -19,6 +19,7 @@ import {
   chatDisabledReason,
   CONVERSATION_LIMIT,
   dropDeliveredPending,
+  dupWarnStillApplies,
   duplicateWarning,
   mergeConversation,
   newPendingEntry,
@@ -75,7 +76,7 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
   const [truncated, setTruncated] = useState(false); // older history exists
   const [pending, setPending] = useState([]); // [{ id, text, state: sent|queued|delivered }]
   const [sendError, setSendError] = useState(null); // { text, notification? }
-  const [dupWarn, setDupWarn] = useState(null); // { text } — the duplicate-send banner (FOC-1111)
+  const [dupWarn, setDupWarn] = useState(null); // { text, refused } — the duplicate-send banner (FOC-1111)
   const [busy, setBusy] = useState(false);
 
   const offsetRef = useRef(0);
@@ -171,6 +172,16 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
     setPending((ps) => dropDeliveredPending(ps, entries));
   }, [entries]);
 
+  // The duplicate banner is the refused send's receipt: it stays up only
+  // while its queued copy is still on the pending list and the composer
+  // still holds the refused text. When either stops holding — the copy
+  // delivered (pruned above) or the draft edited away — the warning stops;
+  // the composer text itself is never auto-cleared (the human may still
+  // want to resend it).
+  useEffect(() => {
+    setDupWarn((w) => (w && dupWarnStillApplies(w, pending, draft) ? w : null));
+  }, [pending, draft]);
+
   // Keep the newest entries in view.
   useEffect(() => {
     const el = scrollRef.current;
@@ -221,7 +232,7 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
       // duplicate → the text was NOT pasted again (the line comes off, the
       // text stays in the composer and the warning banner explains why).
       setPending((ps) => pendingAfterSend(ps, res, id));
-      const warn = duplicateWarning(res);
+      const warn = duplicateWarning(res, text);
       if (warn) onDraftChange(text); // nothing typed is lost on a refused send
       setDupWarn(warn);
     } catch (e) {
@@ -303,7 +314,7 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
         </div>
       )}
 
-      {dupWarn && (
+      {dupWarn && dupWarnStillApplies(dupWarn, pending, draft) && (
         <div className="banner banner-warn" style={{ marginTop: 8 }}>
           <div>{dupWarn.text}</div>
         </div>

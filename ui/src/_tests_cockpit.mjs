@@ -14,9 +14,10 @@
 // FOC-810), the inbox list shapers (inboxQuestionLines / inboxFactLines —
 // the generic lists render strings only; the ask category never leaks its
 // question objects into a <li>, React error #31) and the chat send feedback
-// (sendFeedback / pendingAfterSend / duplicateWarning / pendingChip — the
-// queued→delivered classification off the server response and the
-// duplicate-send warning, FOC-1111). Fixtures only — no network, no DOM.
+// (sendFeedback / pendingAfterSend / duplicateWarning / dupWarnStillApplies /
+// pendingChip — the queued→delivered classification off the server response
+// and the duplicate-send warning with its truth window, FOC-1111). Fixtures
+// only — no network, no DOM.
 
 import assert from 'node:assert/strict';
 
@@ -45,6 +46,7 @@ import {
   sendFeedback,
   pendingAfterSend,
   duplicateWarning,
+  dupWarnStillApplies,
   pendingChip,
   newPendingEntry,
   dropDeliveredPending,
@@ -979,12 +981,62 @@ await test('pendingAfterSend tolerates a null prev', () => {
   eq(pendingAfterSend(null, { sent: false, duplicate: true, queued: false }, 'b'), []);
 });
 
-await test('duplicateWarning duplicate -> the banner payload; anything else -> null', () => {
-  eq(duplicateWarning({ sent: false, duplicate: true, queued: false }), {
+await test('duplicateWarning duplicate -> the banner payload with the refused text; anything else -> null', () => {
+  eq(duplicateWarning({ sent: false, duplicate: true, queued: false }, 'same question'), {
     text: 'Already queued — it will be delivered when the current turn ends.',
+    refused: 'same question',
   });
-  eq(duplicateWarning({ sent: true, confirmed: true, queued: false }), null);
-  eq(duplicateWarning(null), null);
+  eq(duplicateWarning({ sent: true, confirmed: true, queued: false }, 'x'), null);
+  eq(duplicateWarning(null, 'x'), null);
+});
+
+// --- dupWarnStillApplies (FOC-1111 UX round: the banner must not outlive
+// --- its truth) --------------------------------------------------------------
+// The banner claims "already queued" — a claim that goes FALSE the moment the
+// queued copy is delivered or the composer moves off the refused text.
+
+await test('dupWarnStillApplies keeps the banner while its copy is still queued', () => {
+  const warn = { text: 'Already queued — it will be delivered when the current turn ends.', refused: 'same question' };
+  const pending = [{ id: 'a', text: 'same question', state: 'queued' }];
+  eq(dupWarnStillApplies(warn, pending, 'same question'), true,
+    'copy pending, composer holds the refused text — the warning is still true');
+  eq(dupWarnStillApplies(warn, pending, '  same question  '), true,
+    'whitespace around the draft is the same message');
+});
+
+await test('dupWarnStillApplies clears the banner once the queued copy is delivered', () => {
+  const warn = { text: 'w', refused: 'same question' };
+  eq(dupWarnStillApplies(warn, [], 'same question'), false,
+    'the copy came off the pending list — "already queued" is now false');
+  eq(dupWarnStillApplies(warn, [{ id: 'b', text: 'other', state: 'queued' }], 'same question'), false,
+    'only a DIFFERENT text pending — the warned copy is gone');
+});
+
+await test('dupWarnStillApplies clears the banner when the draft moves away from the refused text', () => {
+  const warn = { text: 'w', refused: 'same question' };
+  const pending = [{ id: 'a', text: 'same question', state: 'queued' }];
+  eq(dupWarnStillApplies(warn, pending, 'a different question'), false);
+  eq(dupWarnStillApplies(warn, pending, ''), false, 'an emptied composer stops the warning');
+  eq(dupWarnStillApplies(warn, pending, undefined), false, 'no draft at all — no warning');
+});
+
+await test('dupWarnStillApplies is exact about identity: text A is not cleared by text B (and never the reverse)', () => {
+  const warnA = { text: 'w', refused: 'A' };
+  // B's copy delivered (B came off the list) while A's copy is still queued —
+  // the warning about A must survive B's delivery.
+  eq(dupWarnStillApplies(warnA, [{ id: 'a', text: 'A', state: 'queued' }], 'A'), true,
+    'only B was delivered; A is still queued');
+  // And symmetric: a warning about B is not kept by A's pending copy.
+  eq(dupWarnStillApplies({ text: 'w', refused: 'B' }, [{ id: 'a', text: 'A', state: 'queued' }], 'B'), false,
+    'the warned text has no pending copy — cleared despite A still queued');
+});
+
+await test('dupWarnStillApplies defensive shapes -> no warning', () => {
+  eq(dupWarnStillApplies(null, [{ id: 'a', text: 'x', state: 'queued' }], 'x'), false);
+  eq(dupWarnStillApplies({ text: 'w' }, [{ id: 'a', text: 'x', state: 'queued' }], 'x'), false,
+    'no refused identity — the rule cannot verify, so it does not warn');
+  eq(dupWarnStillApplies({ text: 'w', refused: 'x' }, null, 'x'), false,
+    'no pending list — nothing queued to warn about');
 });
 
 await test('pendingChip labels queued, delivered and the sent fallback', () => {
