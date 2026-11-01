@@ -47,6 +47,7 @@ import {
   gatesDir,
   hasPendingGate,
   installEnvFileSignalHandlers,
+  killTree,
   parseArgs,
   readRegistry,
   shareChildTranscripts,
@@ -430,6 +431,15 @@ let sessionId = null;
 const resultCosts = [];
 let initModel = null;
 let sawInit = false;
+// FOC-1154: the state of the tee's LAST parsed stream event. A turn whose last
+// event is a terminal `result` has finished its work even when the process
+// keeps running — on win32 claude never exits on its own after the result —
+// but `result` can arrive more than once per turn (background-task wake-ups
+// re-emit cumulative results), so "a result was seen" is NOT the gate. Every
+// parsed event refreshes both fields: a non-result event flips the gate back
+// off and normal stall behaviour resumes.
+let lastEventIsResult = false;
+let lastEventAt = 0;
 
 // One read of config/models.json for the whole turn. A missing or broken price
 // table must not stop the child: cost becomes unknown (null), which is exactly
@@ -532,6 +542,14 @@ function scanStall() {
   try {
     if (!existsSync(tee)) return;
     const { size, mtimeMs } = statSync(tee);
+    // FOC-1154: a tee whose LAST parsed event is a terminal `result` is not a
+    // silent turn — it is a FINISHED turn whose process lingers. Silence after
+    // a result is the linger itself, never a stall, so no stall row is ever
+    // queued for it; the linger scan below reaps the child instead.
+    if (lastEventIsResult) {
+      lastTeeSize = size;
+      return;
+    }
     // FOC-271: silence runs from the LATEST of the tee write and the turn start.
     // FOC-621: `episode` = the tee size at silence onset — stable across re-polls
     // of the same silence (a silent tee does not grow), new after any output, so
@@ -546,9 +564,74 @@ function scanStall() {
   }
 }
 
+// ── FOC-1154: reap a turn that ended but whose process lingers ───────────────
+// The turn's work is done (the tee's last event is a terminal `result`) and the
+// child will not exit on its own — on win32 never. The reap REPLACES the false
+// stall at the SAME SLA, it does not preempt it: while the last event is a
+// result no stall row is queued (the guard in scanStall), and once that silence
+// reaches stallSilenceMs() the linger path reaps instead — at the SLA exactly
+// one of {stall row, reap} fires. The SLA, not a shorter grace, is the
+// threshold because a real child re-emits cumulative results mid-turn and can
+// then sit tee-silent for the duration of a background task
+// (supervisor-watch-cost.test.mjs): any sub-SLA grace would force-kill that
+// healthy child and dress the kill up as a clean exit.
+//
+// Killing through the NORMAL exit path is what makes this cheap: the kill
+// fires the child's own exit/close handlers, finalizeTurn runs unchanged
+// (registry status, gate handling, cost patch, the `exit` wake row) and the
+// watcher exits — no new wake class, no second finalizer to keep in sync.
+let lingerReaped = false; // a reap LANDED — the exit row carries finishedLingering
+let lingerReapFailed = false; // both kill attempts failed — noted once, never faked
+let lingerFinalizeTimer = null;
+
+function scanLinger() {
+  if (finalized || lingerReaped || lingerReapFailed || !lastEventIsResult) return;
+  // Liveness before the force-kill: 'exit' may have fired with the
+  // TAIL_DRAIN_MS finalize still pending — killing that pid could hit a
+  // RECYCLED process on win32. A child that demonstrably already exited needs
+  // no reap; its own finalizer is at most TAIL_DRAIN_MS away.
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  // Silence is measured past the terminal result itself (the event time, not
+  // the tee mtime — a watcher note must not move this anchor).
+  if (Date.now() - lastEventAt < STALL_AFTER_MS) return;
+  note({
+    subtype: "result_linger_reap",
+    message: `last stream event was a terminal result ${Math.round((Date.now() - lastEventAt) / 1000)}s ago with no exit — reaping the lingering child (FOC-1154)`,
+  });
+  // killTree reports false for an already-gone tree. The liveness probe above
+  // has already filtered the cases it can see, so a false here is either a tree
+  // that died in the gap (its own exit finalizes normally — no failure to
+  // report) or a live tree the kill could not land on. One retry; a double
+  // failure is recorded honestly — finalizeTurn(0) here would fabricate a
+  // clean exit for a tree that was not reaped.
+  const reaped = killTree(child.pid, "force") || killTree(child.pid, "force");
+  if (reaped) {
+    lingerReaped = true;
+  } else {
+    lingerReapFailed = true;
+    note({
+      subtype: "result_linger_reap_failed",
+      message: `two force kills of pid ${child.pid} did not land (the tree may already be gone) — arming the bounded last-resort finalize (FOC-1154)`,
+    });
+  }
+  // Bounded last resort (review round 2, S1): the scanner must never leave the
+  // turn without a consumable signal. On a landed kill the child's own
+  // exit/close normally finalizes within TAIL_DRAIN_MS and this timer is a
+  // no-op; after a double kill failure nothing else will ever fire, so the
+  // bound runs the NORMAL finalizeTurn with the truthful code — null when the
+  // child may still be alive (status crashed, exitCode null, lingerReapFailed
+  // on the turn record and the wake row). Same shape and window as the
+  // terminator's timer, cleared by finalizeTurn the moment it starts, and NOT
+  // unref'd — it is the last thing keeping the watcher alive.
+  lingerFinalizeTimer = setTimeout(() => {
+    if (!finalized) finalizeTurn(reaped ? 0 : null, null);
+  }, TAIL_DRAIN_MS + 1500);
+}
+
 const scanner = setInterval(() => {
   scanGates();
   scanStall();
+  scanLinger();
 }, GATE_SCAN_MS);
 scanner.unref(); // the child's pipes own this process's lifetime, not the timer
 
@@ -595,6 +678,11 @@ child.stdout.on("data", (chunk) => {
     } catch {
       continue; // not every line is guaranteed to be JSON; the tee keeps it regardless
     }
+
+    // FOC-1154: this is the gate's heartbeat — every parsed event refreshes it,
+    // so the linger scan below only acts while the LAST event is a `result`.
+    lastEventIsResult = event.type === "result";
+    lastEventAt = Date.now();
 
     if (!sawInit && event.type === "system" && event.subtype === "init" && event.session_id) {
       sessionId = event.session_id;
@@ -660,6 +748,9 @@ function finalizeTurn(code, signal) {
   // must be allowed to land (FOC-913 — the old 2 s-from-signal terminator
   // fired first whenever the tail drain was what delayed `close`).
   if (terminatorTimer) clearTimeout(terminatorTimer);
+  // FOC-1154: the linger path's own bound dies with the finalization it guards,
+  // exactly like the terminator above.
+  if (lingerFinalizeTimer) clearTimeout(lingerFinalizeTimer);
   {
   if (buffer.trim()) {
     try {
@@ -683,6 +774,11 @@ function finalizeTurn(code, signal) {
   // gate behind as debris, not as a question anyone should answer, and dressing
   // a crash up as "waiting for Mateusz" would park a dead child in the queue.
   let status = entry.status === "stopped" ? "stopped" : code === 0 ? "exited" : "crashed";
+  // FOC-1154: a child reaped after its own terminal `result` did not fail — its
+  // work was done, and the non-zero exit code is the artifact of the force kill
+  // (taskkill /F on win32), not of the turn. The turn reads as the clean exit
+  // it functionally was; `waiting_gate` below still applies to it.
+  if (status === "crashed" && lingerReaped) status = "exited";
   if (status === "exited" && hasPendingGate(runId, childId)) status = "waiting_gate";
 
   // FOC-802, fail closed: the helper refused the launch (exit 97). The turn is
@@ -790,6 +886,10 @@ function finalizeTurn(code, signal) {
     // FOC-808 (slice B): the pids the sweep killed — the registry record the
     // plan names, so a turn's teardown is auditable without the tee.
     sweptPids,
+    // FOC-1154: the last-resort finalize after both force kills failed — the
+    // child may still be alive; the Supervisor should see why this turn closed
+    // without an exit.
+    ...(lingerReapFailed ? { lingerReapFailed: true } : {}),
     ...(isolationRefused
       ? { isolationError: "spawn refused by the isolation helper (exit 97) — no unisolated fallback" }
       : {}),
@@ -900,7 +1000,21 @@ function finalizeTurn(code, signal) {
   clearInterval(scanner);
   if (shareTimer) clearInterval(shareTimer); // FOC-980: the turn is over — stop the 30 s share
   scanGates();
-  wake({ event: "exit", childId, turn: turnIndex, detail: { status, exitCode: code } });
+  // FOC-1154: `finishedLingering` marks the exit as a reap after a terminal
+  // result; `lingerReapFailed` marks the last-resort finalize where both kills
+  // failed and the child may still be alive. The event type stays `exit`, so
+  // drain logic and quiescence waits see exactly the row they always saw.
+  wake({
+    event: "exit",
+    childId,
+    turn: turnIndex,
+    detail: {
+      status,
+      exitCode: code,
+      ...(lingerReaped ? { finishedLingering: true } : {}),
+      ...(lingerReapFailed ? { lingerReapFailed: true } : {}),
+    },
+  });
 
   endTelemetryRun(args["telemetry-run"], code ?? 1);
   process.exit(signalTerminated ?? 0);
