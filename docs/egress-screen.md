@@ -63,7 +63,7 @@ complement, not the engine, for three reasons:
 | (b) PEM private-key blocks | local detector | Full `BEGIN … PRIVATE KEY … END` blocks (multi-line, line count reported) plus a truncated `BEGIN` without `END`. | secretlint has a privatekey rule for the file path; same local-first reasons. |
 | (c) env-style `KEY=value` / `KEY: value` with secret-bearing names | local detector | Line-anchored name gate (`*_TOKEN`, `*_SECRET`, `*_KEY`, `*_PASSWORD`, `API_KEY`, …) with a value gate (placeholders, `$VAR` indirection and `# comments` are not literals). | secretlint has no generic env-assignment rule for arbitrary names; this family is inherently local. |
 | (d) JWT | local detector | Three dot-separated base64url segments with an `eyJ…` header. | Not covered by the secretlint preset. |
-| (e) high-entropy tokens | local detector | 20+ char base62/base64url runs, ≥3 char classes, Shannon entropy ≥4.3 bits/char (≥3.9 at 32+ chars). Excludes pure-hex runs (digests/SHAs — this repo's comments cite them constantly), UUIDs, data-URI payloads, public PEM blocks, ISO-date-like slugs, and the slug segment of a Linear issue URL (FOC-733, see below). | No generic entropy rule exists in the preset. |
+| (e) high-entropy tokens | local detector | 20+ char base62/base64url runs, ≥3 char classes, Shannon entropy ≥4.3 bits/char (≥3.9 at 32+ chars). Excludes pure-hex runs (digests/SHAs — this repo's comments cite them constantly), UUIDs, data-URI payloads, public PEM blocks, ISO-date-like slugs, and — exempt — the slug segment of a Linear issue URL (FOC-733), managed spawn refs (FOC-788) and word-slug runs (FOC-1090), see below. | No generic entropy rule exists in the preset. |
 
 **Known blind spot (documented, accepted):** an UNPREFIXED hex-shaped key is not
 flagged by family (e) — pure-hex runs are excluded because they are
@@ -113,6 +113,49 @@ above, the second the entropy floor above — because a positional exception can
 invent a signal the detector does not have. `scripts/egress-screen.test.mjs` pins
 those two as blind-spot cases and pins every other case in the position as an
 IDENTITY: the slug position must score exactly like the same string in prose.
+
+### Word-slug runs (FOC-1090) — family (e) only, position-independent
+
+On 2026-10-26 (rc.8) an ordinary kebab-case branch name
+(`foc-1053-key-wizard-default-provider`, 36 chars) was blocked twice in one day —
+a comment body quoting it and a `pr_create` head carrying it. Lowercase + digits +
+hyphen is exactly 3 char classes and ~4.2–4.4 bits/char over ~22 distinct
+characters: squarely inside the relaxed entropy branch.
+
+The exemption: a candidate run (same `ENTROPY_RUN_RE` boundaries) with **≥ 3
+dash-separated segments where every segment is either a word or a number** is a
+human word slug, not a secret:
+
+- **word** = `[a-z]{2,16}` — pure lowercase letters, no digits, no underscore, no
+  uppercase; at least one vowel; no run of more than 4 consecutive consonants.
+  Each rule is a frequency argument against token material: real words are pure
+  lowercase letters while real token alphabets are alphanumeric (a random
+  lowercase+digit segment fails the pure-letters rule at >99.9%); a random
+  pure-lowercase segment has no vowel at all with (21/26)^20 ≈ 1.39%
+  probability and almost certainly carries a 5-consonant run — the vowel and
+  consonant-run checks together reject a random pure-lowercase segment at
+  ~99.99%, while every real word passes both.
+- **number** = exactly 1–4 digits (issue numbers, ports, small counts — a 5+
+  digit group is a serial, not prose).
+- **no empty segment** — consecutive or trailing hyphens fail the shape.
+
+Reach is family (e) only and position-independent (the shape itself is the
+anchor, like FOC-788): families (a)–(d) still fire on anything shaped like
+their families, word-slug-looking or not, and a run that does not fit the shape
+falls back to the ordinary family (e) rules. Accepted residual, the same class
+as the FOC-733 one above: a passphrase spelled from short lowercase words with a
+small number satisfies the profile and is not caught — that is exactly the
+grant, a human word slug.
+
+### Structured fields: git refs skip family (e) (FOC-1090)
+
+`pr_create` `base`/`head` are git ref names, not free text — the caller
+validates the ref shape (`BRANCH_RE`). They are screened with
+`assertEgressCleanGitRef`: **families (a)–(d) only**. The entropy heuristic is
+skipped because a valid ref (a kebab branch name, a commit SHA, `origin/main`)
+is not an unprefixed secret, and its class/length counting has no meaning for a
+structured field. Families (a)–(d) still fire fail-closed: a `ghp_…` token is
+made of valid ref characters and still blocks.
 
 ## Fail-closed refusal
 

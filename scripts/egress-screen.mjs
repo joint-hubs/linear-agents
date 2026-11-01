@@ -46,7 +46,7 @@
  *   jwt             three dot-separated base64url segments with an eyJ… header
  *   high-entropy    long mixed-class runs with high Shannon entropy (hex/UUID/data-URI excluded;
  *                   Linear issue-URL slug segments exempt, FOC-733; managed spawn refs
- *                   exempt, FOC-788)
+ *                   exempt, FOC-788; word-slug runs exempt, FOC-1090)
  *
  * Usage (library): scanEgress(text) -> hits; assertEgressClean(text, label) throws.
  * Usage (CLI):     node scripts/egress-screen.mjs check (--body <text> | --body-file <path>)
@@ -272,6 +272,63 @@ function isManagedGitRef(run) {
   return MANAGED_GIT_REF_RE.test(run);
 }
 
+// FOC-1090 (2026-10-26 rc.8, two blocks in one day): an ordinary kebab-case
+// branch name (`foc-1053-key-wizard-default-provider`, 36 chars) is lowercase
+// + digit + hyphen — exactly 3 char classes — and measures ~4.2-4.4 bits/char
+// over ~22 distinct characters, i.e. inside the relaxed entropy branch. A
+// linear-ops comment body quoting it and a pr_create head carrying it were
+// both blocked. The shape separating such a name from token material:
+// dash-separated segments that are each either a WORD or a NUMBER.
+//
+// The word-like definition is mechanical, and each rule is a frequency
+// argument against random token material:
+//   - word = [a-z]{2,16}, PURE letters (no digits, no underscore, no
+//     uppercase). Real words are pure lowercase letters; real token
+//     alphabets are alphanumeric, so a random 20+ char lowercase+digit
+//     segment is not a word at >99.9% and stays screened.
+//   - at least one vowel AND no run of more than 4 consecutive consonants.
+//     A random pure-lowercase 20+ char segment has no vowel at all with
+//     (21/26)^20 ≈ 1.39% probability, and almost certainly carries a
+//     5-consonant run — the two checks together reject a random
+//     pure-lowercase segment at ~99.99%, while every real word passes both.
+//   - number = exactly 1-4 digits (issue numbers, ports, small counts; a
+//     5+ digit group is a serial, not prose).
+//   - at least 3 segments; an empty segment (consecutive or trailing
+//     hyphens) fails the shape — fail closed.
+//
+// Reach: family E only, position-independent (the shape is the anchor, like
+// FOC-788) — key-prefix, pem, env-assignment and jwt still fire on anything
+// shaped like their families, word-slug-looking or not.
+//
+// ACCEPTED RESIDUAL, the same class as FOC-733's Q2-B residual (lookup-based
+// checks were rejected — Q2-C): a passphrase spelled from short lowercase
+// words with a small number ("fix-the-leaky-key-3-now") satisfies this
+// profile and is not caught here — that is exactly the grant, a human word
+// slug. A run that does NOT fit the shape — uppercase, underscores, a
+// digit-bearing segment, a 5+ digit group — is not spanned and falls back to
+// the ordinary family E rules: refused, not silently waved through.
+const WORD_SEG_RE = /^[a-z]{2,16}$/;
+const WORD_NUMBER_RE = /^[0-9]{1,4}$/;
+const WORD_VOWEL_RE = /[aeiou]/;
+// A run of 5+ consonants inside a pure-lowercase segment (the segment charset
+// makes [^aeiou] exactly the consonants).
+const WORD_CONSONANT_RUN_RE = /[^aeiou]{5}/;
+
+/** True when `segment` is word-like or a small number (FOC-1090). */
+function isWordOrNumberSegment(segment) {
+  if (WORD_NUMBER_RE.test(segment)) return true;
+  if (!WORD_SEG_RE.test(segment)) return false;
+  return WORD_VOWEL_RE.test(segment) && !WORD_CONSONANT_RUN_RE.test(segment);
+}
+
+/** True when `run` has the word-slug shape (FOC-1090): >= 3 dash-separated
+ * word/number segments, no empty segments. */
+function isWordSlugRun(run) {
+  const segments = run.split("-");
+  if (segments.length < 3) return false;
+  return segments.every(isWordOrNumberSegment);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -444,8 +501,9 @@ function detectJwt(text, spans) {
  * Family E hits: long mixed-class runs with high Shannon entropy. Runs already
  * reported by families A–D are skipped (same secret, not a second shape).
  * Pure-hex runs, data-URI payloads, and low-class runs are excluded — see
- * HEX_RUN_RE above for the why. Linear issue-URL slug segments (FOC-733,
- * via extraSpans) are exempt, as are managed spawn refs (FOC-788).
+ * HEX_RUN_RE above for the why. Linear issue-URL slug segments (FOC-733),
+ * managed spawn refs (FOC-788) and word-slug runs (FOC-1090) — all via
+ * extraSpans — are exempt.
  */
 function detectHighEntropy(text, spans, extraSpans = []) {
   const hits = [];
@@ -502,13 +560,45 @@ export function scanEgress(text) {
   if (typeof text !== "string" || text.length === 0) return [];
   const spans = [];
   const hits = [
+    ...detectFamiliesAD(text, spans),
+    ...detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text), managedGitRefSpans(text), wordSlugSpans(text))),
+  ];
+  return hits.sort((a, b) => a.line - b.line || a.column - b.column);
+}
+
+/**
+ * Families A–D only (key-prefix, pem, env-assignment, jwt) — the screen for
+ * STRUCTURED fields whose type already constrains the content (FOC-1090):
+ * a git ref name passed as pr_create base/head is validated as a ref by the
+ * caller (BRANCH_RE) and cannot carry prose, so the family E entropy
+ * heuristic has no meaning there — its class/length counting is tuned for
+ * free text, and a valid ref (a branch name, a commit SHA, `origin/main`) is
+ * not an unprefixed secret even when it measures "high-entropy". Families
+ * A–D still fire: a `ghp_…` token is made of valid ref characters and MUST
+ * still block.
+ *
+ * @param {string} text
+ * @returns {{ family: string, shape: string, line: number, column: number }[]}
+ *   Sorted by position. Empty = clean. Hits describe shape, never value.
+ */
+export function scanEgressGitRef(text) {
+  if (typeof text !== "string" || text.length === 0) return [];
+  const hits = detectFamiliesAD(text, []);
+  return hits.sort((a, b) => a.line - b.line || a.column - b.column);
+}
+
+/**
+ * The families A–D detector set behind scanEgress and scanEgressGitRef; the
+ * same detectors are invoked inline in egressSpans — one detector set so the
+ * screened shapes cannot drift (same seam reasoning as egressLeaves).
+ */
+function detectFamiliesAD(text, spans) {
+  return [
     ...detectKeyPrefixes(text, spans),
     ...detectPem(text, spans),
     ...detectEnvAssignments(text, spans),
     ...detectJwt(text, spans),
-    ...detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text), managedGitRefSpans(text))),
   ];
-  return hits.sort((a, b) => a.line - b.line || a.column - b.column);
 }
 
 /**
@@ -516,7 +606,8 @@ export function scanEgress(text) {
  * runs, returning the secret-shaped [start, end) ranges instead of hit
  * descriptors (FOC-958 B1 redaction). Family A–D detectors push their own
  * spans; family E skips runs already spanned and adds the rest, with the same
- * public-material / Linear-slug / managed-ref exemptions scanEgress honours.
+ * public-material / Linear-slug / managed-ref / word-slug exemptions
+ * scanEgress honours.
  * Sorted ascending and overlap-merged, so a consumer can mask left to right.
  *
  * Consumers (fenix-control tool layer) mask these ranges with the family
@@ -533,7 +624,7 @@ export function egressSpans(text) {
   detectPem(text, spans);
   detectEnvAssignments(text, spans);
   detectJwt(text, spans);
-  detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text), managedGitRefSpans(text)));
+  detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text), managedGitRefSpans(text), wordSlugSpans(text)));
   spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   const merged = [];
   for (const [start, end] of spans) {
@@ -594,6 +685,22 @@ function managedGitRefSpans(text) {
   return spans;
 }
 
+/** Spans of word-slug runs (FOC-1090) — the same candidate runs family E
+ * considers (same ENTROPY_RUN_RE boundaries), kept only when the whole run is
+ * >= 3 dash-separated word/number segments (isWordSlugRun). A run the shape
+ * does not fit — uppercase, underscores, a digit-bearing segment, a 5+ digit
+ * group — is not spanned and falls back to the ordinary family E rules. */
+function wordSlugSpans(text) {
+  const spans = [];
+  ENTROPY_RUN_RE.lastIndex = 0;
+  let m;
+  while ((m = ENTROPY_RUN_RE.exec(text)) !== null) {
+    if (!isWordSlugRun(m[0])) continue;
+    spans.push([m.index, m.index + m[0].length]);
+  }
+  return spans;
+}
+
 /** CLI-facing refusal message. The LAST line is self-describing on purpose:
  * supervisor-verdict.mjs surfaces the child's last stderr line as the failure
  * detail, so that line must name the shape on its own. */
@@ -639,6 +746,22 @@ export class EgressBlockedError extends Error {
  */
 export function assertEgressClean(text, label) {
   const hits = scanEgress(text);
+  if (hits.length > 0) throw new EgressBlockedError(hits, label);
+}
+
+/**
+ * Screen a git ref name (pr_create base/head) and throw on any families A–D
+ * hit — the ref-typed companion of assertEgressClean (FOC-1090). The caller
+ * validates the ref SHAPE separately (BRANCH_RE); this screen is about
+ * secret-shaped CONTENT that happens to be made of ref characters. Family E
+ * is skipped on purpose: see scanEgressGitRef.
+ * @param {string} text
+ * @param {string} label  Short caller context for the refusal message.
+ * @returns {void}  Returns silently when the ref is clean.
+ * @throws {EgressBlockedError} When any families A–D hit is found — fail closed.
+ */
+export function assertEgressCleanGitRef(text, label) {
+  const hits = scanEgressGitRef(text);
   if (hits.length > 0) throw new EgressBlockedError(hits, label);
 }
 
