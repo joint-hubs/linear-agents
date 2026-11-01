@@ -5,7 +5,8 @@
 //   node scripts/fenix-claude-prefs.mjs --config-dir <dir> --trust <absPath>
 //
 // It sets hasCompletedOnboarding = true (plus the auto-mode-default nudge
-// flags, FOC-810) and, under projects[<trustPath>], hasTrustDialogAccepted +
+// flags, FOC-810, and the auto-mode env-setup dismissal, FOC-1066) and, under
+// projects[<trustPath>], hasTrustDialogAccepted +
 // hasCompletedProjectOnboarding = true. Every other
 // key (and every other project entry) is preserved. An unparseable
 // .claude.json is never overwritten — exit 1 and let a human fix it.
@@ -55,6 +56,15 @@ export function applyClaudePrefs({ configDir, trustPath }) {
   // replaced by enabling auto mode — permissions/defaultMode stays untouched.
   prefs.hasSeenAutoDefaultNudge = true;
   prefs.hasSeenAutoDefaultNotice = true;
+  // FOC-1066: also record what the "Teach auto mode about your environment?"
+  // dialog's "Don't show again" option writes — autoModeEnvSetup.dismissed in
+  // .claude.json (a CLI 2.1.314 show-gate: auto mode on, no environment rules,
+  // numStartups >= 5 and denials >= 5, suppressed outright once dismissed).
+  // Merged, never clobbered: an existing denials counter stays.
+  const envSetup = typeof prefs.autoModeEnvSetup === "object" && prefs.autoModeEnvSetup !== null && !Array.isArray(prefs.autoModeEnvSetup)
+    ? prefs.autoModeEnvSetup
+    : {};
+  prefs.autoModeEnvSetup = { ...envSetup, dismissed: true, dismissedAt: Date.now() };
   const projects = (prefs.projects ??= {});
   const project = (projects[trustPath] ??= {});
   project.hasTrustDialogAccepted = true;

@@ -75,6 +75,8 @@ await test("creates .claude.json when missing and sets onboarding + trust flags"
   eq(prefs.hasCompletedOnboarding, true, "hasCompletedOnboarding");
   eq(prefs.hasSeenAutoDefaultNudge, true, "hasSeenAutoDefaultNudge");
   eq(prefs.hasSeenAutoDefaultNotice, true, "hasSeenAutoDefaultNotice");
+  eq(prefs.autoModeEnvSetup.dismissed, true, "autoModeEnvSetup.dismissed (FOC-1066)");
+  ok(Number.isFinite(prefs.autoModeEnvSetup.dismissedAt), "autoModeEnvSetup.dismissedAt is a number");
   ok(!("permissions" in prefs), "no permissions key written");
   ok(!("defaultMode" in prefs), "no defaultMode key written");
   eq(prefs.projects[trustPath].hasTrustDialogAccepted, true, "hasTrustDialogAccepted");
@@ -89,6 +91,7 @@ await test("preserves unrelated keys and other projects, is idempotent on re-run
   writeFileSync(join(configDir, ".claude.json"), JSON.stringify({
     theme: "dark",
     numStartups: 7,
+    autoModeEnvSetup: { denials: 5 },
     permissions: { defaultMode: "default", allow: ["Read"] },
     projects: { [other]: { allowedTools: ["bash"] } },
   }), "utf8");
@@ -97,6 +100,8 @@ await test("preserves unrelated keys and other projects, is idempotent on re-run
   const prefs = jsonOf(join(configDir, ".claude.json"));
   eq(prefs.theme, "dark", "unrelated key preserved");
   eq(prefs.numStartups, 7, "unrelated key preserved");
+  eq(prefs.autoModeEnvSetup.denials, 5, "existing autoModeEnvSetup.denials survives the merge");
+  eq(prefs.autoModeEnvSetup.dismissed, true, "autoModeEnvSetup.dismissed set on existing config");
   eq(JSON.stringify(prefs.permissions), JSON.stringify({ defaultMode: "default", allow: ["Read"] }), "existing permissions/defaultMode untouched");
   eq(prefs.hasSeenAutoDefaultNudge, true, "hasSeenAutoDefaultNudge set on existing config");
   eq(prefs.hasSeenAutoDefaultNotice, true, "hasSeenAutoDefaultNotice set on existing config");

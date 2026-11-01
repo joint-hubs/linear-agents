@@ -272,6 +272,15 @@ case "${1:-api}" in
         settings_model="$(node "$LA_ROOT/scripts/fenix-settings.mjs" get routing.supervisor.lead 2>/dev/null || true)"
         ANTHROPIC_MODEL="${SUPERVISOR_MODEL:-${settings_model:-${LA_PROVIDER_DEFAULT_MODEL:-xiaomi/mimo-v2.6-pro}}}"
         export ANTHROPIC_MODEL
+        # FOC-1066: the image's npm prefix is read-only by design (the CLI is
+        # pinned by the Dockerfile), so the auto-updater can only fail — its
+        # "no write permission to npm prefix" status-line banner blocked
+        # unattended runs. DISABLE_AUTOUPDATER=1 is the documented switch
+        # (code.claude.com/docs/en/setup, "Disable auto-updates"; verified in
+        # the installed CLI 2.1.314: the env override wins before any
+        # .claude.json autoUpdates key) and in-container self-update is never
+        # wanted — the container pins the CLI version.
+        export DISABLE_AUTOUPDATER=1
         node "$LA_ROOT/scripts/fenix-claude-prefs.mjs" --config-dir "$CLAUDE_CONFIG_DIR" --trust "$LA_SUPERVISOR_REPO"
         # FOC-807: the waker, guard, briefing and telemetry hooks read the run id
         # from the claude process env — export the same trio (LA_SUPERVISOR_RUN,
