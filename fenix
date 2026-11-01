@@ -41,6 +41,10 @@ Usage: fenix [command]
                    size and prune the cache volume and dead child tmp dirs
                    (--max-gb: cap in GB, default from retention.cacheMaxGb);
                    --builder also prunes the host's docker build cache (y/N)
+  settings get|set <dotted.path>
+                   read or write one key of the settings overlay (validated by
+                   the node CLI); a taskSessions.* change applies after
+                   `fenix restart supervisor` (the host reads it at start)
   keys [name]      run the key wizard (no argument) or rotate one key:
                    openrouter | provider | linear | github
   attach [--new]   open the Supervisor (Ctrl-b d detaches; it keeps running in the container)
@@ -52,6 +56,9 @@ Usage: fenix [command]
                    worktree cleanup of a finished child, with the Linear key the
                    script needs (remove still needs TEST's Done and your yes)
   update [--source] git pull --ff-only, pull the pinned image (or rebuild with --source), restart
+  restart [api|supervisor]
+                   recreate one service (default: both) with the pinned image —
+                   the same ref `fenix up` resolves; never recreate by hand
   test [args]      lint and the full test suite on Linux, inside the image
 
 Environment: FENIX_SOURCE=1 (build from this clone), FENIX_IMAGE_REF (use this image instead of the pin), FENIX_PORT.
@@ -485,6 +492,46 @@ cmd_integrations() {
       ;;
     *)
       printf 'usage: fenix integrations [show|enable <name>|disable <name>]\n' >&2
+      exit 2
+      ;;
+  esac
+}
+
+cmd_settings() {
+  # fenix settings get|set <dotted.path> — operator access to the same overlay
+  # the dashboard and the wizards write (FOC-1107). Forwards to the node CLI in
+  # the container; its exit codes pass through (1 settings/validation error,
+  # 2 usage). A taskSessions.* change is read by the host only at container
+  # start (the S40 lesson) — say so after a successful set.
+  if [ $# -lt 2 ]; then
+    printf 'usage: fenix settings get <dotted.path> | fenix settings set <dotted.path> <value>\n' >&2
+    exit 2
+  fi
+  verb="$1"
+  case "$verb" in
+    get)
+      if [ $# -ne 2 ]; then
+        printf 'usage: fenix settings get <dotted.path>\n' >&2
+        exit 2
+      fi
+      in_container_node scripts/fenix-settings.mjs get "$2"
+      ;;
+    set)
+      if [ $# -ne 3 ]; then
+        printf 'usage: fenix settings set <dotted.path> <value>\n' >&2
+        exit 2
+      fi
+      rc=0
+      in_container_node scripts/fenix-settings.mjs set "$2" "$3" || rc=$?
+      [ "$rc" -eq 0 ] || exit "$rc"
+      case "$2" in
+        taskSessions.*)
+          printf 'Note: taskSessions.* is read only at container start — run "fenix restart supervisor" to apply it.\n'
+          ;;
+      esac
+      ;;
+    *)
+      printf 'usage: fenix settings get <dotted.path> | fenix settings set <dotted.path> <value>\n' >&2
       exit 2
       ;;
   esac
@@ -933,6 +980,9 @@ case "$cmd" in
   integrations)
     cmd_integrations "$@"
     ;;
+  settings)
+    cmd_settings "$@"
+    ;;
   retention)
     # Forward to the retention CLI in the container (the same in-container
     # node pattern as the settings wizard). The node script owns usage errors
@@ -1002,6 +1052,30 @@ case "$cmd" in
     ensure_secret_files
     ensure_cache_volume
     exec docker compose up -d
+    ;;
+  restart)
+    # FOC-1065 (S21): recreate a service through the same image resolution as
+    # `fenix up` — a hand-run `docker compose up --force-recreate` skips the
+    # FENIX_IMAGE_REF pin and can build fenix:dev from source. Mode "" keeps
+    # `up`'s fresh-pull semantics: the operator asks for the pinned ref, not
+    # for whatever copy is on the machine. The secret files must exist before
+    # any compose up (FOC-786 — same guarantee `update` gives).
+    case "${1:-}" in
+      ""|api|supervisor) ;;
+      *)
+        printf 'usage: fenix restart [api|supervisor]\n' >&2
+        exit 2
+        ;;
+    esac
+    ensure_image
+    ensure_secret_files
+    if [ $# -ge 1 ]; then
+      svc="fenix-$1"
+      printf 'Recreating %s...\n' "$svc"
+      exec docker compose up -d --force-recreate --no-deps "$svc"
+    fi
+    printf 'Recreating fenix-api and fenix-supervisor...\n'
+    exec docker compose up -d --force-recreate --no-deps fenix-api fenix-supervisor
     ;;
   repo)
     sub="${1:-}"

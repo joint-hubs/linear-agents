@@ -50,6 +50,12 @@ case " \$* " in
   " build "*) exit 0 ;;
   *" info "*) exit 0 ;;
   *" compose version "*) exit 0 ;;
+  # FOC-1065: the recreate goes through — and the probe line records the
+  # FENIX_IMAGE_REF the launcher exported (asserted by the restart tests).
+  # Matched BEFORE the plain up-refusal case, which stays for the up tests.
+  *" up -d --force-recreate "*)
+    printf '%s\\n' "image-ref=\${FENIX_IMAGE_REF:-unset}" >> "\$FENIX_SHIM_LOG"
+    exit 0 ;;
   *" up "*) printf 'fake docker: refusing to start the stack\\n' >&2; exit 1 ;;
 esac
 script=""
@@ -629,5 +635,144 @@ test("FOC-780: `fenix up` skips the retention question when stdin is not a TTY",
     // …and the retention question never touched the settings overlay.
     assert.equal(forwardCalls(dir, "fenix-settings.mjs").length, 0, log);
     assert.equal(forwardCalls(dir, "fenix-retention.mjs").length, 0, log);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// --- fenix settings / fenix restart (FOC-1107 + FOC-1065) --------------------
+
+test("FOC-1107: usage() lists the new commands", () => {
+  const { dir, bin } = makeHome("usage-lists");
+  try {
+    const res = runFenix({ home: dir, bin, args: [] });
+    assert.equal(res.status, 0, `exit ${res.status}\nstderr: ${res.stderr}`);
+    assert.match(res.stdout, /settings get\|set <dotted\.path>/);
+    assert.match(res.stdout, /restart \[api\|supervisor\]/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("FOC-1107: `fenix settings get` forwards the dotted path to the node CLI", () => {
+  const { dir, bin } = makeHome("settings-get");
+  try {
+    const res = runFenix({
+      home: dir,
+      bin,
+      settingsPath: writeSettingsFile(dir, { retention: { keepDays: 90 } }),
+      args: ["settings", "get", "retention"],
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    const calls = forwardCalls(dir, "fenix-settings.mjs");
+    assert.equal(calls.length, 1, calls.join("\n"));
+    assert.match(
+      calls[0],
+      /compose run --rm --no-deps -T --entrypoint node fenix-api --disable-warning=ExperimentalWarning \/opt\/fenix\/scripts\/fenix-settings\.mjs get retention$/,
+      calls[0],
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("FOC-1107: `fenix settings set` forwards path+value and passes the CLI exit code through", () => {
+  const { dir, bin } = makeHome("settings-set-rc");
+  try {
+    const res = runFenix({
+      home: dir,
+      bin,
+      args: ["settings", "set", "taskSessions.maxActive", "1"],
+      // The canned node CLI exits 7 — the launcher must pass it through.
+      extraEnv: { FENIX_FAKE_SETTINGS_RC: "7" },
+    });
+    assert.equal(res.status, 7, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    const calls = forwardCalls(dir, "fenix-settings.mjs");
+    assert.equal(calls.length, 1, calls.join("\n"));
+    assert.match(calls[0], /fenix-settings\.mjs set taskSessions\.maxActive 1$/, calls[0]);
+    // A failed set does not recommend a restart.
+    assert.ok(!res.stdout.includes("restart supervisor"), res.stdout);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("FOC-1107: a successful `set taskSessions.*` prints the restart hint; other keys do not", () => {
+  const { dir, bin } = makeHome("settings-set-hint");
+  try {
+    const res = runFenix({
+      home: dir,
+      bin,
+      args: ["settings", "set", "taskSessions.maxActive", "2"],
+      extraEnv: { FENIX_FAKE_SETTINGS_RC: "0" },
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stdout, /fenix restart supervisor/, res.stdout);
+    // One line only — no wall of text.
+    assert.equal(res.stdout.split("\n").filter((l) => l.includes("restart supervisor")).length, 1, res.stdout);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const other = makeHome("settings-set-no-hint");
+  try {
+    const res = runFenix({
+      home: other.dir,
+      bin: other.bin,
+      args: ["settings", "set", "integrations", '{"atlas":true}'],
+      extraEnv: { FENIX_FAKE_SETTINGS_RC: "0" },
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.ok(!res.stdout.includes("restart supervisor"), res.stdout);
+    const calls = forwardCalls(other.dir, "fenix-settings.mjs");
+    assert.equal(calls.length, 1, calls.join("\n"));
+    assert.match(calls[0], /fenix-settings\.mjs set integrations \{"atlas":true\}$/, calls[0]);
+  } finally { rmSync(other.dir, { recursive: true, force: true }); }
+});
+
+test("FOC-1107: `fenix settings` with wrong args exits 2 and runs nothing", () => {
+  for (const args of [
+    ["settings"],
+    ["settings", "get"],
+    ["settings", "get", "a", "b"],
+    ["settings", "set", "taskSessions.maxActive"],
+    ["settings", "bogus", "x"],
+  ]) {
+    const { dir, bin } = makeHome("settings-usage");
+    try {
+      const res = runFenix({ home: dir, bin, args });
+      assert.equal(res.status, 2, `${args.join(" ")}: exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+      assert.match(res.stderr, /usage: fenix settings/);
+      assert.deepEqual(dockerCalls(dir), []);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("FOC-1065: `fenix restart supervisor` recreates only the supervisor, with FENIX_IMAGE_REF exported", () => {
+  const { dir, bin } = makeHome("restart-supervisor");
+  try {
+    const res = runFenix({ home: dir, bin, args: ["restart", "supervisor"] });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stdout, /Recreating fenix-supervisor/);
+    const log = readFileSync(join(dir, "shim.log"), "utf8");
+    assert.ok(log.includes("compose up -d --force-recreate --no-deps fenix-supervisor"), log);
+    assert.ok(!log.includes("--force-recreate --no-deps fenix-api"), log);
+    // The recreate ran under the image ref the launcher exported (no VERSION
+    // pin in the temp home → the source-mode default fenix:dev).
+    assert.ok(log.includes("image-ref=fenix:dev"), log);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("FOC-1065: `fenix restart` recreates both services in one compose call", () => {
+  const { dir, bin } = makeHome("restart-both");
+  try {
+    const res = runFenix({ home: dir, bin, args: ["restart"] });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    const log = readFileSync(join(dir, "shim.log"), "utf8");
+    assert.ok(log.includes("compose up -d --force-recreate --no-deps fenix-api fenix-supervisor"), log);
+    assert.equal(
+      log.split("\n").filter((l) => l.includes("--force-recreate")).length,
+      1,
+      log,
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("FOC-1065: `fenix restart bogus` exits 2 and never touches compose", () => {
+  const { dir, bin } = makeHome("restart-bogus");
+  try {
+    const res = runFenix({ home: dir, bin, args: ["restart", "bogus"] });
+    assert.equal(res.status, 2, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stderr, /usage: fenix restart/);
+    assert.deepEqual(dockerCalls(dir), []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
