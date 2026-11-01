@@ -12,13 +12,15 @@
 // Run: node scripts/supervisor-spawn.test.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   ensureWorktree,
+  installWorktreeDeps,
+  killTree,
   PRINT_BG_WAIT_CEILING_MS,
   PRINT_BG_WAIT_ENV,
   SUPERVISOR_DENY,
@@ -67,6 +69,18 @@ function test(name, fn) {
   }
 }
 const fail = (msg) => { throw new Error(msg); };
+
+// FOC-1153 r1: the install inside the provisioning guard is an awaited
+// child-process run (its timeout must kill the whole npm tree, and a tree kill
+// needs the shell's pid — which spawnSync never surfaces). The local harness
+// above is deliberately synchronous, so these tests queue through a minimal
+// async lane that drains with the same PASS/FAIL lines just before the summary.
+const asyncTests = [];
+const testAsync = (name, fn) => asyncTests.push([name, fn]);
+
+// A blocking sleep for the synchronous parts of an async test body — the same
+// Atomics.wait trick the fixtures module uses internally.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 // FOC-729: spawn seeds the working-state store — point LA_AGENT_STATE_DB at a
 // temp dir so no case writes the repo's real .state/agent-state/. Cases that
@@ -375,6 +389,151 @@ test("provisions dependencies in the fresh worktree — real node_modules, never
   if (!ui || ui.skipped) fail(`the ui/ install is missing or was skipped: ${JSON.stringify(out.depsInstall)}`);
 
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+// ── FOC-1153 r1: the provisioning guard's reparse-replacement branch ─────────
+// AC1 above only ever sees a FRESH worktree, so the `if (st)` branch in
+// installDepsAt — a node_modules that is a reparse point or a stray file — had
+// no coverage. These drive installWorktreeDeps directly on a tree whose
+// node_modules is pre-planted, which the spawn path cannot produce itself.
+// The offline npm fixture is AC1's: the preinstall writes fake-dep, the empty
+// lockfile lets `npm ci` run with no network.
+const r1Fixture = (scripts = DEPS_FIXTURE_PKG.scripts) => {
+  const dir = mkdtempSync(join(tmpdir(), "la-sup-r1-"));
+  cleanup.push(dir);
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ ...DEPS_FIXTURE_PKG, scripts }));
+  writeFileSync(join(dir, "package-lock.json"), JSON.stringify(DEPS_FIXTURE_LOCK));
+  return dir;
+};
+
+testAsync("provisions over a node_modules JUNCTION — replaced as a link, reported, target intact (FOC-1153 r1)", async () => {
+  const outside = mkdtempSync(join(tmpdir(), "la-sup-r1-target-"));
+  cleanup.push(outside);
+  writeFileSync(join(outside, "sentinel.txt"), "keep\n");
+  const dir = r1Fixture();
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  symlinkSync(outside, join(dir, "node_modules"), linkType);
+
+  const out = await installWorktreeDeps(dir);
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped) fail(`the root install did not run: ${JSON.stringify(root)}`);
+  if (root.replacedReparsePoint !== true) fail(`the junction replacement was not reported: ${JSON.stringify(root)}`);
+  if (root.ok !== true) fail(`the install over the replaced junction failed: ${JSON.stringify(root)}`);
+  if (!existsSync(join(outside, "sentinel.txt"))) {
+    fail("the junction target lost its content — the replacement followed the link");
+  }
+  const nm = lstatSync(join(dir, "node_modules"));
+  if (nm.isSymbolicLink()) fail("node_modules is still a reparse point after provisioning");
+  if (!nm.isDirectory()) fail("node_modules is not a real directory after the replacement");
+  const dep = spawnSync(process.execPath, ["-e", "process.exit(require('fake-dep') === 42 ? 0 : 1)"], { cwd: dir });
+  if (dep.status !== 0) fail("fake-dep does not resolve — the install did not run into the replaced directory");
+});
+
+testAsync("a node_modules reparse point that cannot be unlinked fails the install loudly (FOC-1153 r1)", async () => {
+  const dir = r1Fixture();
+  // The failed-unlink shape, simulated on the stray-file half of the branch
+  // (a junction's removal could not be made to fail on win32 — probed: a
+  // process pinned inside the junction, the read-only attribute, an open
+  // opendir handle and an ACL deny-DELETE all leave rmSync's link removal
+  // working). What blocks an unlink on each platform: win32 needs the deny
+  // ACE to be the ONLY access entry, so inheritance goes first; POSIX takes
+  // the read-only parent directory.
+  const nm = join(dir, "node_modules");
+  writeFileSync(nm, "stray\n");
+  let restore = () => {};
+  if (process.platform === "win32") {
+    spawnSync("icacls", [nm, "/inheritance:r"], { windowsHide: true });
+    spawnSync("icacls", [nm, "/deny", "*S-1-1-0:(DE)"], { windowsHide: true });
+    restore = () => {
+      spawnSync("icacls", [nm, "/reset"], { windowsHide: true });
+      try { chmodSync(nm, 0o666); } catch { /* already gone */ }
+    };
+  } else {
+    chmodSync(dir, 0o555); // unlink inside a read-only directory → EACCES
+    restore = () => chmodSync(dir, 0o755);
+  }
+  try {
+    const out = await installWorktreeDeps(dir);
+    const root = (out.locations ?? []).find((l) => l.location === "root");
+    if (!root) fail("no root location on the record");
+    if (root.ok !== false) fail(`the failed unlink must not be ok: ${JSON.stringify(root)}`);
+    if (!/could not remove the node_modules reparse point/.test(root.error ?? "")) {
+      fail(`the record does not name the failed unlink: ${JSON.stringify(root)}`);
+    }
+    if (out.ok !== false) fail("installWorktreeDeps reported ok over a failed unlink");
+  } finally {
+    restore();
+  }
+});
+
+testAsync("a timed-out install kills the whole npm tree, not just the shell (FOC-1153 r1)", async () => {
+  // The preinstall grandchild records its own pid, then hangs. On the timeout
+  // the kill must reach it: spawnSync's timeout terminates only the direct
+  // child — with shell:true that is cmd.exe, and npm (and everything it
+  // spawned) survives as an orphan holding locks in the tree.
+  const probeDir = mkdtempSync(join(tmpdir(), "la-sup-orphan-"));
+  cleanup.push(probeDir);
+  const probe = join(probeDir, "preinstall.pid");
+  const dir = r1Fixture({
+    preinstall: `node -e "require('fs').writeFileSync(process.env.LA_ORPHAN_PROBE,String(process.pid));setTimeout(function(){},600000)"`,
+  });
+  process.env.LA_ORPHAN_PROBE = probe;
+  // Test seam for the 300 s production budget — see installDepsAt.
+  process.env.LA_DEPS_INSTALL_TIMEOUT_MS = "20000";
+  let orphanPid = null;
+  try {
+    const out = await installWorktreeDeps(dir);
+    const root = (out.locations ?? []).find((l) => l.location === "root");
+    if (!root || root.skipped) fail(`the root install did not run: ${JSON.stringify(root)}`);
+    if (root.timedOut !== true) fail(`the timeout is not on the record: ${JSON.stringify(root)}`);
+    if (root.ok !== false) fail(`a timed-out install must not be ok: ${JSON.stringify(root)}`);
+    if (!existsSync(probe)) fail("the preinstall never ran within the timeout budget — the orphan cannot be observed");
+    orphanPid = Number(readFileSync(probe, "utf8").trim());
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      let alive = false;
+      try {
+        process.kill(orphanPid, 0);
+        alive = true;
+      } catch (err) {
+        alive = err.code === "EPERM"; // alive, just not ours to signal
+      }
+      if (!alive) return;
+      sleepSync(200);
+    }
+    fail(`the preinstall grandchild (pid ${orphanPid}) survived the install timeout — the kill stopped at the shell`);
+  } finally {
+    delete process.env.LA_ORPHAN_PROBE;
+    delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+    // Both runs must leave no orphan behind, whatever the assertions said.
+    if (orphanPid) {
+      try { killTree(orphanPid, "force"); } catch { /* already gone */ }
+    }
+  }
+});
+
+testAsync("the install record is redacted before it is persisted (FOC-1153 r1)", async () => {
+  // An install script's own output is the leak channel: npm scrubs the
+  // credentials out of ITS error summary (probed — `https://user:***@…`), but
+  // a script's stderr passes through raw, and on a successful install npm
+  // appends nothing after it. The tail lands in the registry entry and the
+  // spawn result — it must be scrubbed at the source, where every consumer
+  // inherits the scrub. So the fixture's preinstall is the normal fake-dep
+  // install plus a credential-shaped line as its last output.
+  const dir = r1Fixture({
+    preinstall:
+      `node -e "const fs=require('fs');fs.mkdirSync('node_modules/fake-dep',{recursive:true});` +
+      `fs.writeFileSync('node_modules/fake-dep/package.json',JSON.stringify({name:'fake-dep',version:'1.0.0',main:'index.js'}));` +
+      `fs.writeFileSync('node_modules/fake-dep/index.js','module.exports=42;');` +
+      `console.error('npm ERR! request to https://child:SUPERTALSEKRET@registry-proxy.example.com/npm failed');"`,
+  });
+  const out = await installWorktreeDeps(dir);
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped) fail(`the root install did not run: ${JSON.stringify(root)}`);
+  if (root.ok !== true) fail(`the successful install must be ok: ${JSON.stringify(root)}`);
+  const record = JSON.stringify(root);
+  if (record.includes("SUPERTALSEKRET")) fail(`the credential leaked into the persisted record: ${record}`);
+  if (!record.includes("***")) fail(`expected the redaction marker in the record: ${record}`);
 });
 
 // Run a93f, 2026-09-12: four children spawned without --model ran on the
@@ -1618,6 +1777,19 @@ test("the child env carries LA_TASK_OWNER explicitly (FOC-848)", () => {
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
+// The async lane drains first (see testAsync above), then the same cleanup and
+// exit rule the synchronous tests get.
+for (const [name, fn] of asyncTests) {
+  try {
+    await fn();
+    passed++;
+    console.log(`  PASS ${name}`);
+  } catch (err) {
+    failures.push(name);
+    console.log(`  FAIL ${name}\n       ${err.message}`);
+  }
+}
+
 for (const dir of cleanup) {
   try {
     rmSync(dir, { recursive: true, force: true });

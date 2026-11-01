@@ -407,7 +407,7 @@ function createRealSessionWorkspace({ repo = null, env, loadLib, fetchIssueFacts
       // session is about to work in gets its deps as real directories — the
       // improvisation this replaces is exactly the junction incident. Tolerant
       // by design, so it is a no-op for repos without manifests.
-      const depsInstall = lib.installWorktreeDeps(ensured.worktree);
+      const depsInstall = await lib.installWorktreeDeps(ensured.worktree);
       if (!depsInstall.ok) {
         console.error(
           `task-session-host: dependency install did not complete in ${ensured.worktree} — ` +

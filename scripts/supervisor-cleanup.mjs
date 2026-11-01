@@ -69,6 +69,7 @@ import {
   LIVE_STATUSES,
   ROOT,
   dirtyTreeReport,
+  isReparsePoint,
   failJson,
   git,
   isAffirmative,
@@ -976,14 +977,33 @@ function cmdRemove(args) {
  * should have been. Each link is removed as a link — its target (typically the
  * main checkout) keeps its files.
  *
- * The walk is bounded, and depth 3 is evidence, not a cap of convenience: on
- * win32 git follows a nested junction (ui/node_modules) exactly as happily as a
- * root-level one, so a top-level-only scan would protect one of the two
- * locations this repo actually provisions. Descent into real `node_modules`
- * directories is pruned — what lives under them is a package manager's domain
- * (and its internal link structure is recreated by every install), which is
- * what keeps this a handful of lstat calls per directory instead of a walk of
- * the dependency tree.
+ * The walk descends EVERY real directory — no depth cutoff, and real
+ * `node_modules` directories are no longer pruned (FOC-1153 r1): a pnpm-style
+ * store junction lives at `node_modules/<…>/node_modules/<pkg>`, exactly one
+ * level deeper than the depth-3, node_modules-pruned walk ever visited, and
+ * git follows those as happily as root-level ones. The bound is therefore the
+ * tree's own real-directory structure: a reparse point is removed on sight and
+ * never descended through, so the walk cannot loop, and the cost is one
+ * readdir + lstat per real directory — node_modules is bounded in practice,
+ * and this runs once per removal, behind a human approval, not on a timer.
+ *
+ * Link detection is dirent-wide, not lstat's alone (r1, nit 4): lstat resolves
+ * a reparse point whose tag is neither IO_REPARSE_TAG_SYMLINK nor MOUNT_POINT
+ * (a OneDrive cloud placeholder) to its target shape, while libuv's win32
+ * scandir marks every FILE_ATTRIBUTE_REPARSE_POINT entry as a link whatever
+ * its tag. Never descending through one is what keeps the walk out of a link's
+ * target tree — which is also why a directory-shaped reparse point the walk
+ * cannot unlink fails the removal loudly rather than being entered.
+ *
+ * A git-TRACKED symlink is NOT unlinked (r1): unlinking it is a content change
+ * the approval never showed, and leaving it in place is not safe either —
+ * `git worktree remove --force` follows a TRACKED junction and destroys the
+ * target (probed). So the removal is refused instead, naming the link; resolve
+ * it manually and re-propose. Untracked links are the incident class and are
+ * unlinked as before. When git cannot be asked (ls-files failed), the walk
+ * falls back to treating every link as untracked rather than leave the
+ * incident class unprotected — the worst case for a tracked link lost that way
+ * is a dirty tree whose removal git itself then refuses.
  *
  * Runs BEFORE `git worktree remove` and refuses the removal when a link cannot
  * be unlinked: a git remove that follows an unremovable link is the incident
@@ -994,23 +1014,32 @@ function cmdRemove(args) {
  */
 function unlinkReparsePoints(worktree) {
   const removed = [];
-  const visit = (dir, rel, depth) => {
+  const trackedLinks = trackedSymlinkPaths(worktree);
+  const visit = (dir, rel) => {
     let entries;
     try {
-      entries = readdirSync(dir);
+      entries = readdirSync(dir, { withFileTypes: true });
     } catch {
       return; // unreadable — `git worktree remove` will surface its own error
     }
-    for (const name of entries) {
-      const abs = join(dir, name);
-      const path = rel ? `${rel}/${name}` : name;
+    for (const entry of entries) {
+      const abs = join(dir, entry.name);
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
       let st = null;
       try {
         st = lstatSync(abs);
       } catch {
         continue; // vanished between readdir and lstat — nothing to remove
       }
-      if (st.isSymbolicLink()) {
+      if (isReparsePoint(st, entry)) {
+        if (trackedLinks?.has(path)) {
+          failJson(
+            `refusing the removal: ${path} is a git-tracked symlink (mode 120000) — ` +
+              `unlinking it would change tracked content the approval never showed, and leaving it ` +
+              `would let git worktree remove follow it out of the tree; resolve the link, then re-propose`,
+            { worktree, link: path },
+          );
+        }
         let target = null;
         try {
           target = readlinkSync(abs);
@@ -1029,13 +1058,35 @@ function unlinkReparsePoints(worktree) {
         }
         continue;
       }
-      if (st.isDirectory() && depth < 3 && name !== "node_modules") {
-        visit(abs, path, depth + 1);
-      }
+      if (st.isDirectory()) visit(abs, path);
     }
   };
-  visit(worktree, "", 1);
+  visit(worktree, "");
   return removed;
+}
+
+/**
+ * The worktree's tracked symlinks, by mode straight out of the index — `120000`
+ * entries. `ls-files` answers relative to the worktree root and with forward
+ * slashes, which is the form the walk's relative paths use. Returns null when
+ * git could not be asked: the walk then treats every link as untracked rather
+ * than leave the incident class unprotected.
+ */
+function trackedSymlinkPaths(worktree) {
+  let out;
+  try {
+    out = git(["ls-files", "-s", "-z"], worktree);
+  } catch {
+    return null;
+  }
+  const links = new Set();
+  for (const record of out.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    if (record.slice(0, tab).split(" ")[0] === "120000") links.add(record.slice(tab + 1));
+  }
+  return links;
 }
 
 /**
@@ -1054,7 +1105,9 @@ function unlinkReparsePoints(worktree) {
 function performRemoval({ runId, childId, entry, repo, state, forced, keys, archive, registryExtra = {} }) {
   // FOC-1153 ordering: the links come out before the one destructive act, so
   // git never sees them. The verdict/archive steps above ran on the tree AS
-  // FOUND — the links are untracked, unarchivable shapes, not work product.
+  // FOUND — untracked links are unarchivable shapes, not work product; a
+  // git-TRACKED link IS content, and unlinking it would change the tree the
+  // approval covered, so the walk refuses those instead of unlinking (r1).
   const removedLinks = unlinkReparsePoints(entry.worktree);
   const gitArgs = ["worktree", "remove", entry.worktree, ...(forced ? ["--force"] : [])];
   try {

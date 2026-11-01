@@ -12,7 +12,18 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -34,6 +45,7 @@ import {
   childTreeGitArgs,
   childTreeRoot,
   gatePath,
+  isReparsePoint,
   readRegistry,
   supervisorStateHome,
   writeRegistry,
@@ -747,6 +759,134 @@ test("remove unlinks junctions inside the worktree and keeps their targets intac
     (out.removedLinks ?? []).some((l) => l.includes("node_modules")),
     `the report does not name the handled links: ${JSON.stringify(out.removedLinks)}`,
   );
+});
+
+// ── reparse points, r1: deeper, and tracked links are content ────────────────
+console.log("\nreparse points, r1 — node_modules itself, and git-tracked links");
+
+test("remove unlinks a junction planted INSIDE node_modules (the pnpm store shape)", () => {
+  // The r1 finding: the walk pruned real node_modules and cut off at depth 3,
+  // so a junction one level INSIDE node_modules — where pnpm's .pnpm store
+  // links live — was never visited, and git followed it exactly as happily
+  // (probed on this machine: the sentinel below dies on the unfixed walk).
+  const s = scenario({ dirty: "scratch.txt" });
+  const outside = join(s.base, "inside-nm-target");
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "sentinel.txt"), "keep\n");
+  // A real node_modules with real content — the shape every install leaves.
+  mkdirSync(join(s.worktree, "node_modules", "some-dep"), { recursive: true });
+  writeFileSync(join(s.worktree, "node_modules", "some-dep", "index.js"), "real dep\n");
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  symlinkSync(outside, join(s.worktree, "node_modules", ".store-link"), linkType);
+
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.ok(!existsSync(s.worktree), "the worktree was not removed");
+  assert.ok(
+    existsSync(join(outside, "sentinel.txt")),
+    "the removal followed the junction inside node_modules — the walk never visited it",
+  );
+  assert.ok(
+    (out.removedLinks ?? []).some((l) => l.includes("node_modules/.store-link")),
+    `the report does not name the junction inside node_modules: ${JSON.stringify(out.removedLinks)}`,
+  );
+});
+
+test("a git-TRACKED symlink is content, not the incident shape — the removal refuses", () => {
+  // Unlinking a tracked link is a content change the approval never showed,
+  // and leaving it in place is not safe either: probed on this machine, `git
+  // worktree remove --force` follows a TRACKED junction and destroys the
+  // target. So the removal cannot proceed silently in either direction — it
+  // refuses, names the link, and leaves the tree standing.
+  const { base, repo } = fixtureRepo();
+  // Track a symlink (mode 120000) without needing a host symlink: the blob
+  // carries the target text, the index entry carries the mode.
+  const sha = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+    cwd: repo,
+    input: "../tracked-target",
+    encoding: "utf8",
+  }).stdout.trim();
+  gitIn(repo, "update-index", "--add", "--cacheinfo", `120000,${sha},tracked-link`);
+  gitIn(repo, "commit", "-m", "tracked symlink");
+
+  const wt = fixtureWorktree(repo);
+  const runId = fixtureRun();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "dev-1": {
+        childId: "dev-1",
+        squad: "dev",
+        taskId: "FOC-123",
+        sessionId: "11111111-2222-3333-4444-555555555555",
+        status: "exited",
+        turns: [{ pid: 1 }],
+        worktree: wt.worktree,
+        branch: wt.branch,
+        baseRevision: wt.baseRevision,
+        allowedPaths: [],
+      },
+    },
+    rounds: {},
+  });
+
+  const outside = join(base, "tracked-target");
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "sentinel.txt"), "keep\n");
+  // core.symlinks=false checks a tracked link out as a plain file carrying the
+  // target text; replace it with the actual reparse point a symlinks-enabled
+  // checkout (or a child's improvisation) would leave. POSIX checks out the
+  // real link — removing and re-creating the identical shape is a no-op there.
+  rmSync(join(wt.worktree, "tracked-link"));
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  symlinkSync(outside, join(wt.worktree, "tracked-link"), linkType);
+
+  const s = { base, repo, runId, ...wt, done: issueFile(base, "Done", "completed") };
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, false, "the removal must refuse, not unlink tracked content");
+  assert.match(out.error, /git-tracked symlink/);
+  assert.ok(existsSync(wt.worktree), "the tree was removed despite the tracked-link refusal");
+  assert.ok(
+    existsSync(join(outside, "sentinel.txt")),
+    "the tracked junction's target lost its content",
+  );
+});
+
+test("isReparsePoint sees a junction by lstat and by dirent — and never a real directory", () => {
+  // Nit 4: detection used to rest on lstat alone, which resolves away the
+  // reparse tags that are neither symlink nor mount point — a OneDrive cloud
+  // placeholder reads as its target's shape, invisible to isSymbolicLink().
+  // The readdir dirent carries the reparse attribute for every tag (libuv's
+  // win32 scandir marks such an entry a link), so the shared predicate takes
+  // both views, and the cleanup walk and the provisioning skip rule consult
+  // the same one.
+  const dir = mkdtempSync(join(tmpdir(), "foc1153-reparse-"));
+  cleanupLater(dir);
+  const realDir = join(dir, "real-dir");
+  mkdirSync(realDir);
+  writeFileSync(join(dir, "real-file.txt"), "x");
+  const target = join(dir, "link-target");
+  mkdirSync(target);
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  symlinkSync(target, join(dir, "linked"), linkType);
+
+  assert.equal(isReparsePoint(lstatSync(realDir)), false, "a real directory is not a reparse point");
+  assert.equal(isReparsePoint(lstatSync(join(dir, "real-file.txt"))), false, "a real file is not a reparse point");
+  assert.equal(isReparsePoint(lstatSync(join(dir, "linked"))), true, "lstat must see the junction");
+
+  // The same three through the dirent view the walk and the skip rule use —
+  // on win32 this is the view that survives a non-symlink reparse tag.
+  const entries = readdirSync(dir, { withFileTypes: true });
+  const direntFor = (name) => entries.find((e) => e.name === name);
+  assert.equal(isReparsePoint(lstatSync(realDir), direntFor("real-dir")), false, "dirent view flags a real directory");
+  assert.equal(
+    isReparsePoint(lstatSync(join(dir, "real-file.txt")), direntFor("real-file.txt")),
+    false,
+    "dirent view flags a real file",
+  );
+  assert.equal(isReparsePoint(lstatSync(join(dir, "linked")), direntFor("linked")), true, "dirent view must see the junction");
 });
 
 summary();

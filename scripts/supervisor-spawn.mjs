@@ -655,7 +655,7 @@ if (referencedFiles.length) {
 // install is recorded and said out loud, but a child that can still work
 // without fresh deps is worth more than no child at all. Runs after every free
 // refusal above, so a refused spawn never pays for an install.
-const depsInstall = installWorktreeDeps(worktree.worktree);
+const depsInstall = await installWorktreeDeps(worktree.worktree);
 if (depsInstall.ok) {
   const installed = depsInstall.locations.filter((l) => !l.skipped);
   if (installed.length) {

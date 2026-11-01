@@ -13,7 +13,7 @@
 //   wake-ack.json        the persisted drain watermark (FOC-608; status writes)
 //   triage.json          the recorded verdict (FOC-123, read here, never written)
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1834,6 +1834,13 @@ const REDACTIONS = [
   [/\b(api[_-]?key)\s*[=:]\s*\S+/gi, "$1=***"],
   [/\bBearer\s+\S+/gi, "Bearer ***"],
   [/\b(password)\s*[=:]\s*\S+/gi, "$1=***"],
+  // FOC-1153 r1 (nit 6): an npm failure echoes the configured registry/proxy
+  // URL, and a private registry's URL carries its credentials in the authority
+  // — https://user:pass@registry.example/ — which none of the shapes above
+  // matched. The scheme is kept so the line still reads as a URL.
+  [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1***@"],
+  // npm's credential shape in .npmrc-backed error output.
+  [/\b(_?authToken)\s*[=:]\s*\S+/gi, "$1=***"],
 ];
 
 export function redact(text) {
@@ -2144,6 +2151,35 @@ function withOwnership(gitRoot, result, ownerId) {
 // comfortably above this repo's own installs, which measure in seconds.
 const DEPS_INSTALL_TIMEOUT_MS = 300_000;
 
+/** Test seam for the production budget above — the r1 orphan test needs a
+ * timeout a test can afford. Ignored when unset or not a positive number. */
+const installTimeoutMs = () => {
+  const raw = Number(process.env.LA_DEPS_INSTALL_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEPS_INSTALL_TIMEOUT_MS;
+};
+
+// Only the tail of an install's output is ever used (the record keeps 5 lines),
+// so the accumulated stream is kept to a 1 MiB tail rather than unbounded —
+// the same bounded-output intent spawnSync's maxBuffer had, without holding
+// the whole 64 MB in memory.
+const INSTALL_OUTPUT_KEEP_BYTES = 1024 * 1024;
+
+/**
+ * True when the entry is a reparse point of ANY win32 tag, not merely a symlink
+ * or junction (FOC-1153 r1, nit 4). lstat alone cannot see the attribute: it
+ * resolves a reparse point whose tag is neither IO_REPARSE_TAG_SYMLINK nor
+ * MOUNT_POINT (a OneDrive cloud placeholder) to its target shape, so
+ * `isSymbolicLink()` misses it. The readdir dirent CAN see it — libuv's win32
+ * scandir marks every FILE_ATTRIBUTE_REPARSE_POINT entry as a link whatever
+ * its tag (probed here for junctions; the placeholder-tag shape is that same
+ * marker, not plantable on this machine to probe directly). On POSIX the
+ * dirent and lstat agree, so callers without a dirent lose nothing there.
+ */
+export function isReparsePoint(st, dirent = null) {
+  if (st.isSymbolicLink()) return true;
+  return process.platform === "win32" && Boolean(dirent?.isSymbolicLink());
+}
+
 /**
  * One install location (root or ui/). Tolerant by design: a directory without a
  * package.json is skipped, not an error — not every tree a child works in has
@@ -2152,11 +2188,11 @@ const DEPS_INSTALL_TIMEOUT_MS = 300_000;
  * The skip rule is lstat-shaped on purpose: existsSync follows the link, and a
  * junction very much "exists" — the 2026-11-01 incident had a junction standing
  * where a real node_modules should have been, because a child improvised the
- * install itself. A reparse point (win32 junctions report isSymbolicLink on
- * this node) is unlinked AS A LINK — never its target's content — and the
- * install runs fresh into a real directory.
+ * install itself. A reparse point — by lstat, or by the dirent check that
+ * catches the tags lstat resolves away (nit 4) — is unlinked AS A LINK, never
+ * its target's content, and the install runs fresh into a real directory.
  */
-function installDepsAt(dir, location) {
+async function installDepsAt(dir, location) {
   const record = { location, path: dir };
   if (!existsSync(join(dir, "package.json"))) {
     return { ...record, skipped: true, reason: "no package.json" };
@@ -2168,7 +2204,17 @@ function installDepsAt(dir, location) {
   } catch {
     st = null; // absent — nothing to skip and nothing to replace
   }
-  if (st && !st.isSymbolicLink() && st.isDirectory()) {
+  let dirent = null;
+  if (st && process.platform === "win32") {
+    // The one look that sees a non-symlink reparse tag (nit 4); an unreadable
+    // parent leaves lstat's answer as all we have.
+    try {
+      dirent = readdirSync(dir, { withFileTypes: true }).find((e) => e.name === "node_modules") ?? null;
+    } catch {
+      dirent = null;
+    }
+  }
+  if (st && !isReparsePoint(st, dirent) && st.isDirectory()) {
     return { ...record, skipped: true, reason: "node_modules already present" };
   }
   if (st) {
@@ -2188,23 +2234,63 @@ function installDepsAt(dir, location) {
   // registry state and that is worth naming in the record.
   const hasLockfile = existsSync(join(dir, "package-lock.json"));
   const command = hasLockfile ? "npm ci" : "npm install";
-  const res = spawnSync(command, ["--no-audit", "--no-fund"], {
-    cwd: dir,
-    encoding: "utf8",
-    shell: true,
-    timeout: DEPS_INSTALL_TIMEOUT_MS,
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const run = await runBoundedInstall(dir, command, ["--no-audit", "--no-fund"]);
   return {
     ...record,
     skipped: false,
-    ok: res.status === 0,
+    ok: run.code === 0,
     command,
-    exitCode: res.status,
-    timedOut: Boolean(res.error && /ETIMEDOUT|timed out/i.test(res.error.message)),
-    error: res.error ? res.error.message.split("\n")[0] : null,
-    tail: `${res.stdout ?? ""}${res.stderr ?? ""}`.split("\n").filter(Boolean).slice(-5),
+    exitCode: run.code,
+    timedOut: run.timedOut,
+    // nit 6: the record lands in the registry entry and the spawn result, so it
+    // is scrubbed HERE, where every consumer inherits it — npm scrubs its own
+    // error lines, but an install script's output passes through raw.
+    error: run.spawnError ? redact(run.spawnError.split("\n")[0]) : null,
+    tail: run.output.split("\n").filter(Boolean).slice(-5).map(redact),
   };
+}
+
+/**
+ * The bounded install run, as a child_process.spawn instead of spawnSync —
+ * the r1 finding (nit 5): spawnSync's timeout kills only the DIRECT child,
+ * which with shell:true is cmd.exe, so the npm grandchild it launched survives
+ * as an orphan holding locks in the tree. Here the timeout fires our own timer,
+ * which calls the repo's existing tree kill on the shell's pid — taskkill /T /F
+ * on win32; on POSIX the child is spawned detached (its own process group) so
+ * killTree's group kill lands. shell:true stays: npm is a .cmd on win32, and
+ * node refuses to spawn .cmd without a shell.
+ */
+function runBoundedInstall(dir, command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: dir,
+      shell: true,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    let spawnError = null;
+    let timedOut = false;
+    child.stdout.on("data", (chunk) => {
+      output = `${output}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
+    });
+    child.stderr.on("data", (chunk) => {
+      output = `${output}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child.pid, "force");
+    }, installTimeoutMs());
+    child.on("error", (err) => {
+      spawnError = spawnError ?? err.message;
+    });
+    // `close` always follows `error` (node contract), so this is the one exit.
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, timedOut, spawnError, output });
+    });
+  });
 }
 
 /**
@@ -2224,10 +2310,10 @@ function installDepsAt(dir, location) {
  * tool makes (it skips on existsSync). Freshness is re-established by the
  * child's own build, and the failure is in the record, never silent.
  *
- * @returns {{ worktree: string, ok: boolean, locations: object[] }}
+ * @returns {Promise<{ worktree: string, ok: boolean, locations: object[] }>}
  */
-export function installWorktreeDeps(worktree) {
-  const locations = [installDepsAt(worktree, "root"), installDepsAt(join(worktree, "ui"), "ui")];
+export async function installWorktreeDeps(worktree) {
+  const locations = [await installDepsAt(worktree, "root"), await installDepsAt(join(worktree, "ui"), "ui")];
   return {
     worktree,
     ok: locations.every((l) => l.skipped || l.ok),
