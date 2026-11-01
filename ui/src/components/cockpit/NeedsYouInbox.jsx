@@ -110,7 +110,9 @@ function NeedsYouItem({ item, scope, onAskSupervisor, onRefresh }) {
       setNote('');
       setTextOption(null);
     } catch (e) {
-      setError(e.data?.error || e.message || String(e));
+      // Human reason when the route sends one, machine code as fallback, then
+      // the plain error for non-HTTP failures (no e.data at all).
+      setError(e.data?.reason || e.data?.error || e.message || String(e));
     } finally {
       setBusy(false);
     }

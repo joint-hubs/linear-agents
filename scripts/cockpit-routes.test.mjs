@@ -598,7 +598,15 @@ try {
     });
     writeFileSync(join(supState, "run-1", "holds.json"), JSON.stringify(holdsNt), "utf8");
     const bareLabel = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-3", text: "Provide the values" } });
-    check("needsText hold answered with its bare option label -> 400", bareLabel.status === 400, JSON.stringify(bareLabel));
+    // The body contract is answerErrorBody's shape: the machine code under
+    // `error` and the human refusal message under `reason` — asserted so a
+    // refactor that keeps the 400 but breaks the body fails here.
+    check("needsText hold answered with its bare option label -> 400 + {error, reason} body",
+      bareLabel.status === 400
+        && bareLabel.body?.error === "invalid-answer"
+        && typeof bareLabel.body?.reason === "string"
+        && /needs the values as text/.test(bareLabel.body.reason),
+      JSON.stringify(bareLabel));
     check("needsText 400 wrote nothing (hold still open)",
       JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8")).holds.find((h) => h.id === "hold-3")?.state === "open",
       "hold-3 state after the 400");

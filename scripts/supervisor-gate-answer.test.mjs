@@ -325,6 +325,32 @@ test("needsText hold: the bare option label is refused at answerHold, real value
   assert.equal(labelled.answer.optionLabel, "Provide the values", "values + optionLabel are a real answer");
 });
 
+// FOC-1109 round-3 guard: the refusal must fire ONLY for needsText labels.
+// On a MIXED hold — one needsText option AND one plain option — the plain
+// option's label as text (no optionLabel) is a normal, recordable answer.
+test("mixed hold: needsText + plain option — the plain option's label as text still records", () => {
+  const mixedOptions = [
+    { label: "wait", model: "test/model", costUsd: null, unpricedModel: "test/model" },
+    { label: "Provide the values", model: "user", costUsd: 0, needsText: true },
+  ];
+
+  const runId = freshRun();
+  seedHold(runId, { options: mixedOptions });
+  const updated = answerHold({ runId, holdId: "hold-1", text: "wait", now: NOW });
+  assert.equal(updated.state, "answered", "the plain option's label is a real answer");
+  assert.equal(updated.answer.text, "wait");
+  assert.equal("optionLabel" in updated.answer, false, "no optionLabel given — the record keeps its shape");
+
+  const refusedRun = freshRun();
+  seedHold(refusedRun, { options: mixedOptions });
+  throwWith(
+    () => answerHold({ runId: refusedRun, holdId: "hold-1", text: "Provide the values", now: NOW }),
+    "invalid-answer",
+    "the needsText label on the same mixed hold is still refused",
+  );
+  assert.equal(readHolds(refusedRun).holds[0].state, "open", "the refusal wrote nothing");
+});
+
 test("CLI answer --hold hits the same needsText refusal through answerHold (FOC-1109 fixup)", () => {
   const runId = freshRun();
   seedHold(runId, {
