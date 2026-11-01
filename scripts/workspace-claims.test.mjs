@@ -31,6 +31,7 @@ import {
   integrationLockPathFor,
   readIntegrationLock,
   readWorkspaceClaims,
+  releaseClaim,
   withIntegrationLock,
 } from "./workspace-claims.mjs";
 import { ensureWorktree } from "./supervisor-lib.mjs";
@@ -375,6 +376,47 @@ console.log("managed ensureWorktree is refused while the lock is held, and succe
   if (v.lockAfterCleanExit) fail("a clean exit must release the lock, not leave it for recovery");
   if (v.createdAfterRelease !== true) fail(`the same call must succeed after release, got ${JSON.stringify(v.createdAfterRelease)}`);
   test("managed ensureWorktree is refused fail-fast while the lock is held and succeeds after a clean release", () => {});
+}
+
+// ── 12. releaseClaim (FOC-1088) ──────────────────────────────────────────────
+console.log("\nreleaseClaim: owner-only, idempotent, re-claimable, CLI-served, fail-closed");
+{
+  const { repo } = fixtureRepo();
+  const owner = "task-session:jointhubs:FOC-1";
+  claimWorkspace({ gitRoot: repo, branch: "foc-1-task", worktree: inRoot(repo, "wt-release"), ownerId: owner });
+  // Another owner cannot release somebody else's claim — no steal, no reset.
+  assert.throws(
+    () => releaseClaim({ gitRoot: repo, branch: "foc-1-task", ownerId: "task-session:jointhubs:FOC-2" }),
+    /claimed by owner "task-session:jointhubs:FOC-1"/,
+  );
+  if (!readWorkspaceClaims({ gitRoot: repo }).claims.some((c) => c.branch === "foc-1-task")) {
+    fail("a refused release must leave the claim in place");
+  }
+  // The owner releases; the registry no longer holds the branch.
+  const out = releaseClaim({ gitRoot: repo, branch: "foc-1-task", ownerId: owner });
+  if (out.ok !== true || out.released !== true) fail(`the owner's release must succeed, got ${JSON.stringify(out)}`);
+  if (readWorkspaceClaims({ gitRoot: repo }).claims.length !== 0) fail("the released claim must be gone from the registry");
+  // Idempotent: releasing an absent claim is a no-op, not an error — a stop
+  // path must not fail because there is nothing to release.
+  const again = releaseClaim({ gitRoot: repo, branch: "foc-1-task", ownerId: owner });
+  if (again.ok !== true || again.released !== false) fail(`releasing an absent claim must be a no-op, got ${JSON.stringify(again)}`);
+  // A released branch is claimable again — the task's next generation
+  // re-claims its own deterministic branch.
+  const re = claimWorkspace({ gitRoot: repo, branch: "foc-1-task", worktree: inRoot(repo, "wt-release"), ownerId: owner });
+  if (re.status !== "claimed") fail(`a released branch must be claimable again, got ${re.status}`);
+  // The CLI verb goes through the same validated path.
+  const cli = runScript(CLAIMS, ["release", "--git-root", repo, "--branch", "foc-1-task", "--owner", owner]);
+  if (cli.status !== 0) fail(`the release CLI must exit 0, got ${cli.status}: ${cli.stderr}`);
+  const body = JSON.parse(cli.stdout);
+  if (body.ok !== true || body.released !== true) fail(`the release CLI must release, got ${JSON.stringify(body)}`);
+  if (readWorkspaceClaims({ gitRoot: repo }).claims.length !== 0) fail("the CLI release must clear the registry");
+  // A corrupt registry fails closed on release, exactly as it does on claim.
+  const { repo: broken } = fixtureRepo();
+  const dir = join(commonGitDir(broken), "workspace-claims");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "claims.json"), "{ not json");
+  assert.throws(() => releaseClaim({ gitRoot: broken, branch: "b", ownerId: "o" }), /not readable JSON/);
+  test("releaseClaim releases only the owner's claim, is idempotent when absent, and fails closed on a corrupt registry", () => {});
 }
 
 summary();

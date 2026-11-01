@@ -170,11 +170,18 @@ function taskSessionsErrors(value) {
     return errors;
   }
   for (const key of Object.keys(value)) {
-    if (key !== "maxActive" && key !== "autoPickup" && key !== "parkedPrompt" && key !== "parkedPromptMinutes")
+    if (key !== "maxActive" && key !== "autoPickup" && key !== "parkedPrompt" && key !== "parkedPromptMinutes" && key !== "worktrees")
       errors.push(`taskSessions.${key}: unknown key`);
   }
   if (value.maxActive !== undefined && (!Number.isInteger(value.maxActive) || value.maxActive < 1 || value.maxActive > 8)) {
     errors.push("taskSessions.maxActive: must be an integer between 1 and 8");
+  }
+  // FOC-1088: the per-task worktree lane switch. Default true — the shared
+  // checkout is the data-integrity bug (two managed sessions editing one
+  // tree), the cap is 1 anyway, so isolation is the safe default and turning
+  // it off is the operator's explicit call.
+  if (value.worktrees !== undefined && typeof value.worktrees !== "boolean") {
+    errors.push("taskSessions.worktrees: must be a boolean");
   }
   // FOC-920: the parked-prompt policy — "wait" keeps waiting for the reply,
   // "deny-after" denies the task once the parked window elapses.
@@ -403,12 +410,17 @@ export function normalizeParkedPrompt(section) {
 
 const PARKED_PROMPT_FALLBACK = () => ({ ...PARKED_PROMPT_DEFAULTS });
 
+// FOC-1088: the per-task worktree lane defaults ON — even when the overlay is
+// missing or invalid. An unreadable settings file is not an operator's "off":
+// the lane fails sessions closed per task (with the remedy in lastError), so
+// defaulting on here never silently reintroduces the shared checkout, while
+// defaulting off would.
 export function readTaskSessionsSettings(env = process.env, { quiet = false } = {}) {
   const fail = (message) => {
     if (!quiet) console.error(message);
     return quiet
-      ? { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK(), error: message }
-      : { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK() };
+      ? { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK(), worktrees: true, error: message }
+      : { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK(), worktrees: true };
   };
   let settings;
   try {
@@ -417,7 +429,9 @@ export function readTaskSessionsSettings(env = process.env, { quiet = false } = 
     return fail(`settings: ${err?.message ?? err} — taskSessions settings ignored`);
   }
   const value = isPlainObject(settings) ? settings.taskSessions : undefined;
-  if (value === undefined) return { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK() };
+  if (value === undefined) {
+    return { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK(), worktrees: true };
+  }
   const errors = taskSessionsErrors(value);
   if (errors.length > 0) {
     return fail(`settings ${errors[0]} — ignoring the taskSessions section`);
@@ -426,6 +440,7 @@ export function readTaskSessionsSettings(env = process.env, { quiet = false } = 
     maxActive: value.maxActive ?? null,
     autoPickup: value.autoPickup !== undefined ? normalizeAutoPickup(value.autoPickup) : null,
     parkedPrompt: normalizeParkedPrompt(value),
+    worktrees: value.worktrees ?? true,
   };
 }
 

@@ -670,6 +670,33 @@ test("validateSettings: taskSessions must be an object and only knows maxActive"
   assert.equal(validateSettings({ ...VALID, taskSessionsCap: 2 }).ok, false, "other new keys stay refused");
 });
 
+test("validateSettings: taskSessions.worktrees accepts booleans, refuses the rest; the set CLI round-trips it", async () => {
+  assert.equal(validateSettings({ taskSessions: { worktrees: true } }).ok, true);
+  assert.equal(validateSettings({ taskSessions: { worktrees: false } }).ok, true);
+  for (const bad of ["false", 0, 1, null]) {
+    const { ok, errors } = validateSettings({ taskSessions: { worktrees: bad } });
+    assert.equal(ok, false, `${JSON.stringify(bad)} must be refused`);
+    assert.ok(errors.includes("taskSessions.worktrees: must be a boolean"));
+  }
+  // Round-trip through the set CLI: the operator's off switch, stored as a
+  // real boolean and read back as one (readTaskSessionsSettings defaults true
+  // when the key is absent — covered by the deepEqual defaults above).
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "taskSessions.worktrees", "false");
+    assert.deepEqual(readSettings({ path }).taskSessions, { worktrees: false });
+    assert.equal(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }).worktrees, false);
+    await assert.rejects(runSet(path, "taskSessions.worktrees", "off"), (err) => {
+      assert.equal(err.code, 1);
+      assert.ok(err.stderr.includes("taskSessions.worktrees: must be a boolean"));
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("writeSettings round-trips taskSessions.maxActive and the set CLI works", async () => {
   const dir = tempDir();
   try {
@@ -680,6 +707,7 @@ test("writeSettings round-trips taskSessions.maxActive and the set CLI works", a
       maxActive: 4,
       autoPickup: null,
       parkedPrompt: { mode: "wait", minutes: 30 },
+      worktrees: true,
     });
     await assert.rejects(runSet(path, "taskSessions.maxActive", "9"), (err) => {
       assert.equal(err.code, 1);
@@ -699,6 +727,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
       maxActive: null,
       autoPickup: null,
       parkedPrompt: { mode: "wait", minutes: 30 },
+      worktrees: true,
     });
     // Invalid JSON.
     const bad = settingsFile(dir);
@@ -711,6 +740,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
         maxActive: null,
         autoPickup: null,
         parkedPrompt: { mode: "wait", minutes: 30 },
+        worktrees: true,
       });
       assert.equal(errs.length, 1);
       assert.match(errs[0], /taskSessions settings ignored/);
@@ -727,6 +757,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
         maxActive: null,
         autoPickup: null,
         parkedPrompt: { mode: "wait", minutes: 30 },
+        worktrees: true,
       });
       assert.equal(errs2.length, 1);
       assert.match(errs2[0], /must be an integer between 1 and 8/);
@@ -743,6 +774,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
         maxActive: null,
         autoPickup: null,
         parkedPrompt: { mode: "wait", minutes: 30 },
+        worktrees: true,
       });
       assert.equal(errs3.length, 0);
     } finally {
@@ -768,7 +800,7 @@ test("readTaskSessionsSettings: quiet swallows the stderr line and returns the r
       assert.equal(errs.length, 0, "quiet must not print to stderr");
       // A missing overlay is not an error — quiet or not, no reason attached.
       const missing = readTaskSessionsSettings({ LA_SETTINGS_FILE: join(dir, "nope.json") }, { quiet: true });
-      assert.deepEqual(missing, { maxActive: null, autoPickup: null, parkedPrompt: { mode: "wait", minutes: 30 } });
+      assert.deepEqual(missing, { maxActive: null, autoPickup: null, parkedPrompt: { mode: "wait", minutes: 30 }, worktrees: true });
     } finally {
       console.error = orig;
     }
@@ -834,6 +866,7 @@ test("readTaskSessionsSettings: autoPickup is normalized with the documented def
       maxActive: 3,
       autoPickup: { enabled: true, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null },
       parkedPrompt: { mode: "wait", minutes: 30 },
+      worktrees: true,
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -853,6 +886,7 @@ test("readTaskSessionsSettings: an invalid autoPickup discards the whole taskSes
         maxActive: null,
         autoPickup: null,
         parkedPrompt: { mode: "wait", minutes: 30 },
+        worktrees: true,
       });
       assert.equal(errs.length, 1);
       assert.match(errs[0], /taskSessions\.autoPickup\.pollSeconds/);
@@ -926,6 +960,7 @@ test("readTaskSessionsSettings: parkedPrompt returns the configured values, defa
       maxActive: null,
       autoPickup: null,
       parkedPrompt: { mode: "deny-after", minutes: 120 },
+      worktrees: true,
     });
     // A file without taskSessions reads the defaults without noise.
     const quiet = join(dir, "quiet.json");
@@ -934,6 +969,7 @@ test("readTaskSessionsSettings: parkedPrompt returns the configured values, defa
       maxActive: null,
       autoPickup: null,
       parkedPrompt: { mode: "wait", minutes: 30 },
+      worktrees: true,
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -957,6 +993,7 @@ test("readTaskSessionsSettings: an invalid parkedPrompt discards the whole secti
         maxActive: null,
         autoPickup: null,
         parkedPrompt: { mode: "wait", minutes: 30 },
+        worktrees: true,
       });
       assert.equal(errs.length, 1);
       assert.match(errs[0], /taskSessions\.parkedPromptMinutes/);
@@ -981,6 +1018,7 @@ test("writeSettings round-trips parkedPrompt keys via the set CLI with the right
       maxActive: null,
       autoPickup: null,
       parkedPrompt: { mode: "deny-after", minutes: 45 },
+      worktrees: true,
     });
     await assert.rejects(runSet(path, "taskSessions.parkedPrompt", "nope"), (err) => {
       assert.equal(err.code, 1);
