@@ -566,24 +566,51 @@ function scanStall() {
 
 // ── FOC-1154: reap a turn that ended but whose process lingers ───────────────
 // The turn's work is done (the tee's last event is a terminal `result`) and the
-// child will not exit on its own — on win32 never, anywhere after a bounded
-// grace. Killing through the NORMAL exit path is what makes this cheap: the
-// kill fires the child's own exit/close handlers, finalizeTurn runs unchanged
+// child will not exit on its own — on win32 never. The reap REPLACES the false
+// stall at the SAME SLA, it does not preempt it: while the last event is a
+// result no stall row is queued (the guard in scanStall), and once that silence
+// reaches stallSilenceMs() the linger path reaps instead — at the SLA exactly
+// one of {stall row, reap} fires. The SLA, not a shorter grace, is the
+// threshold because a real child re-emits cumulative results mid-turn and can
+// then sit tee-silent for the duration of a background task
+// (supervisor-watch-cost.test.mjs): any sub-SLA grace would force-kill that
+// healthy child and dress the kill up as a clean exit.
+//
+// Killing through the NORMAL exit path is what makes this cheap: the kill
+// fires the child's own exit/close handlers, finalizeTurn runs unchanged
 // (registry status, gate handling, cost patch, the `exit` wake row) and the
 // watcher exits — no new wake class, no second finalizer to keep in sync.
-const LINGER_GRACE_MS = 10_000;
-let lingerReaped = false;
+let lingerReaped = false; // a reap LANDED — the exit row carries finishedLingering
+let lingerReapFailed = false; // both kill attempts failed — noted once, never faked
 let lingerFinalizeTimer = null;
 
 function scanLinger() {
-  if (finalized || lingerReaped || !lastEventIsResult) return;
-  if (Date.now() - lastEventAt < LINGER_GRACE_MS) return;
-  lingerReaped = true;
+  if (finalized || lingerReaped || lingerReapFailed || !lastEventIsResult) return;
+  // Liveness before the force-kill: 'exit' may have fired with the
+  // TAIL_DRAIN_MS finalize still pending — killing that pid could hit a
+  // RECYCLED process on win32. A child that demonstrably already exited needs
+  // no reap; its own finalizer is at most TAIL_DRAIN_MS away.
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  // Silence is measured past the terminal result itself (the event time, not
+  // the tee mtime — a watcher note must not move this anchor).
+  if (Date.now() - lastEventAt < STALL_AFTER_MS) return;
   note({
     subtype: "result_linger_reap",
     message: `last stream event was a terminal result ${Math.round((Date.now() - lastEventAt) / 1000)}s ago with no exit — reaping the lingering child (FOC-1154)`,
   });
-  killTree(child.pid, "force");
+  // killTree reports false for an already-gone tree. One retry; a double
+  // failure is recorded honestly and the child's own exit stays the finalizer —
+  // finalizeTurn(0) here would fabricate a clean exit for a tree that was not
+  // reaped.
+  if (!killTree(child.pid, "force") && !killTree(child.pid, "force")) {
+    lingerReapFailed = true;
+    note({
+      subtype: "result_linger_reap_failed",
+      message: `two force kills of pid ${child.pid} failed — leaving the child's own exit as the finalizer (FOC-1154)`,
+    });
+    return;
+  }
+  lingerReaped = true;
   // The kill normally lands through the child's own exit/close handlers within
   // TAIL_DRAIN_MS. The bound covers the case where neither fires (a kill that
   // failed on an already-detached tree): without it the watcher would outlive
