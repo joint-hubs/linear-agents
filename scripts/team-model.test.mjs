@@ -125,6 +125,14 @@ const SQUAD_CONFIG = {
  * same way the route loads it (turns straight from the store).
  */
 export function seedTeamFixture(dbPath, { now = NOW } = {}) {
+  // FOC-1150: every fixture date is an offset from NOW, re-anchored to `now`,
+  // so the seeded store is self-consistent with ANY clock the caller injects
+  // (team-routes.test.mjs passes the same value to the spawned server through
+  // the FENIX_TEAM_CLOCK_MS seam — nothing can age out, for any wall-clock
+  // date). The default now = NOW re-anchors to the original strings exactly,
+  // so the unit layer's NOW-derived expectations are untouched.
+  const shift = now - NOW;
+  const iso = (spec) => new Date(Date.parse(spec) + shift).toISOString();
   const db = openTelemetryDb(dbPath);
   try {
     db.prepare("INSERT INTO price_sets (price_set_id, config_hash, created_at, source) VALUES (?, ?, ?, ?)")
@@ -139,7 +147,7 @@ export function seedTeamFixture(dbPath, { now = NOW } = {}) {
     ];
     for (const r of runs) {
       db.prepare("INSERT INTO runs (run_id, squad, source, started_at, price_set_id, updated_at) VALUES (?, ?, 'fixture', ?, 'ps-fixture', ?)")
-        .run(r.runId, r.squad, r.startedAt, new Date(now).toISOString());
+        .run(r.runId, r.squad, iso(r.startedAt), new Date(now).toISOString());
     }
     for (const taskId of ["FOC-100", "FOC-200", "FOC-300"]) {
       db.prepare("INSERT INTO work_items (task_id, provider, workspace, identifier, created_at) VALUES (?, 'linear', 'joi', ?, ?)")
@@ -147,7 +155,7 @@ export function seedTeamFixture(dbPath, { now = NOW } = {}) {
     }
     for (const l of LINK_SPECS) {
       db.prepare("INSERT INTO run_task_links (link_id, run_id, task_id, role, valid_from, valid_to, source, confidence, created_at) VALUES (?, ?, ?, 'primary', ?, NULL, 'fixture', 1, ?)")
-        .run(`link-${l.runId}`, l.runId, l.taskId, l.validFrom, new Date(now).toISOString());
+        .run(`link-${l.runId}`, l.runId, l.taskId, iso(l.validFrom), new Date(now).toISOString());
     }
     TURN_SPECS.forEach((t, i) => {
       const usageId = `usage-${String(i).padStart(3, "0")}`;
@@ -156,7 +164,7 @@ export function seedTeamFixture(dbPath, { now = NOW } = {}) {
                   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                   source_path, source_offset, created_at, message_id)
                   VALUES (?, ?, ?, ?, ?, ?, 100, 50, 300, 40, ?, 0, ?, ?)`)
-        .run(usageId, t.runId, t.session, t.agentKey, t.model, t.ts, sourcePath, t.ts, `msg-${i}`);
+        .run(usageId, t.runId, t.session, t.agentKey, t.model, iso(t.ts), sourcePath, iso(t.ts), `msg-${i}`);
       db.prepare("INSERT INTO cost_facts (run_id, usage_id, price_set_id, cost_usd) VALUES (?, ?, 'ps-fixture', ?)").run(t.runId, usageId, t.cost);
     });
   } finally {

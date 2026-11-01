@@ -7,8 +7,11 @@
 // Flow per call: hand-validated arguments → repo_dir check (FOC-977: the PR
 // tools take the absolute path of the checkout the PR belongs to — gh must
 // start there, or it dies with "fatal: not a git repository" in the server's
-// cwd) → in-process egress screen on the title/body (assertEgressClean, before
-// anything leaves the process) → body through a temp file (--body-file, no
+// cwd) → in-process egress screen on the title/body (assertEgressClean) and
+// on base/head as git refs (assertEgressCleanGitRef, FOC-1090: refs are
+// validated ref names, so the entropy heuristic is skipped — families A–D
+// still block a prefixed token made of valid ref characters), before
+// anything leaves the process → body through a temp file (--body-file, no
 // shell) → gh-screened subprocess with cwd = repo_dir → typed envelope out.
 // Fail-closed end to end: callTool never throws, a block is a typed
 // egress_blocked envelope and the runner is never invoked.
@@ -18,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertEgressClean } from "../egress-screen.mjs";
+import { assertEgressClean, assertEgressCleanGitRef } from "../egress-screen.mjs";
 import { createMcpHandler, serveStdio } from "./jsonrpc.mjs";
 
 export const SERVER_INFO = { name: "fenix-github", version: "0.1.0" };
@@ -195,6 +198,20 @@ function screenOrBlock(tool, parts) {
   }
 }
 
+// FOC-1090: base/head are git ref names (checkBranch/BRANCH_RE above), not
+// free text — screened with the families A–D screen only. The entropy
+// heuristic is skipped because a valid ref (a kebab branch name, a commit
+// SHA) is not an unprefixed secret, and its 36-char lowercase form measures
+// "high-entropy" on the relaxed branch; a prefixed token is still blocked.
+function screenRefOrBlock(tool, key, ref) {
+  try {
+    assertEgressCleanGitRef(ref, `fenix-github ${tool} ${key}`);
+    return null;
+  } catch (err) {
+    return { ok: false, tool, error: { code: "egress_blocked", message: String(err?.message ?? err) } };
+  }
+}
+
 // Default runner: gh-screened as a child process, argv only (no shell), run
 // with cwd = the validated repo_dir (FOC-977). Never rejects — a spawn failure
 // surfaces as exit 127 (gh_missing), a timeout as exit 124 with timedOut
@@ -308,7 +325,9 @@ export function createFenixGithubServer({ runGh } = {}) {
         if (args.draft !== undefined && typeof args.draft !== "boolean") {
           return invalid(name, "draft must be a boolean");
         }
-        bad = screenOrBlock(name, [args.title, args.body, args.base, args.head]);
+        bad = screenOrBlock(name, [args.title, args.body]);
+        if (bad) return bad;
+        bad = screenRefOrBlock(name, "base", args.base) || screenRefOrBlock(name, "head", args.head);
         if (bad) return bad;
         const argvSuffix = [];
         if (args.base !== undefined) argvSuffix.push("--base", args.base);

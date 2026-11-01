@@ -140,6 +140,40 @@ await test("secret-shaped head (built at runtime) → egress_blocked, runner nev
   if (envelope.ok !== false || envelope.error.code !== "egress_blocked") fail("envelope: " + JSON.stringify(envelope));
 });
 
+await test("prefixed-token base → egress_blocked through the ref screen (FOC-1090: family A fires on refs)", async () => {
+  const canary = "ghp_".concat("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "3fXX");
+  const fake = fakeRunner({ exitCode: 0, stdout: "should-not-happen", stderr: "" });
+  const server = createFenixGithubServer({ runGh: fake.runGh });
+  const response = await call(server, "pr_create", { title: "T", body: "clean body", base: canary, repo_dir: repo });
+  if (fake.calls.length !== 0) fail("runner was called despite the ref screen on base");
+  const envelope = envelopeOf(response);
+  if (envelope.ok !== false || envelope.error.code !== "egress_blocked") fail("envelope: " + JSON.stringify(envelope));
+});
+
+await test("long kebab head and base pass the ref screen (FOC-1090), runner called with them verbatim", async () => {
+  const ref = "foc-1053-key-wizard-default-provider";
+  const fake = fakeRunner({ exitCode: 0, stdout: "https://github.com/joint-hubs/linear-agents/pull/8\n", stderr: "" });
+  const server = createFenixGithubServer({ runGh: fake.runGh });
+  const response = await call(server, "pr_create", { title: "T", body: "clean body", head: ref, base: "main", repo_dir: repo });
+  if (fake.calls.length !== 1) fail("runner not called for a ref-shaped head");
+  const envelope = envelopeOf(response);
+  if (envelope.ok !== true) fail("envelope: " + JSON.stringify(envelope));
+  if (!fake.calls[0].argv.includes(ref)) fail("head not passed to gh verbatim: " + JSON.stringify(fake.calls[0].argv));
+});
+
+await test("entropy-shaped head passes the ref screen (FOC-1090: family E skipped for ref fields), while the same string in the TITLE still blocks", async () => {
+  const ref = "QlUjD8Rx".concat("Ne2Gm5Zs", "Kw7Pv3Yb", "Tf6Hc1Lq", "Xe9Ao4Md");
+  const fake = fakeRunner({ exitCode: 0, stdout: "https://github.com/joint-hubs/linear-agents/pull/9\n", stderr: "" });
+  const server = createFenixGithubServer({ runGh: fake.runGh });
+  const asHead = await call(server, "pr_create", { title: "T", body: "clean body", head: ref, repo_dir: repo });
+  if (fake.calls.length !== 1) fail("runner not called — family E must not fire on a ref field");
+  if (envelopeOf(asHead).ok !== true) fail("head envelope: " + JSON.stringify(envelopeOf(asHead)));
+  const asTitle = await call(server, "pr_create", { title: "head " + ref, body: "clean body", repo_dir: repo });
+  if (fake.calls.length !== 1) fail("runner called for a free-text entropy hit in the title");
+  const envelope = envelopeOf(asTitle);
+  if (envelope.ok !== false || envelope.error.code !== "egress_blocked") fail("title envelope: " + JSON.stringify(envelope));
+});
+
 console.log("\nfenix-github: repo_dir validation (FOC-977)");
 
 await test("missing repo_dir → invalid_input, runner never called", async () => {

@@ -27,7 +27,7 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = join(__dirname, "..");
 const NODE = process.execPath;
 
-const { scanEgress, assertEgressClean, egressLeaves, EgressBlockedError, EGRESS_BLOCKED, egressSpans } = await import(
+const { scanEgress, assertEgressClean, egressLeaves, EgressBlockedError, EGRESS_BLOCKED, egressSpans, scanEgressGitRef, assertEgressCleanGitRef } = await import(
   pathToFileURL(join(__dirname, "egress-screen.mjs")).href
 );
 const { SYNTHETIC_SET } = await import(
@@ -298,6 +298,17 @@ console.log("chokepoint: clean body passes the screen (fails later, offline, on 
   assert(r.status === 1, "exit 1 (but from the API layer, not the screen)");
   assert(!r.err.includes("[egress-blocked]"), "no egress refusal for clean text");
   assert(r.err.includes("LINEAR_API_KEY not set"), "execution proceeded past the screen (offline key check precedes any fetch)");
+}
+
+console.log("chokepoint: a comment body quoting a kebab branch name passes the screen (FOC-1090)");
+{
+  // The exact rc.8 2026-10-26 false positive: linear-ops comment blocked on a
+  // branch name quoted in the body. Same hermetic shape as the case above —
+  // the run must get PAST the screen and die on the missing key instead.
+  const r = spawnOps(["comment", "FOC-450", "--body", "branch foc-1053-key-wizard-default-provider is ready for review"]);
+  assert(r.status === 1, "exit 1 (but from the API layer, not the screen)");
+  assert(!r.err.includes("[egress-blocked]"), "no egress refusal for the branch-name body");
+  assert(r.err.includes("LINEAR_API_KEY not set"), "execution proceeded past the screen (the slug is exempt, FOC-1090)");
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +601,102 @@ const issueUrl = (i) => `https://linear.app/joint-hubs/issue/${CORPUS[i][0]}/${C
     const prefixed = scanEgress(`${REF} ${FAKE_SK_OR}`);
     assert(prefixed.some((h) => h.family === "key-prefix"), "key-prefix family still fires beside a managed ref (exemption is family-E-only)");
   }
+}
+
+// ---------------------------------------------------------------------------
+// 10. Word-slug exemption (FOC-1090, 2026-10-26 rc.8: two blocks in one day
+//     — a linear-ops comment body quoting a branch name and a pr_create head
+//     carrying it). A run of >= 3 dash-separated segments where EVERY segment
+//     is a word ([a-z]{2,16}, pure letters, >= 1 vowel, no run of > 4
+//     consecutive consonants) or a number ([0-9]{1,4}) is a human word slug,
+//     not a secret. Family E only, position-independent; everything that
+//     does not fit the shape falls back to the ordinary family E rules.
+// ---------------------------------------------------------------------------
+
+{
+  // The exact rc.8 false positive — a literal, like the CORPUS slugs above
+  // (a branch name is not secret-shaped, and the whole point is that it must
+  // stop being flagged).
+  const SLUG = "foc-1053-key-wizard-default-provider";
+  // 23 random lowercase chars (no digit, no uppercase): the near-miss shape a
+  // token cannot hide in — it carries a 5-consonant run.
+  const RANDOM_LC = "qwzxvbnmkjhgfdsaploiuytr";
+
+  console.log("word-slug: kebab branch names scan clean anywhere in the text (AC1)");
+  assert(scanEgress(`branch: ${SLUG}\n`).length === 0, "the rc.8 branch name scans clean");
+  assert(scanEgress(`the fix landed in ${SLUG} today`).length === 0, "word slug inside prose is clean");
+  assert(scanEgress(`- Branch: \`${SLUG}\`\n- base \`main\``).length === 0, "word slug in a markdown bullet is clean");
+  assert(scanEgress(`branch ${SLUG} and joi-70-gantt-snapshot-cost-breakdown done`).length === 0, "number-bearing and word-only slugs are both clean");
+
+  console.log("word-slug: shape rules — every non-fitting variant falls back and stays blocked");
+  assert(scanEgress(`prose ${SLUG.toUpperCase()} end`).length >= 1, "uppercase variant is not word-like - blocked");
+  assert(scanEgress(`prose foc_1053_key_wizard_default_provider end`).length >= 1, "underscore variant is not word-like - blocked");
+  assert(scanEgress(`prose ${SLUG}- end`).length >= 1, "trailing hyphen (empty segment) fails the shape - blocked");
+  assert(scanEgress(`prose foc-1053--key-wizard-default-provider end`).length >= 1, "double hyphen (empty segment) fails the shape - blocked");
+  assert(scanEgress(`prose -${SLUG} end`).length >= 1, "leading hyphen (empty first segment) fails the shape - blocked");
+  assert(scanEgress(`prose foc-10531-key-wizard-default-provider end`).length >= 1, "a 5-digit group is a serial, not a number segment - blocked");
+  assert(scanEgress(`prose foc-12-handspring-castle-lantern end`).length >= 1, "a 5-consonant run inside a word fails the word rule - blocked");
+  assert(scanEgress(`prose foc-12-bcdfghjklmnp-qtvwxzrs-bcdfgjk end`).length >= 1, "vowel-less segments fail the word rule - blocked");
+
+  console.log("word-slug: a token hidden in an otherwise slug-shaped string is still blocked");
+  assert(scanEgress(`prose foc-12-` + "k3x9qmwzvrtplnhyocie1d4b7as" + ` end`).length >= 1, "a 30-char lowercase+digit segment is neither word nor number - blocked");
+  assert(scanEgress(`prose foc-12-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c end`).length >= 1, "a hex segment is neither word nor number - blocked (FOC-1090 hex interpretation)");
+
+  console.log("word-slug: glued secrets are part of the same run and stay blocked");
+  assert(scanEgress(`${SLUG}-${FAKE_ENTROPY}`).length >= 1, "<slug>-<random mixed-case> is one run and stays blocked");
+  assert(scanEgress(`${FAKE_ENTROPY}-${SLUG}`).length >= 1, "<random mixed-case>-<slug> is one run and stays blocked");
+  assert(scanEgress(`${SLUG}-${RANDOM_LC}`).length >= 1, "<slug>-<random lowercase> stays blocked (5-consonant run)");
+  assert(scanEgress(`${RANDOM_LC}-${SLUG}`).length >= 1, "<random lowercase>-<slug> stays blocked");
+
+  console.log("word-slug: family-E-only reach — the exemption shields nothing else");
+  {
+    const mixed = `${SLUG} rotated with ${FAKE_ENTROPY}`;
+    const hits = scanEgress(mixed);
+    assert(hits.length === 1 && hits[0].family === "high-entropy", "the exempt slug does not shield a neighbouring secret (1 hit)");
+    const prefixed = scanEgress(`${SLUG} ${FAKE_SK_OR}`);
+    assert(prefixed.length === 1 && prefixed[0].family === "key-prefix", "exactly the key-prefix hit beside an exempt slug (exemption is family-E-only)");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 11. Git-ref screen (FOC-1090 fix b): pr_create base/head are STRUCTURED
+//     fields — the caller validates the ref shape (BRANCH_RE) — so they are
+//     screened with families A-D ONLY and family E is skipped by design: a
+//     valid ref (a kebab branch name, a commit SHA) is not an unprefixed
+//     secret, and the entropy heuristic's class/length counting has no
+//     meaning for the field. A prefixed token is made of valid ref
+//     characters and MUST still block (families A-D fire).
+// ---------------------------------------------------------------------------
+
+{
+  const SLUG = "foc-1053-key-wizard-default-provider";
+  const GHP = "ghp_".concat("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "3fXX");
+  const SKGEN = "sk-".concat("Zx9qWm3NbR7Kc2Vf8LhT5sDgYpUu4wAa");
+  const SHA40 = "a1b2c3d4".concat("e5f60718", "293a4b5c", "6d7e8f90", "a1b2c3d4");
+  const MIXB64 = "QlUjD8Rx".concat("Ne2Gm5Zs", "Kw7Pv3Yb", "Tf6Hc1Lq", "Xe9Ao4Md");
+
+  console.log("git-ref: ref-shaped names pass the families A-D screen (family E skipped)");
+  assert(scanEgressGitRef(SLUG).length === 0, "36-char kebab branch name is clean as a ref (AC2, unit level)");
+  assert(scanEgressGitRef(`origin/${SLUG}`).length === 0, "branch under a remote prefix is clean as a ref");
+  assert(scanEgressGitRef(SHA40).length === 0, "a commit SHA is clean as a ref");
+  assert(scanEgressGitRef(MIXB64).length === 0, "family E is skipped for refs — mixed-case base64 passes the ref screen BY DESIGN");
+  assert(scanEgress(`head ${MIXB64}`).length >= 1, "the same mixed-case run in FREE TEXT is still family E - blocked there");
+
+  console.log("git-ref: families A-D still fire (fail closed)");
+  assert(scanEgressGitRef(GHP).length === 1 && scanEgressGitRef(GHP)[0].family === "key-prefix", "ghp_ token as a ref is blocked (family A)");
+  assert(scanEgressGitRef(SKGEN).length === 1 && scanEgressGitRef(SKGEN)[0].family === "key-prefix", "generic sk- token as a ref is blocked (family A)");
+
+  console.log("git-ref: assertEgressCleanGitRef throws the typed error");
+  try {
+    assertEgressCleanGitRef(GHP, "fenix-github pr_create head");
+    assert(false, "assertEgressCleanGitRef throws on a prefixed token");
+  } catch (e) {
+    assert(e instanceof EgressBlockedError && e.code === EGRESS_BLOCKED, "typed EgressBlockedError with the EGRESS_BLOCKED code");
+    assert(!e.message.includes(GHP.slice(4)), "refusal carries no token-body fragment");
+  }
+  let threw = false;
+  try { assertEgressCleanGitRef(SLUG, "fenix-github pr_create head"); } catch { threw = true; }
+  assert(!threw, "assertEgressCleanGitRef returns silently for the kebab branch name");
 }
 
 // ---------------------------------------------------------------------------
