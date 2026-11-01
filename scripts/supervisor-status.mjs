@@ -212,7 +212,7 @@ function briefingHolds(runId) {
         id: h.id,
         origin: h.origin,
         impact: h.impact ?? null,
-        question: String(h.question).slice(0, 160),
+        question: String(h.question),
         recommendation: h.recommendation,
         createdAt: h.createdAt,
         presentedAt: h.presentedAt,
