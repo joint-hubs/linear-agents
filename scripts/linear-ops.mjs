@@ -821,15 +821,36 @@ async function handleAttachLink(identifier, args, dryRunCtx) {
     return;
   }
 
+  // FOC-1075: Linear removed the attachmentLinkURL mutation (`Linear API 400:
+  // Unknown type "AttachmentLinkURLInput"`). Attaching goes through
+  // attachmentCreate now (AttachmentCreateInput, payload AttachmentPayload
+  // { success, attachment } — introspected 2026-11-01, see
+  // docs/state/FOC-1075.md and .state/evidence/foc-1075/). The duplicate-URL
+  // guard that used to live in the removed mutation's server semantics moved
+  // client-side: the issue's existing attachments are queried first and a
+  // matching URL skips the create. The skip answers in the exact same first
+  // line (`link attached (id=…)`, with the EXISTING attachment's id) — the
+  // MCP wrapper maps the CLI's first stdout line, so the skip must be
+  // indistinguishable from a create at the envelope level.
+  const existing = await graphql(
+    `query($id:String!){ issue(id:$id){ attachments{ nodes{ id url } } } }`,
+    { id: issue.id },
+  );
+  const duplicate = (existing.issue?.attachments?.nodes || []).find((a) => a?.url === args.url);
+  if (duplicate) {
+    console.log(`${issue.identifier}: link attached (id=${duplicate.id})`);
+    return;
+  }
+
   const result = await graphql(
-    `mutation($input:AttachmentLinkURLInput!){
-      attachmentLinkURL(input:$input){ success attachment{ id } }
+    `mutation($input:AttachmentCreateInput!){
+      attachmentCreate(input:$input){ success attachment{ id } }
     }`,
     { input: { issueId: issue.id, url: args.url, title: args.title } },
   );
 
-  if (result.attachmentLinkURL?.success) {
-    console.log(`${issue.identifier}: link attached (id=${result.attachmentLinkURL.attachment.id})`);
+  if (result.attachmentCreate?.success) {
+    console.log(`${issue.identifier}: link attached (id=${result.attachmentCreate.attachment.id})`);
   } else {
     console.error(`Error: attach-link failed for ${issue.identifier}`);
     process.exit(1);
