@@ -1717,12 +1717,17 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       selectionRequired(res, path, json, log, method);
       return true;
     }
-    const { runId, holdId, text } = body;
+    const { runId, holdId, text, optionLabel } = body;
     if (!runId || !holdId || typeof text !== "string" || !text.trim()) {
       json(res, 400, { error: "runId, holdId and text (string) are required" });
       log(method, path, 400);
       return true;
     }
+    // FOC-1109: the bare-label refusal for needsText options lives in
+    // answerHold — the single choke point the CLI shares with this route, so
+    // the rule is enforced after validation/ownership with one message and no
+    // hold-existence probe here. invalid-answer maps to 400 below
+    // (answerErrorStatus), so the Cockpit's refusal status is unchanged.
     // FOC-839: refuse runs marked read-only by the legacy migration.
     if (denyIfLegacyReadOnly(res, runId, method, path)) return true;
     // Cross-session guard: same ownership rule as the gate answer.
@@ -1736,7 +1741,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     }
     let hold;
     try {
-      hold = answerHold({ runId, holdId, text, answeredBy: actor, lockWaitMs: 0 });
+      hold = answerHold({ runId, holdId, text, optionLabel, answeredBy: actor, lockWaitMs: 0 });
     } catch (err) {
       const status = answerErrorStatus(err?.code);
       if (status === 500) console.error("[holds/answer]", err?.message || err);

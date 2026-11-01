@@ -273,6 +273,97 @@ test("hold note and answeredBy behave like the gate's", () => {
   assert.deepEqual(a.answer, { text: "wznów", note: "TEST passed", answeredBy: "dashboard", answeredAt: NOW_ISO });
 });
 
+// FOC-1109: the Cockpit names the chosen option alongside the values, so the
+// delivery side can tell a real answer from the bare label the old one-click
+// submit produced. Optional — the CLI passes nothing and the record keeps its
+// exact historical shape.
+test("hold optionLabel: stored when given, absent when not, garbage refused", () => {
+  const runId = freshRun();
+  seedHold(runId);
+  const labelled = answerHold({ runId, holdId: "hold-1", text: "milestone=M1", optionLabel: "Provide the values", now: NOW });
+  assert.deepEqual(labelled.answer, { text: "milestone=M1", optionLabel: "Provide the values", answeredAt: NOW_ISO });
+
+  const bare = freshRun();
+  seedHold(bare);
+  const plain = answerHold({ runId: bare, holdId: "hold-1", text: "wznów", now: NOW });
+  assert.equal("optionLabel" in plain.answer, false, "no optionLabel given — the record keeps its shape");
+
+  throwWith(() => answerHold({ runId: bare, holdId: "hold-1", text: "x", optionLabel: 42, now: NOW }), "invalid-answer", "non-string optionLabel");
+  throwWith(() => answerHold({ runId: bare, holdId: "hold-1", text: "x", optionLabel: "  ", now: NOW }), "invalid-answer", "blank optionLabel");
+  throwWith(() => answerHold({ runId: bare, holdId: "hold-1", text: "x", optionLabel: "x".repeat(201), now: NOW }), "invalid-answer", "over-long optionLabel");
+});
+
+test("needsText hold: the bare option label is refused at answerHold, real values pass (FOC-1109 fixup)", () => {
+  const bareRun = freshRun();
+  seedHold(bareRun, {
+    options: [
+      { label: "wznów", model: "test/model", costUsd: null, unpricedModel: "test/model" },
+      { label: "Provide the values", model: "user", costUsd: 0, needsText: true },
+    ],
+  });
+  const bare = throwWith(
+    () => answerHold({ runId: bareRun, holdId: "hold-1", text: "Provide the values", now: NOW }),
+    "invalid-answer",
+    "bare needsText label refused",
+  );
+  assert.match(bare.message, /needs the values as text/);
+  assert.equal(readHolds(bareRun).holds[0].state, "open", "nothing was written");
+
+  const valuesRun = freshRun();
+  seedHold(valuesRun, {
+    options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+  });
+  const values = answerHold({ runId: valuesRun, holdId: "hold-1", text: "milestone=M1", now: NOW });
+  assert.equal(values.answer.text, "milestone=M1", "values without optionLabel are a real answer");
+  assert.equal("optionLabel" in values.answer, false, "label-less values keep the historical shape");
+
+  const labelledRun = freshRun();
+  seedHold(labelledRun, {
+    options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+  });
+  const labelled = answerHold({ runId: labelledRun, holdId: "hold-1", text: "epic=E1", optionLabel: "Provide the values", now: NOW });
+  assert.equal(labelled.answer.optionLabel, "Provide the values", "values + optionLabel are a real answer");
+});
+
+// FOC-1109 round-3 guard: the refusal must fire ONLY for needsText labels.
+// On a MIXED hold — one needsText option AND one plain option — the plain
+// option's label as text (no optionLabel) is a normal, recordable answer.
+test("mixed hold: needsText + plain option — the plain option's label as text still records", () => {
+  const mixedOptions = [
+    { label: "wait", model: "test/model", costUsd: null, unpricedModel: "test/model" },
+    { label: "Provide the values", model: "user", costUsd: 0, needsText: true },
+  ];
+
+  const runId = freshRun();
+  seedHold(runId, { options: mixedOptions });
+  const updated = answerHold({ runId, holdId: "hold-1", text: "wait", now: NOW });
+  assert.equal(updated.state, "answered", "the plain option's label is a real answer");
+  assert.equal(updated.answer.text, "wait");
+  assert.equal("optionLabel" in updated.answer, false, "no optionLabel given — the record keeps its shape");
+
+  const refusedRun = freshRun();
+  seedHold(refusedRun, { options: mixedOptions });
+  throwWith(
+    () => answerHold({ runId: refusedRun, holdId: "hold-1", text: "Provide the values", now: NOW }),
+    "invalid-answer",
+    "the needsText label on the same mixed hold is still refused",
+  );
+  assert.equal(readHolds(refusedRun).holds[0].state, "open", "the refusal wrote nothing");
+});
+
+test("CLI answer --hold hits the same needsText refusal through answerHold (FOC-1109 fixup)", () => {
+  const runId = freshRun();
+  seedHold(runId, {
+    options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+  });
+  const r = cli(["answer", "--run", runId, "--hold", "hold-1", "--text", "Provide the values"]);
+  assert.equal(r.status, 1, r.stdout);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.ok, false);
+  assert.match(err.error, /needs the values as text/);
+  assert.equal(readHolds(runId).holds[0].state, "open", "the CLI refusal wrote nothing");
+});
+
 test("hold errors: not-found, already-answered, invalid-answer, unreadable, bad-id", () => {
   const runId = freshRun();
   seedHold(runId);

@@ -371,6 +371,11 @@ function parseOption(raw) {
     // refuses a hold whose options are all UNKNOWN).
     unpricedModel = parsed.model;
   }
+  // FOC-1109: a needsText flag on an --option JSON is silently dropped here —
+  // the CLI-created hold would not carry it and answerHold would not enforce
+  // the bare-label refusal for it. Documented limitation, deliberately not
+  // extended: no CLI-created hold currently needs text; extend this return
+  // shape if one ever does.
   return { label: parsed.label, model: parsed.model, costUsd, ...(unpricedModel ? { unpricedModel } : {}) };
 }
 
@@ -641,10 +646,17 @@ export function answerGate({ runId, gateId, text, note = null, answeredBy = null
  * store through patchHold, so the history stays append-only. Returns the
  * updated hold.
  */
-export function answerHold({ runId, holdId, text, note = null, answeredBy = null, now = new Date(), lockWaitMs = LOCK_TIMEOUT_MS }) {
+export function answerHold({ runId, holdId, text, note = null, answeredBy = null, optionLabel = null, now = new Date(), lockWaitMs = LOCK_TIMEOUT_MS }) {
   if (invalidId(runId)) throw answerError("bad-id", `invalid runId: ${JSON.stringify(runId ?? null)}`);
   if (invalidId(holdId)) throw answerError("bad-id", `invalid holdId: ${JSON.stringify(holdId ?? null)}`);
   if (invalidText(text)) throw answerError("invalid-answer", '--text "..." is required');
+  // FOC-1109: the Cockpit names the chosen option alongside the values, so the
+  // delivery side can tell a real answer from the bare label the old one-click
+  // submit produced. Optional — the CLI and older callers pass nothing and the
+  // record keeps its exact historical shape.
+  if (optionLabel !== null && (typeof optionLabel !== "string" || !optionLabel.trim() || optionLabel.length > 200)) {
+    throw answerError("invalid-answer", "optionLabel must be a non-empty string of at most 200 characters when given");
+  }
 
   // One lock for the WHOLE holds store, not per hold: holds.json is one
   // versioned file, so two answers to two different holds still race on the
@@ -676,11 +688,29 @@ export function answerHold({ runId, holdId, text, note = null, answeredBy = null
       );
     }
 
+    // FOC-1109: an option marked needsText must never be answered with its own
+    // bare label — that is exactly the payload the old one-click submit
+    // produced, and applyHoldAnswers silently drops lines without "=", so the
+    // values never arrive. ONE refusal, here at the choke point both the CLI
+    // and the Cockpit route go through: the hold is already read, validated
+    // and owned when this fires. optionLabel (the Cockpit names the chosen
+    // option) marks a real values answer; label-less values pass too. The
+    // label match scans EVERY needsText option, not just the first.
+    const bareNeedsText = (hold.options ?? []).find((o) => o && o.needsText && o.label === text.trim()) ?? null;
+    if (bareNeedsText && !optionLabel) {
+      throw answerError(
+        "invalid-answer",
+        `"${bareNeedsText.label}" needs the values as text — ` +
+          "type them in the answer field instead of submitting the bare option label",
+      );
+    }
+
     const at = now.toISOString();
     const answer = {
       text,
       ...(note ? { note } : {}),
       ...(answeredBy ? { answeredBy } : {}),
+      ...(optionLabel ? { optionLabel } : {}),
       answeredAt: at,
     };
     // An answer is a new history entry, never an overwrite — the file read back
