@@ -51,7 +51,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, isAbsolute } from "node:path";
 
 import {
@@ -73,6 +73,7 @@ import {
   git,
   isAffirmative,
   isNegative,
+  isReparsePoint,
   listWorktrees,
   parseArgs,
   readRegistry,
@@ -969,6 +970,157 @@ function cmdRemove(args) {
 }
 
 /**
+ * Unlink the reparse points (win32 junctions and symlinks) the removal would
+ * otherwise DELETE THROUGH. `git worktree remove --force` follows them: the
+ * 2026-11-01 incident emptied the MAIN checkout's node_modules twice in one
+ * day, because a child had left a junction where its worktree's node_modules
+ * should have been. Each link is removed as a link — its target (typically the
+ * main checkout) keeps its files.
+ *
+ * The walk descends EVERY real directory — no depth cutoff, and real
+ * `node_modules` directories are no longer pruned (FOC-1153 r1): a pnpm-style
+ * store junction lives at `node_modules/<…>/node_modules/<pkg>`, exactly one
+ * level deeper than the depth-3, node_modules-pruned walk ever visited, and
+ * git follows those as happily as root-level ones. The bound is therefore the
+ * tree's own real-directory structure: a reparse point is removed on sight and
+ * never descended through, so the walk cannot loop, and the cost is one
+ * readdir + lstat per real directory — node_modules is bounded in practice,
+ * and this runs once per removal, behind a human approval, not on a timer.
+ *
+ * Link detection is dirent-wide, not lstat's alone (r1, nit 4): lstat resolves
+ * a reparse point whose tag is neither IO_REPARSE_TAG_SYMLINK nor MOUNT_POINT
+ * (a OneDrive cloud placeholder) to its target shape, while libuv's win32
+ * scandir marks every FILE_ATTRIBUTE_REPARSE_POINT entry as a link whatever
+ * its tag. Never descending through one is what keeps the walk out of a link's
+ * target tree — which is also why a directory-shaped reparse point the walk
+ * cannot unlink fails the removal loudly rather than being entered.
+ *
+ * A git-TRACKED symlink is NOT unlinked (r1): unlinking it is a content change
+ * the approval never showed, and leaving it in place is not safe either —
+ * `git worktree remove --force` follows a TRACKED junction and destroys the
+ * target (probed). So the removal is refused instead, naming the link; resolve
+ * it manually and re-propose. Untracked links are the incident class and are
+ * unlinked as before. When git cannot be asked (ls-files failed), the walk
+ * falls back to treating every link as untracked rather than leave the
+ * incident class unprotected — the worst case for a tracked link lost that way
+ * is a dirty tree whose removal git itself then refuses.
+ *
+ * The refusal is a PRE-SCAN (r2 N7): every reparse point is collected first and
+ * the tracked check runs over the complete set BEFORE anything is unlinked, so
+ * a refused removal leaves the tree exactly as found.
+ *
+ * Exported for the suites: the git-failure fallback (r2 N10) is pinned directly
+ * by walking a directory that is not a git repo.
+ *
+ * Runs BEFORE `git worktree remove` and refuses the removal when a link cannot
+ * be unlinked: a git remove that follows an unremovable link is the incident
+ * itself. As with the existing git failure path, the archive step has already
+ * run at that point — it is additive and the tree is left standing.
+ *
+ * @returns {{ path: string, target: string|null }[]} paths relative to the worktree root
+ */
+export function unlinkReparsePoints(worktree) {
+  // r2 N7: the tracked refusal used to fire MID-WALK, after earlier untracked
+  // links had already been unlinked — tree mutation under an approval that
+  // never happened, with the partial `removed` list dropped from the failure
+  // payload. So the walk is split in two: one traversal COLLECTS every reparse
+  // point without touching anything, the tracked check runs over the complete
+  // set, and only a clean scan proceeds to unlinking. A refused removal now
+  // leaves the tree exactly as found. (Chosen over the alternative of carrying
+  // the partial list in the payload: with a pre-scan the refusal is
+  // order-independent — no reliance on readdir order, nothing to lose.)
+  const trackedLinks = trackedSymlinkPaths(worktree);
+  const links = [];
+  const scan = (dir, rel) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable — `git worktree remove` will surface its own error
+    }
+    for (const entry of entries) {
+      const abs = join(dir, entry.name);
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
+      let st = null;
+      try {
+        st = lstatSync(abs);
+      } catch {
+        continue; // vanished between readdir and lstat — nothing to remove
+      }
+      if (isReparsePoint(st, entry)) {
+        links.push({ path, abs });
+        continue; // never descend through a link — that is the incident itself
+      }
+      if (st.isDirectory()) scan(abs, path);
+    }
+  };
+  scan(worktree, "");
+
+  const tracked = trackedLinks ? links.find((l) => trackedLinks.has(l.path)) : null;
+  if (tracked) {
+    failJson(
+      `refusing the removal: ${tracked.path} is a git-tracked symlink (mode 120000) — ` +
+        `unlinking it would change tracked content the approval never showed, and leaving it ` +
+        `would let git worktree remove follow it out of the tree; resolve the link, then re-propose`,
+      { worktree, link: tracked.path },
+    );
+  }
+
+  const removed = [];
+  for (const { path, abs } of links) {
+    let target = null;
+    try {
+      target = readlinkSync(abs);
+    } catch {
+      /* unreadable link — the path alone is the record */
+    }
+    try {
+      rmSync(abs); // the link only; rmSync does not follow a reparse point
+      removed.push({ path, target });
+    } catch (err) {
+      // r3 N2: the link can vanish between the pre-scan and this unlink — a
+      // concurrent cleaner, or the target's own teardown. ENOENT here means
+      // the incident shape is already gone: there is nothing left for `git
+      // worktree remove` to follow, so aborting the whole removal buys
+      // nothing and only makes cleanup unrunnable over a benign race. It is
+      // NOT added to `removed` — this loop did not remove it, and the report
+      // must not overclaim. Every other error stays fail-closed.
+      if (err.code === "ENOENT") continue;
+      failJson(
+        `refusing the removal: ${path} is a reparse point that could not be unlinked ` +
+          `(${err.message.split("\n")[0]}) — git worktree remove would follow it`,
+        { worktree, link: path, removedLinks: removed },
+      );
+    }
+  }
+  return removed;
+}
+
+/**
+ * The worktree's tracked symlinks, by mode straight out of the index — `120000`
+ * entries. `ls-files` answers relative to the worktree root and with forward
+ * slashes, which is the form the walk's relative paths use. Returns null when
+ * git could not be asked: the walk then treats every link as untracked rather
+ * than leave the incident class unprotected.
+ */
+function trackedSymlinkPaths(worktree) {
+  let out;
+  try {
+    out = git(["ls-files", "-s", "-z"], worktree);
+  } catch {
+    return null;
+  }
+  const links = new Set();
+  for (const record of out.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    if (record.slice(0, tab).split(" ")[0] === "120000") links.add(record.slice(tab + 1));
+  }
+  return links;
+}
+
+/**
  * The one destructive act, shared by both paths (FOC-613): `git worktree
  * remove`, the registry timestamp, and a report that says what was kept.
  *
@@ -977,9 +1129,17 @@ function cmdRemove(args) {
  * tracked-dirty set (unchanged meaning — `git status --porcelain`, what the
  * approval covered); `archived` is the ignored/untracked work product that was
  * copied out first; `skippedCache` is the rebuildable cache left to die by name.
+ * `removedLinks` (FOC-1153) names the reparse points unlinked as links first —
+ * they die here too, but their TARGETS are the point of the list.
  * Skipping is fine; skipping silently is not.
  */
 function performRemoval({ runId, childId, entry, repo, state, forced, keys, archive, registryExtra = {} }) {
+  // FOC-1153 ordering: the links come out before the one destructive act, so
+  // git never sees them. The verdict/archive steps above ran on the tree AS
+  // FOUND — untracked links are unarchivable shapes, not work product; a
+  // git-TRACKED link IS content, and unlinking it would change the tree the
+  // approval covered, so the walk refuses those instead of unlinking (r1).
+  const removedLinks = unlinkReparsePoints(entry.worktree);
   const gitArgs = ["worktree", "remove", entry.worktree, ...(forced ? ["--force"] : [])];
   try {
     git(gitArgs, repo);
@@ -1031,6 +1191,12 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, arch
         // the tree; EISDIR on a directory target), only the link itself dies.
         skippedLinks: (archive.skippedLinks ?? []).map(
           (l) => `${l.path} — symlink${l.target ? ` → ${l.target}` : ""}, skipped: the link is removed, its target is untouched`,
+        ),
+        // List 5 (FOC-1153): reparse points unlinked as links before the remove,
+        // so git could not follow them out of the tree. The link dies with the
+        // worktree; what the list is FOR is the target that kept its content.
+        removedLinks: removedLinks.map(
+          (l) => `${l.path} — reparse point${l.target ? ` → ${l.target}` : ""}, unlinked before removal: git worktree remove follows junctions`,
         ),
         keys,
       },

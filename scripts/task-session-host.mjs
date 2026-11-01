@@ -403,7 +403,18 @@ function createRealSessionWorkspace({ repo = null, env, loadLib, fetchIssueFacts
       const existing = lib.listWorktrees(gitRoot).find((w) => w.branch === branch);
       const startPoint = existing ? null : lib.resolveBranchStartPoint({ gitRoot, candidate: null });
       const ensured = lib.ensureWorktree(gitRoot, branch, startPoint, { ownerId });
-      return { gitRoot, branch, worktree: ensured.worktree, ownerId, startPoint };
+      // FOC-1153: the same provisioning the spawn path applies. The tree a
+      // session is about to work in gets its deps as real directories — the
+      // improvisation this replaces is exactly the junction incident. Tolerant
+      // by design, so it is a no-op for repos without manifests.
+      const depsInstall = await lib.installWorktreeDeps(ensured.worktree);
+      if (!depsInstall.ok) {
+        console.error(
+          `task-session-host: dependency install did not complete in ${ensured.worktree} — ` +
+            `the session starts anyway (${depsInstall.locations.filter((l) => l.ok === false).map((l) => l.location).join(", ")})`,
+        );
+      }
+      return { gitRoot, branch, worktree: ensured.worktree, ownerId, startPoint, depsInstall };
     },
     release(record, resolved) {
       // `resolved` is the session's memoized ensure() result — release must

@@ -71,6 +71,7 @@ import {
   ensureWorktree,
   failJson,
   git,
+  installWorktreeDeps,
   killTree,
   listWorktrees,
   printBgWaitCeilingEnv,
@@ -644,6 +645,31 @@ if (referencedFiles.length) {
   pinnedVerification.checks.push({ name: "referenced-files", ok: true });
 }
 
+// ── dependency provisioning (FOC-1153) ───────────────────────────────────────
+// A child handed a tree without node_modules used to fix that itself — and the
+// 2026-11-01 incident is what that looks like on win32: a node_modules JUNCTION
+// into the main checkout, which the later `git worktree remove` followed,
+// emptying the main checkout. Spawn installs the deps itself, as real
+// directories, before the child exists (root and ui/, skip rules inside the
+// lib function). NOT fail-closed, like the codegraph readiness below: a failed
+// install is recorded and said out loud, but a child that can still work
+// without fresh deps is worth more than no child at all. Runs after every free
+// refusal above, so a refused spawn never pays for an install.
+const depsInstall = await installWorktreeDeps(worktree.worktree);
+if (depsInstall.ok) {
+  const installed = depsInstall.locations.filter((l) => !l.skipped);
+  if (installed.length) {
+    console.error(
+      `[spawn] deps provisioned in ${worktree.worktree}: ${installed.map((l) => `${l.location} (${l.command})`).join(", ")}`,
+    );
+  }
+} else {
+  console.error(
+    `[spawn] dependency install FAILED — the child starts anyway; see depsInstall in the spawn result ` +
+      `(${depsInstall.locations.filter((l) => l.ok === false).map((l) => l.location).join(", ")})`,
+  );
+}
+
 // ── CodeGraph launch readiness (plan 2026-09-23 §4: prepare once) ─────────────
 // Sits right after the pinned-state validation on purpose (the plan's anchor):
 // the kickoff is about to tell this child the graph is its first move, so the
@@ -968,6 +994,10 @@ registry.children[childId] = {
   // a later reader can see what the child was told without the temp prompt
   // file, which does not survive the machine.
   codegraph,
+  // FOC-1153: what was installed (or skipped, and why) before the child got the
+  // tree. A failed install reaches the child anyway — the record is the audit
+  // trail, the stderr line the loud half.
+  depsInstall,
   // ── launch identity (task-workspace PRD §7) ────────────────────────────────
   // taskKey/supervisorSessionId/actorId/attemptId/toolProfileRevision/
   // launchConfigDir are the fields followup must PRESERVE (or derive in the
@@ -1304,6 +1334,10 @@ console.log(
       // navigation path the child actually has — ready, degraded (Read/Grep
       // sanctioned) or skipped — instead of the child discovering it mid-turn.
       codegraph,
+      // FOC-1153: what was installed (or skipped, and why) in the tree before
+      // the child got it — visible at spawn time, so a failed install is read
+      // here rather than diagnosed from a child's missing module later.
+      depsInstall,
       // The launch record: where this turn's config dir lives, what CLI args
       // and tool-profile revision it captured, and the diff against the prior
       // safe snapshot. Metadata for the log, not a gate — the user's Settings
