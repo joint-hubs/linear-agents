@@ -13,8 +13,10 @@
 // inboxPrimaryAction,
 // FOC-810), the inbox list shapers (inboxQuestionLines / inboxFactLines —
 // the generic lists render strings only; the ask category never leaks its
-// question objects into a <li>, React error #31). Fixtures only — no network,
-// no DOM.
+// question objects into a <li>, React error #31) and the chat send feedback
+// (sendFeedback / pendingAfterSend / duplicateWarning / pendingChip — the
+// queued→delivered classification off the server response and the
+// duplicate-send warning, FOC-1111). Fixtures only — no network, no DOM.
 
 import assert from 'node:assert/strict';
 
@@ -40,6 +42,10 @@ import {
   askAnswers,
   answerResultText,
   childCostLabel,
+  sendFeedback,
+  pendingAfterSend,
+  duplicateWarning,
+  pendingChip,
 } from './cockpitModel.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) -------------------
@@ -918,6 +924,72 @@ await test('inboxFactLines missing facts / other shapes -> []', () => {
   eq(inboxFactLines({ facts: 'not-a-list' }), []);
   eq(inboxFactLines({ facts: 42 }), []);
   eq(inboxFactLines(null), []);
+});
+
+// --- sendFeedback / pendingAfterSend (FOC-1111 queued→delivered, duplicate) --
+
+// The server response is the source of truth; the model only classifies it.
+
+await test('sendFeedback confirmed -> delivered (the pane took the message)', () => {
+  eq(sendFeedback({ sent: true, confirmed: true, queued: false }), { kind: 'delivered', state: 'delivered' });
+});
+
+await test('sendFeedback queued -> queued (pasted behind a running turn)', () => {
+  eq(sendFeedback({ sent: true, confirmed: false, queued: true }), { kind: 'queued', state: 'queued' });
+});
+
+await test('sendFeedback plain sent -> sent (pasted, no confirmation yet)', () => {
+  eq(sendFeedback({ sent: true, confirmed: false, queued: false }), { kind: 'sent', state: 'sent' });
+});
+
+await test('sendFeedback duplicate -> duplicate with no line state', () => {
+  eq(sendFeedback({ sent: false, duplicate: true, queued: true }), { kind: 'duplicate', state: null });
+});
+
+await test('sendFeedback(null) / unrecognized shape -> honest sent fallback', () => {
+  eq(sendFeedback(null), { kind: 'sent', state: 'sent' });
+  eq(sendFeedback({}), { kind: 'sent', state: 'sent' });
+  eq(sendFeedback({ unexpected: true }), { kind: 'sent', state: 'sent' });
+});
+
+await test('pendingAfterSend moves the sent line to its response state', () => {
+  const prev = [
+    { id: 'a', text: 'earlier', state: 'queued' },
+    { id: 'b', text: 'mine', state: 'sent' },
+  ];
+  eq(pendingAfterSend(prev, { sent: true, confirmed: true, queued: false }, 'b'), [
+    { id: 'a', text: 'earlier', state: 'queued' },
+    { id: 'b', text: 'mine', state: 'delivered' },
+  ]);
+  eq(pendingAfterSend(prev, { sent: true, confirmed: false, queued: true }, 'b'), [
+    { id: 'a', text: 'earlier', state: 'queued' },
+    { id: 'b', text: 'mine', state: 'queued' },
+  ]);
+});
+
+await test('pendingAfterSend duplicate removes the line — never a second queued copy', () => {
+  const prev = [{ id: 'b', text: 'mine', state: 'sent' }];
+  eq(pendingAfterSend(prev, { sent: false, duplicate: true, queued: true }, 'b'), []);
+});
+
+await test('pendingAfterSend tolerates a null prev', () => {
+  eq(pendingAfterSend(null, { sent: true, confirmed: true, queued: false }, 'b'), []);
+  eq(pendingAfterSend(null, { sent: false, duplicate: true, queued: true }, 'b'), []);
+});
+
+await test('duplicateWarning duplicate -> the banner payload; anything else -> null', () => {
+  eq(duplicateWarning({ sent: false, duplicate: true, queued: true }), {
+    text: 'Already queued — it will be delivered when the current turn ends.',
+  });
+  eq(duplicateWarning({ sent: true, confirmed: true, queued: false }), null);
+  eq(duplicateWarning(null), null);
+});
+
+await test('pendingChip labels queued, delivered and the sent fallback', () => {
+  eq(pendingChip('queued'), 'queued — after the current turn');
+  eq(pendingChip('delivered'), 'delivered');
+  eq(pendingChip('sent'), 'sent — not confirmed yet');
+  eq(pendingChip(undefined), 'sent — not confirmed yet');
 });
 
 // --- Summary ----------------------------------------------------------------

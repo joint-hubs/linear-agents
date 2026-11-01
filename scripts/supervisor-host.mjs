@@ -105,6 +105,13 @@ export const ASK_SETTLE_POLL_MS = 150;
 export const SCROLLBACK_LINES = 200;
 // A denial note pasted back into the chat after the dialog closes.
 export const MAX_NOTE_CHARS = 4000;
+// FOC-1111 duplicate-send guard: a queued-but-undelivered text blocks an
+// identical resend while delivery evidence is missing. The TTL is only the
+// backstop for keys orphaned without evidence (an Esc-cancelled turn never
+// fires Stop and discards the queued input) — long enough to outlive any
+// honest turn whose queued message is still waiting, short enough that a
+// lost message becomes re-sendable the same working session.
+export const QUEUED_DEDUPE_TTL_MS = 15 * 60_000;
 // Bounds for the terminal size, from the query string and resize frames.
 export const COLS_MIN = 20, COLS_MAX = 500, ROWS_MIN = 5, ROWS_MAX = 200;
 export const DEFAULT_COLS = 120, DEFAULT_ROWS = 40;
@@ -286,6 +293,36 @@ export function createHost(deps = {}) {
   // pane. Cleared the moment the state is anything else.
   let needsInputSince = null;
 
+  // FOC-1111 duplicate-send guard: texts pasted behind a running turn whose
+  // delivery is not yet proven, keyed by the cleaned text with the queue
+  // time of this host's clock. The state lives in THIS host instance and a
+  // host instance is per session (the managed task-session hosts each build
+  // their own createHost), so the dedupe is per-session by construction;
+  // two dashboard tabs hit the same host and share the map. Only sendLocked
+  // touches it, and the send mutex serializes sendLocked.
+  const queuedKeys = new Map();
+
+  // Drop queued keys with delivery evidence, lazily at the next send. The
+  // only honest proof that a queued input was consumed is a hook write in
+  // state "busy" AFTER the queue time (a prompt was taken since; queued
+  // inputs are submitted in order, so ours went with it). An "idle" or
+  // "needs-input" write is NOT delivery: the turn we queued behind can end
+  // (Stop) or ask for permission without the queued input having been
+  // submitted yet — clearing on those would let a resend double-deliver.
+  // The TTL bounds keys orphaned without evidence (Esc-cancelled turns).
+  const pruneQueuedKeys = (hook) => {
+    const at = Date.parse(hook?.updatedAt ?? "");
+    for (const [keyText, queuedAt] of queuedKeys) {
+      if (now() - queuedAt > QUEUED_DEDUPE_TTL_MS) {
+        queuedKeys.delete(keyText);
+        continue;
+      }
+      if (Number.isFinite(at) && at > queuedAt && hook?.state === "busy") {
+        queuedKeys.delete(keyText);
+      }
+    }
+  };
+
   // ── the pane is the second source of truth ────────────────────────────────
   // session.json can lag or lie: an Esc-cancelled turn never fires the Stop
   // hook (the file stays "needs-input" forever), and the SessionStart write
@@ -389,6 +426,9 @@ export function createHost(deps = {}) {
         return { ready: false, reason: "start-failed", detail };
       }
     }
+    // A start (the session was absent, or fresh killed the old one) orphans
+    // every queued key — the pane they were pasted into no longer exists.
+    queuedKeys.clear();
     // Ready when the PANE shows a free input prompt on TWO consecutive polls
     // (250 ms apart) — the visible prompt is the only proof that cannot lie:
     // a restart with `claude --continue` reuses the session, so the SessionStart
@@ -553,7 +593,18 @@ export function createHost(deps = {}) {
       }
     }
 
-    const stateBefore = readSessionState()?.state ?? null;
+    // FOC-1111 duplicate guard: the same text already queued behind the
+    // running turn must not be pasted twice (two dashboard tabs, or a human
+    // who could not see the queued chip — FOC-789 acceptance, day 5). The
+    // response says so (duplicate: true) and the UI warns instead of
+    // queueing a second copy. Delivery between the two sends frees the key
+    // (pruneQueuedKeys above), so a legitimate resend still goes through.
+    const hookNow = readSessionState();
+    pruneQueuedKeys(hookNow);
+    if (queuedKeys.has(cleaned)) {
+      return { status: 200, body: { sent: false, duplicate: true, queued: true } };
+    }
+    const stateBefore = hookNow?.state ?? null;
     const sendAt = now();
     const pasteErr = await pasteAndEnter(cleaned);
     if (pasteErr) return pasteErr;
@@ -597,6 +648,9 @@ export function createHost(deps = {}) {
       }
     }
     const queued = !confirmed && stateBefore === "busy";
+    // An unconfirmed send behind a running turn is exactly the text the
+    // duplicate guard must hold until delivery is proven (pruneQueuedKeys).
+    if (queued) queuedKeys.set(cleaned, sendAt);
     return { status: 200, body: { sent: true, confirmed, queued } };
   };
 

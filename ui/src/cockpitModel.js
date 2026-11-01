@@ -462,3 +462,47 @@ export function answerResultText(result) {
   }
   return 'Answer sent.';
 }
+
+// ===== Chat send feedback (FOC-1111) =====
+
+// sendFeedback(res) -> { kind, state } for a POST …/supervisor/message
+// response. The server is the source of truth and the UI never guesses:
+// `duplicate` — the text is already queued behind the running turn and was
+// NOT pasted again; `confirmed` — the pane took the message (a hook write
+// proved the prompt), i.e. delivered; `queued` — pasted behind a running
+// turn, delivered when the turn ends; anything else (plain `sent`, an
+// unrecognized shape) degrades honestly to 'sent' — pasted, no confirmation
+// yet. state labels the pending line (null for a duplicate: no line).
+export function sendFeedback(res) {
+  const r = res || {};
+  if (r.duplicate) return { kind: 'duplicate', state: null };
+  if (r.confirmed) return { kind: 'delivered', state: 'delivered' };
+  if (r.queued) return { kind: 'queued', state: 'queued' };
+  return { kind: 'sent', state: 'sent' };
+}
+
+// pendingAfterSend(prev, res, id) -> the pending lines after the send
+// response arrived. The line this send added moves to its response state; a
+// duplicate removes it instead — the server refused to paste the text, so
+// it must not show as queued (the composer keeps the text and a warning
+// banner explains; see duplicateWarning). Other lines pass through untouched.
+export function pendingAfterSend(prev, res, id) {
+  const fb = sendFeedback(res);
+  const lines = prev || [];
+  if (fb.kind === 'duplicate') return lines.filter((p) => p.id !== id);
+  return lines.map((p) => (p.id === id ? { ...p, state: fb.state } : p));
+}
+
+// duplicateWarning(res) -> the banner payload for a duplicate-send response,
+// null for anything else.
+export function duplicateWarning(res) {
+  if (!res || !res.duplicate) return null;
+  return { text: 'Already queued — it will be delivered when the current turn ends.' };
+}
+
+// pendingChip(state) -> the chip label of a pending chat line.
+export function pendingChip(state) {
+  if (state === 'queued') return 'queued — after the current turn';
+  if (state === 'delivered') return 'delivered';
+  return 'sent — not confirmed yet';
+}

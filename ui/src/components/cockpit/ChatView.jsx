@@ -18,7 +18,10 @@ import {
   buildConversationQuery,
   chatDisabledReason,
   CONVERSATION_LIMIT,
+  duplicateWarning,
   mergeConversation,
+  pendingAfterSend,
+  pendingChip,
   shouldFollowBurst,
 } from '../../cockpitModel';
 
@@ -68,8 +71,9 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
   const [convError, setConvError] = useState(null);
   const [loaded, setLoaded] = useState(false); // first page has arrived
   const [truncated, setTruncated] = useState(false); // older history exists
-  const [pending, setPending] = useState([]); // [{ id, text, state: sent|queued }]
+  const [pending, setPending] = useState([]); // [{ id, text, state: sent|queued|delivered }]
   const [sendError, setSendError] = useState(null); // { text, notification? }
+  const [dupWarn, setDupWarn] = useState(null); // { text } — the duplicate-send banner (FOC-1111)
   const [busy, setBusy] = useState(false);
 
   const offsetRef = useRef(0);
@@ -174,6 +178,7 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
     if (!text || busy || disabledReason) return;
     setBusy(true);
     setSendError(null);
+    setDupWarn(null);
     const id = Date.now() + ':' + Math.random();
     setPending((ps) => [...ps, { id, text, state: 'sent' }]);
     onDraftChange('');
@@ -206,8 +211,14 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
         }
         setEntries((prev) => mergeConversation(prev, { entries: locals }, {}));
       }
-      const state = res.queued ? 'queued' : 'sent';
-      setPending((ps) => ps.map((p) => (p.id === id ? { ...p, state } : p)));
+      // The server response is the source of truth for the line's state:
+      // confirmed → delivered, queued → queued behind the running turn,
+      // duplicate → the text was NOT pasted again (the line comes off, the
+      // text stays in the composer and the warning banner explains why).
+      setPending((ps) => pendingAfterSend(ps, res, id));
+      const warn = duplicateWarning(res);
+      if (warn) onDraftChange(text); // nothing typed is lost on a refused send
+      setDupWarn(warn);
     } catch (e) {
       // The failed message stays in the composer so nothing typed is lost.
       onDraftChange(text);
@@ -258,9 +269,7 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
           <div key={p.id} className="ck-chat-line ck-chat-user ck-chat-pending">
             <span className="ck-chat-who">You</span>
             <div className="ck-chat-text">{p.text}</div>
-            <span className="chip">
-              {p.state === 'queued' ? 'queued — after the current turn' : 'sent — not confirmed yet'}
-            </span>
+            <span className="chip">{pendingChip(p.state)}</span>
           </div>
         ))}
       </div>
@@ -286,6 +295,12 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
               Open Terminal
             </button>
           )}
+        </div>
+      )}
+
+      {dupWarn && (
+        <div className="banner banner-warn" style={{ marginTop: 8 }}>
+          <div>{dupWarn.text}</div>
         </div>
       )}
 
