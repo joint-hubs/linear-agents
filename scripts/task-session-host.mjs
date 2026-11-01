@@ -153,41 +153,168 @@ export function sessionBranchFor(record) {
 }
 
 /**
+ * The projects.json entries whose `repo` ref names `workspace` — the ONE
+ * matching rule behind both workspace→map consumers: the auto-pickup owner
+ * scope (which Linear project the workspace maps to) and the FOC-1088 lane
+ * (which repository it maps to). repoRefName normalizes the
+ * `${GITHUB_ROOT}/<name>` template, a full path and a bare name to the repo
+ * dir name, so the match is against the workspace half of a task key.
+ *
+ * @returns {Array<object>|null} the matching entries, or null when the map is
+ *   missing or unreadable — a deployment without a project map, for which the
+ *   workspace rule is simply not applicable. A READABLE map with no matching
+ *   entry is an empty array, not null: a mapping gap fails closed, it does not
+ *   fall through to the host env.
+ */
+function projectEntriesForWorkspace(env, workspace) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(projectsConfigPath(env), "utf8"));
+  } catch {
+    return null;
+  }
+  const entries = Array.isArray(parsed?.projects) ? parsed.projects : [];
+  return entries.filter((entry) => repoRefName(entry?.repo) === workspace);
+}
+
+/**
+ * The path a projects-file `repo` ref points at. The `${GITHUB_ROOT}/<name>`
+ * template the entrypoint's repo-add writes is a REFERENCE, not a path — it
+ * expands against env GITHUB_ROOT (the clones root the template names;
+ * /data/workspaces in the container). Any other value — a full path, a bare
+ * name — passes through unchanged and must resolve (or fail) as a git repo on
+ * its own. No env GITHUB_ROOT leaves a template unexpandable: null.
+ */
+function repoRefPath(repo, env) {
+  if (typeof repo !== "string" || !repo.trim()) return null;
+  const ref = repo.trim();
+  const template = /^\$\{GITHUB_ROOT\}\/(.+)$/.exec(ref);
+  if (!template) return ref;
+  const root = typeof env.GITHUB_ROOT === "string" ? env.GITHUB_ROOT.trim() : "";
+  return root ? join(root, template[1]) : null;
+}
+
+/**
  * The real FOC-1088 workspace lane: resolve the task's repository, ensure a
  * per-task worktree on a task-derived branch, claim it in the workspace-claims
  * registry, and hand the worktree path back for the controller env.
  *
  * `loadLib` is the host's lazy supervisor-lib loader — the lane only runs when
- * the operator turned it on, so the git helpers load on first use, not at
- * module import.
+ * it is enabled, so the git helpers load on first use, not at module import.
  *
  * @param {{ repo?: string|null, env: object, loadLib: () => Promise<object> }} args
  */
 function createRealSessionWorkspace({ repo = null, env, loadLib }) {
-  let resolvedGitRoot = null;
-  const resolveGitRootOnce = async () => {
-    if (resolvedGitRoot) return resolvedGitRoot;
+  // Resolved repositories, memoized PER CANDIDATE LIST — never one gitRoot
+  // for the whole host: two sessions mapped to different repositories must
+  // not share a resolution. Only successes are memoized; a failure re-resolves
+  // on the next attempt, so an operator fix takes effect without a restart.
+  const resolvedRepos = new Map();
+  const resolveFrom = async (candidates) => {
+    const key = candidates.map((c) => `${c.from}\u0000${c.value}`).join("\n");
+    const known = resolvedRepos.get(key);
+    if (known) return known;
     const lib = await loadLib();
-    // The DEV-child spawn's candidate semantics (resolveRepoFromCandidates):
-    // an explicit repo fails loudly when it is not one; the first resolvable
-    // candidate wins; all-fail fails with the tried list. process.cwd() is
-    // deliberately NOT a candidate: the host runs from the fenix stack
-    // checkout, never the task's repository — a cwd fallback would silently
-    // pick the wrong repository (the FOC-172 bug class).
-    const resolved = lib.resolveRepoFromCandidates(
-      [
-        repo ? { value: repo, from: "deps.repo", explicit: true } : null,
-        env.FENIX_REPO_DIR ? { value: env.FENIX_REPO_DIR, from: "FENIX_REPO_DIR" } : null,
-        env.LA_SUPERVISOR_REPO ? { value: env.LA_SUPERVISOR_REPO, from: "LA_SUPERVISOR_REPO" } : null,
-      ].filter(Boolean),
-    );
-    resolvedGitRoot = resolved.gitRoot;
-    return resolvedGitRoot;
+    // resolveRepoFromCandidates' semantics (shared with the DEV-child spawn):
+    // an explicit candidate fails loudly when it is not a git repo; the first
+    // resolvable candidate wins; all-fail fails with the tried list.
+    // process.cwd() is deliberately NOT a candidate: the host runs from the
+    // fenix stack checkout, never the task's repository — a cwd fallback
+    // would silently pick the wrong repository (the FOC-172 bug class).
+    const resolved = lib.resolveRepoFromCandidates(candidates);
+    resolvedRepos.set(key, resolved.gitRoot);
+    return resolved.gitRoot;
   };
+
+  // The workspace half of the task key (`<workspace>:<issueId>` — the shape
+  // resolveTaskKey builds and the store enforces). The record's workspace
+  // field is authoritative; the taskKey prefix is the fallback.
+  const workspaceOf = (record) => {
+    if (typeof record?.workspace === "string" && record.workspace.trim()) return record.workspace.trim();
+    const taskKey = String(record?.taskKey ?? "");
+    const at = taskKey.indexOf(":");
+    return at > 0 ? taskKey.slice(0, at).trim() || null : null;
+  };
+
+  // The operator remedy appended to EVERY repository-resolution failure — an
+  // error an operator can copy-paste a fix from, whether the map is missing,
+  // ambiguous or the mapped clone is simply not there yet.
+  const resolutionRemedy =
+    "Fix it either way: map the repository — `fenix repo add <repository url> --project <the task's Linear project>` — " +
+    "or turn per-task worktrees off — `fenix settings set taskSessions.worktrees false` + `fenix restart supervisor`.";
+
+  /**
+   * The repository THIS record works on, in the documented order:
+   *   (a) a repository carried on the session record (no writer produces one
+   *       today — the forward-compatible hook);
+   *   (b) deps.repo, the embedder's explicit pin (tests, single-repo hosts);
+   *   (c) the projects.json entry matching the record's workspace — exactly
+   *       one distinct repository required; ambiguous or missing fails closed;
+   *   (d) env FENIX_REPO_DIR / LA_SUPERVISOR_REPO — only when the project map
+   *       does not exist or is unreadable (the workspace rule is then not
+   *       applicable and the env decides, first resolvable wins).
+   */
+  const resolveGitRootFor = async (record) => {
+    const taskKey = String(record?.taskKey ?? "(no taskKey)");
+    const pinned = [
+      record?.repo ? { value: String(record.repo), from: "the session record", explicit: true } : null,
+      repo ? { value: repo, from: "deps.repo", explicit: true } : null,
+    ].filter(Boolean);
+    if (pinned.length > 0) return resolveFrom(pinned);
+    const workspace = workspaceOf(record);
+    if (!workspace) {
+      throw new Error(
+        `no repository for managed task '${taskKey}': the record names no workspace, so the project map cannot be consulted`,
+      );
+    }
+    const entries = projectEntriesForWorkspace(env, workspace);
+    if (entries !== null) {
+      const paths = new Set();
+      for (const entry of entries) {
+        const value = repoRefPath(entry?.repo, env);
+        if (value) paths.add(value);
+      }
+      if (paths.size === 1) {
+        // The mapped repository is authoritative for this workspace: an
+        // explicit candidate that fails LOUDLY (repo not cloned, not a git
+        // repo) — falling through to the host env could only hand the session
+        // the WRONG repository, the FOC-172 bug class this lane exists to
+        // prevent.
+        const [value] = [...paths];
+        return resolveFrom([{ value, from: `projects.json repo for workspace '${workspace}'`, explicit: true }]);
+      }
+      if (paths.size > 1) {
+        throw new Error(
+          `no repository for managed task '${taskKey}': the project map maps workspace '${workspace}' to ` +
+            `${paths.size} repositories (${[...paths].join(", ")}) — ambiguous`,
+        );
+      }
+      throw new Error(
+        `no repository for managed task '${taskKey}': the project map has no entry whose repo maps to workspace '${workspace}'`,
+      );
+    }
+    try {
+      return await resolveFrom(
+        [
+          env.FENIX_REPO_DIR ? { value: env.FENIX_REPO_DIR, from: "FENIX_REPO_DIR" } : null,
+          env.LA_SUPERVISOR_REPO ? { value: env.LA_SUPERVISOR_REPO, from: "LA_SUPERVISOR_REPO" } : null,
+        ].filter(Boolean),
+      );
+    } catch (err) {
+      const tried = Array.isArray(err?.tried) && err.tried.length ? ` (tried: ${err.tried.join("; ")})` : "";
+      throw new Error(`no repository for managed task '${taskKey}': ${err.message}${tried}`);
+    }
+  };
+
   return {
     async ensure(record) {
       const lib = await loadLib();
-      const gitRoot = await resolveGitRootOnce();
+      let gitRoot;
+      try {
+        gitRoot = await resolveGitRootFor(record);
+      } catch (err) {
+        throw new Error(`${err.message}. ${resolutionRemedy}`);
+      }
       const branch = sessionBranchFor(record);
       // The claim owner is the TASK, not the session: a resumed generation
       // carries a new session id but the same task, and must re-claim its own
@@ -205,16 +332,14 @@ function createRealSessionWorkspace({ repo = null, env, loadLib }) {
       const ensured = lib.ensureWorktree(gitRoot, branch, startPoint, { ownerId });
       return { gitRoot, branch, worktree: ensured.worktree, ownerId, startPoint };
     },
-    release(record) {
-      // Without a resolved repository nothing can have been claimed; a branch
-      // that cannot be derived could not have been claimed either (ensure
-      // fails the same way), so re-deriving here cannot miss a live claim.
-      if (!resolvedGitRoot) return { ok: true, released: false, claim: null };
-      return realReleaseClaim({
-        gitRoot: resolvedGitRoot,
-        branch: sessionBranchFor(record),
-        ownerId: `task-session:${record.taskKey}`,
-      });
+    release(record, resolved) {
+      // `resolved` is the session's memoized ensure() result — release must
+      // hit the SAME repository ensure claimed, never a re-resolution (an
+      // operator remapping the project map between ensure and release must
+      // not redirect the release to another repository). A session that never
+      // ensured (no resolved) claimed nothing.
+      if (!resolved?.gitRoot) return { ok: true, released: false, claim: null };
+      return realReleaseClaim({ gitRoot: resolved.gitRoot, branch: resolved.branch, ownerId: resolved.ownerId });
     },
   };
 }
@@ -389,14 +514,26 @@ export function createTaskSessionHost(deps = {}) {
   }
 
   // The FOC-1088 lane itself. deps.sessionWorkspace replaces it wholesale
-  // ({ ensure(record), release(record) }) for tests and embedders; `null`
-  // disables it explicitly. Undefined → the real lane, active only when the
-  // operator turned it on with FENIX_TASK_WORKTREES=1 — opt-in like
-  // auto-pickup: a host that cannot resolve a repository must fail sessions
-  // closed, never silently keep the shared-checkout behaviour.
+  // ({ ensure(record), release(record, resolved) }) for tests and embedders;
+  // `null` disables it explicitly. Undefined → the real lane, on unless
+  // switched off. Where the switch comes from — the same ladder the cap uses:
+  // deps.worktrees (tests / embedders) → env FENIX_TASK_WORKTREES "0"|"1"
+  // (the test / emergency override, winning over the overlay BOTH ways: an
+  // operator who set =0 before the lane went default-on keeps their opt-out)
+  // → the overlay's taskSessions.worktrees, DEFAULT TRUE (FOC-1088 round 2:
+  // the shared checkout is the data-integrity bug — two managed sessions
+  // editing one tree — and the cap is 1 anyway). A host that cannot resolve a
+  // repository fails sessions closed with the remedy, never a silent fallback
+  // to a shared checkout.
+  const envWorktrees = baseEnv.FENIX_TASK_WORKTREES;
+  const worktrees =
+    deps.worktrees ??
+    (envWorktrees === "0" || envWorktrees === "1"
+      ? envWorktrees === "1"
+      : (readTaskSessionsSettings(baseEnv).worktrees ?? true));
   const sessionWorkspace = deps.sessionWorkspace !== undefined
     ? deps.sessionWorkspace
-    : baseEnv.FENIX_TASK_WORKTREES === "1"
+    : worktrees
       ? createRealSessionWorkspace({ repo: deps.repo ?? null, env: baseEnv, loadLib })
       : null;
   const workspaces = new Map(); // sessionId → lane ensure() result, derived once per session
@@ -410,17 +547,26 @@ export function createTaskSessionHost(deps = {}) {
   // Release the claim — NEVER the tree (nothing in this runtime auto-removes a
   // worktree; cleanup is an operator decision). Called on the paths that end a
   // session's ownership: stop (including its queued and terminal early
-  // returns) and failed starts. A `waiting` session KEEPS its claim — the
-  // generation continues after recovery (re-ensure, resume) in the same tree.
-  // A failed release, like a session that crashes mid-flight, leaves the claim
+  // returns) and failed starts. The release runs against the session's OWN
+  // memoized ensure() result — never a re-resolution, which could land on a
+  // different repository after an operator remap. The memo is dropped either
+  // way: the next ensure must start fresh (re-resolve, re-claim), never
+  // inherit a released generation's workspace. A `waiting` session from a
+  // FAILED ENSURE holds no memo and no claim — it re-ensures (and re-claims)
+  // after recovery, so an operator fix takes effect without a restart. A
+  // failed release, like a session that crashes mid-flight, leaves the claim
   // in the registry naming its owner; recovery is always explicit.
   const releaseWorkspace = (record) => {
     if (!sessionWorkspace) return;
+    const sessionId = record?.sessionId;
+    const resolved = typeof sessionId === "string" ? workspaces.get(sessionId) : undefined;
+    if (typeof sessionId === "string") workspaces.delete(sessionId);
+    if (!resolved) return; // never ensured — nothing was claimed
     try {
-      sessionWorkspace.release(record);
+      sessionWorkspace.release(record, resolved);
     } catch (err) {
       console.error(
-        `task-session-host: could not release the workspace claim of ${record?.taskKey ?? record?.sessionId}: ${err?.message ?? err}`,
+        `task-session-host: could not release the workspace claim of ${record?.taskKey ?? sessionId}: ${err?.message ?? err}`,
       );
     }
   };
@@ -467,19 +613,14 @@ export function createTaskSessionHost(deps = {}) {
   // autoPickup.workspace.
   const pickupWorkspace = () => autoPickup.workspace || baseEnv.FENIX_WORK_WORKSPACE || "jointhubs";
 
-  // The owner scope's Linear project: the projects.json entry whose repo name
-  // (the `repo` value's basename — the same rule fenix-projects repoRefName
-  // applies to `${GITHUB_ROOT}/<name>` templates) matches the workspace, when
-  // exactly one distinct project matches. No mapping or an ambiguous one →
-  // null: auto-pickup never picks tickets outside a proven owner scope.
+  // The owner scope's Linear project: the projects.json entries whose repo
+  // name matches the workspace (projectEntriesForWorkspace — the SAME rule
+  // the FOC-1088 lane resolves the session repository by), yielding exactly
+  // one distinct project. No mapping or an ambiguous one → null: auto-pickup
+  // never picks tickets outside a proven owner scope.
   const linearProjectForWorkspace = (workspace) => {
-    let entries;
-    try {
-      const parsed = JSON.parse(readFileSync(projectsConfigPath(baseEnv), "utf8"));
-      entries = Array.isArray(parsed?.projects) ? parsed.projects : [];
-    } catch {
-      return null;
-    }
+    const entries = projectEntriesForWorkspace(baseEnv, workspace);
+    if (entries === null) return null;
     const matched = new Set();
     for (const entry of entries) {
       if (repoRefName(entry?.repo) === workspace && typeof entry?.linearProject === "string") {
@@ -866,11 +1007,12 @@ export function createTaskSessionHost(deps = {}) {
       results.stopped = results.tmux?.ok === true && !results.registryError && results.children.every(c => c.ok);
       store.update(sessionId, { status: results.stopped ? 'stopped' : 'waiting', lastError: results.stopped ? null : 'stop incomplete; capacity remains reserved' });
       if (results.stopped) {
-        // Full success ends this generation's ownership: drop the controller,
-        // forget the memoized workspace (the next generation must re-ensure
-        // and re-claim its branch), and release the claim — the tree stays.
+        // Full success ends this generation's ownership: drop the controller
+        // and the uncertain mark, and release the claim against the session's
+        // own memoized resolution — releaseWorkspace drops the memo with it
+        // (the next generation must re-ensure and re-claim its branch); the
+        // tree stays on disk.
         controllers.delete(sessionId);
-        workspaces.delete(sessionId);
         uncertain.delete(sessionId);
         releaseWorkspace(record);
       }

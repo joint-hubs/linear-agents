@@ -62,14 +62,26 @@ must have been live-verified first. Beyond 2 only after a measured resource spik
 documented next step once a spike justifies it. The chosen source is logged
 once at host start: `maxActive=<n> (<source>)`.
 
-## Per-task worktrees (FOC-1088, opt-in)
+## Per-task worktrees (FOC-1088, default ON)
 
-With `FENIX_TASK_WORKTREES=1` on the host, every managed session works in its
-OWN git worktree of the task's repository instead of a shared checkout — two
-concurrent sessions on one repo no longer collide on `git checkout -b` or
-commits (seen live on the FOC-789 acceptance run). Off by default: a host that
-cannot resolve a repository fails sessions closed rather than silently keeping
-the shared-checkout behaviour.
+Every managed session works in its OWN git worktree of the task's repository
+instead of a shared checkout — two concurrent sessions on one repo no longer
+collide on `git checkout -b` or commits (seen live on the FOC-789 acceptance
+run). The switch is the Settings overlay key `taskSessions.worktrees`,
+**default true** — the shared checkout is the data-integrity bug (two managed
+sessions editing one tree), the cap is 1 anyway, so isolation is the safe
+default. Ladder (the same shape the cap uses):
+
+1. `deps.worktrees` (embedders/tests),
+2. env `FENIX_TASK_WORKTREES` = `0` or `1` — the test / emergency override,
+   winning over the overlay BOTH ways (an operator who set `=0` before the
+   lane went default-on keeps the opt-out; any other value is ignored),
+3. the overlay's `taskSessions.worktrees` (survives `fenix update`):
+   `fenix settings set taskSessions.worktrees false`,
+4. true.
+
+A change takes effect at host start — run `fenix restart supervisor` after
+`fenix settings set`.
 
 - **Branch** — derived deterministically from the task only:
   `buildBranchName(issueId, "task")` → `foc-<n>-task`. The session id never
@@ -82,16 +94,34 @@ the shared-checkout behaviour.
   re-claims its own branch as the same owner). The pane inherits the worktree
   through `FENIX_REPO_DIR` — the entrypoint's supervisor-run branch already
   resolves `LA_SUPERVISOR_REPO` from it and cds there, so no entrypoint change.
-- **Repository resolution** — candidates in order: an explicit repository
-  (embedders/tests), `FENIX_REPO_DIR`, `LA_SUPERVISOR_REPO` on the host
-  process. There is deliberately NO cwd fallback (the host runs from the fenix
-  stack checkout, never the task's repository); with no resolvable candidate
-  every session start fails closed, naming what was tried.
+- **Repository resolution** — PER SESSION, in this order:
+  1. a repository carried on the session record (no writer produces one
+     today — the forward-compatible hook), then the embedder's explicit pin
+     (`deps.repo` — tests, single-repo hosts); an explicit value decides on
+     its own and fails loudly when it is not a git repo;
+  2. the projects.json entry whose `repoRefName(repo)` equals the task key's
+     workspace half — exactly one distinct repository required; ambiguous or
+     missing mapping fails closed. The `${GITHUB_ROOT}/<name>` template the
+     `fenix repo add` mapping writes expands against env `GITHUB_ROOT`
+     (`/data/workspaces` in the container);
+  3. env `FENIX_REPO_DIR`, then `LA_SUPERVISOR_REPO` on the host process —
+     only when no project map exists or is unreadable.
+  There is deliberately NO cwd fallback (the host runs from the fenix stack
+  checkout, never the task's repository). Resolutions are memoized per
+  repository, never one root for the whole host; a FAILED resolution is not
+  memoized, so an operator fix takes effect on the next attempt without a
+  restart.
+- **Fail closed with a remedy** — when no repository resolves, the session
+  goes `waiting` and its `lastError` names both operator fixes, copy-pasteable:
+  map the repository (`fenix repo add <repository url> --project <the task's
+  Linear project>`) or turn the lane off (`fenix settings set
+  taskSessions.worktrees false` + `fenix restart supervisor`).
 - **Release** — stop (including its queued and terminal early returns) and
-  failed starts release the claim; a `waiting` session keeps it, because the
-  generation continues after recovery in the same tree. The worktree itself is
-  NEVER removed automatically — cleanup is the operator's (`git worktree
-  remove`).
+  failed starts release the claim, against the SAME repository the session's
+  ensure used (the memoized resolution, never a re-resolution); a `waiting`
+  session from a failed ensure holds no claim and re-ensures after recovery.
+  The worktree itself is NEVER removed automatically — cleanup is the
+  operator's (`git worktree remove`).
 - **Crash recovery** — a session that crashes mid-flight may leave a claimed
   worktree behind. The registry names the owner; release is explicit:
   `node scripts/workspace-claims.mjs release --git-root <dir> --branch <b>

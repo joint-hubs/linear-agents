@@ -214,13 +214,16 @@ const build = (opts = {}) => {
     ...(opts.pickupDeps ?? {}),
     autoPickup: opts.autoPickup,
     listCandidates: opts.listCandidates,
-    // FOC-1088: the per-task worktree lane — `repo` (the explicit repository
-    // candidate the real lane resolves first) and a wholesale
-    // `sessionWorkspace` replacement (or `null` to disable) forward verbatim;
-    // unset keeps the lane off, because the harness env never sets
-    // FENIX_TASK_WORKTREES.
+    // FOC-1088: the per-task worktree lane. `repo` (the embedder's explicit
+    // repository pin) and a wholesale `sessionWorkspace` replacement (or
+    // `null` to disable) forward verbatim. The lane's on/off switch: the
+    // harness default is the dep `worktrees: false` — the lane OFF, exactly
+    // the shared-checkout behaviour every pre-existing test expects. Tests
+    // that exercise the REAL switch pass `resolveWorktrees: true`, which
+    // drops the dep so the host reads the overlay/env itself.
     ...(opts.repo !== undefined ? { repo: opts.repo } : {}),
     ...(opts.sessionWorkspace !== undefined ? { sessionWorkspace: opts.sessionWorkspace } : {}),
+    ...(opts.resolveWorktrees ? { worktrees: undefined } : { worktrees: opts.worktrees ?? false }),
     // FOC-839: the legacy-migration hook is injectable; null (the default
     // here) skips it so existing tests are unaffected.
     ...(opts.migrateLegacy !== undefined ? { migrateLegacy: opts.migrateLegacy } : { migrateLegacy: null }),
@@ -1185,7 +1188,35 @@ const laneBody = (id, text = `initial prompt for ${id}`) => ({
   text,
 });
 
-const laneEnv = { FENIX_TASK_WORKTREES: "1" };
+// Round 2: the lane is ON by default (settings taskSessions.worktrees, no
+// env flag needed) — the harness opts OUT via the dep `worktrees: false`
+// (build's default) and tests that exercise the real switch pass
+// `resolveWorktrees: true`.
+
+// The no-overlay case: LA_SETTINGS_FILE points at a path that does not exist,
+// so readTaskSessionsSettings reads its documented defaults (worktrees on)
+// without ever touching the worktree's own .fenix/config.
+const noSettingsFile = () => join(tempDir("no-overlay"), "settings.json");
+
+// A projects.json fixture in `fenix repo add`'s shape — the repo ref is the
+// literal ${GITHUB_ROOT}/<name> template (the lane expands it against env
+// GITHUB_ROOT), or a full path.
+const projectsFixture = (entries) => {
+  const file = join(tempDir("projects"), "projects.json");
+  writeFileSync(file, JSON.stringify({ projects: entries }), "utf8");
+  return file;
+};
+
+// A session body for a mapped workspace: the task key's workspace half is
+// what the project map is consulted by.
+const mappedBody = (workspace, id, text = `initial prompt for ${id}`) => ({
+  taskKey: `${workspace}:${id}`,
+  taskId: id,
+  workspace,
+  issueId: id,
+  title: `Task ${id}`,
+  text,
+});
 
 // A fixture repo with an origin whose HEAD is set — the lane's start-point
 // resolution pins a NEW branch at the origin default branch, so the fixture
@@ -1200,6 +1231,30 @@ const laneRepo = () => {
   return { base, repo, origin };
 };
 
+// SEVERAL fixture repos under ONE clones root (the shape GITHUB_ROOT has in
+// the container), each with an origin whose HEAD is set.
+const laneRepos = (...names) => {
+  const base = tempDir("lane-repos");
+  const repos = {};
+  for (const name of names) {
+    const repo = join(base, name);
+    mkdirSync(repo);
+    gitIn(repo, "init", "-b", "main");
+    gitIn(repo, "config", "user.email", "test@example.com");
+    gitIn(repo, "config", "user.name", "test");
+    writeFileSync(join(repo, "README.md"), `fixture ${name}\n`);
+    gitIn(repo, "add", "-A");
+    gitIn(repo, "commit", "-m", "init");
+    const origin = join(base, `${name}-origin.git`);
+    gitIn(repo, "clone", "--bare", repo, origin);
+    gitIn(repo, "remote", "add", "origin", origin);
+    gitIn(repo, "fetch", "origin");
+    gitIn(repo, "remote", "set-head", "origin", "-a");
+    repos[name] = repo;
+  }
+  return { base, repos };
+};
+
 test("sessionBranchFor derives the branch from the task, never the session id", () => {
   assert.equal(sessionBranchFor({ issueId: "FOC-1088", taskKey: "j:FOC-1088" }), "foc-1088-task");
   assert.equal(sessionBranchFor({ issueId: "joi-70" }), "joi-70-task");
@@ -1210,7 +1265,7 @@ test("sessionBranchFor derives the branch from the task, never the session id", 
 
 test("FOC-1088 lane: two sessions on one repo get distinct worktrees and branches; the main checkout is untouched", async () => {
   const { repo } = laneRepo();
-  const { host, store, fakeFor } = build({ maxActive: 2, env: laneEnv, repo });
+  const { host, store, fakeFor } = build({ maxActive: 2, repo, resolveWorktrees: true, env: { LA_SETTINGS_FILE: noSettingsFile() } });
   const headBefore = gitIn(repo, "rev-parse", "HEAD");
   const port = await listen(host);
   try {
@@ -1261,7 +1316,7 @@ test("FOC-1088 lane: two sessions on one repo get distinct worktrees and branche
 
 test("FOC-1088 lane: stop releases the claim but keeps the tree; the next generation reuses branch and worktree", async () => {
   const { repo } = laneRepo();
-  const { host, store, tmp } = build({ maxActive: 2, env: laneEnv, repo });
+  const { host, store, tmp } = build({ maxActive: 2, repo, resolveWorktrees: true, env: { LA_SETTINGS_FILE: noSettingsFile() } });
   const port = await listen(host);
   try {
     const started = await request(port, "POST", "/sessions", { body: laneBody("TST-3") });
@@ -1308,11 +1363,18 @@ test("FOC-1088 lane: stop releases the claim but keeps the tree; the next genera
   }
 });
 
-test("FOC-1088 lane: an unresolvable repository fails the start closed with the reason", async () => {
-  // Lane on, but nothing resolves: no deps.repo, no FENIX_REPO_DIR, no
-  // LA_SUPERVISOR_REPO — the host deliberately has NO cwd fallback (it runs
-  // from the fenix stack checkout, never the task's repository).
-  const { host, store } = build({ maxActive: 1, env: laneEnv });
+test("FOC-1088 lane: an unmapped workspace fails the start closed with the operator remedy", async () => {
+  // Lane on, but the project map has no entry for the session's workspace:
+  // the mapping gap fails closed — it must NOT fall through to the host env,
+  // which could only name the WRONG repository (the FOC-172 bug class).
+  const projects = projectsFixture([
+    { linearProject: "Other", workspace: "other", repo: "${GITHUB_ROOT}/other", deploy: { type: "none" } },
+  ]);
+  const { host, store } = build({
+    maxActive: 1,
+    resolveWorktrees: true,
+    env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects },
+  });
   const port = await listen(host);
   try {
     const started = await request(port, "POST", "/sessions", { body: laneBody("TST-4") });
@@ -1320,7 +1382,11 @@ test("FOC-1088 lane: an unresolvable repository fails the start closed with the 
     await host.settled();
     const record = store.get(started.json.session.sessionId);
     assert.equal(record.status, "waiting", JSON.stringify(record));
-    assert.match(record.lastError, /could not determine which repository/);
+    assert.match(record.lastError, /no entry whose repo maps to workspace 'workspace'/);
+    // The remedy names BOTH operator fixes, copy-pasteable.
+    assert.match(record.lastError, /fenix repo add <repository url> --project/);
+    assert.match(record.lastError, /fenix settings set taskSessions\.worktrees false/);
+    assert.match(record.lastError, /fenix restart supervisor/);
   } finally {
     host.close();
     store.close();
@@ -1329,7 +1395,7 @@ test("FOC-1088 lane: an unresolvable repository fails the start closed with the 
 
 test("FOC-1088 lane: a non TEAM-NUM issueId fails the start instead of killing the host", async () => {
   const { repo } = laneRepo();
-  const { host, store } = build({ maxActive: 1, env: laneEnv, repo });
+  const { host, store } = build({ maxActive: 1, repo, resolveWorktrees: true, env: { LA_SETTINGS_FILE: noSettingsFile() } });
   const port = await listen(host);
   try {
     const started = await request(port, "POST", "/sessions", { body: laneBody("NOT-A-NUM") });
@@ -1341,5 +1407,206 @@ test("FOC-1088 lane: a non TEAM-NUM issueId fails the start instead of killing t
   } finally {
     host.close();
     store.close();
+  }
+});
+
+// ── FOC-1088 round 2: per-session repository resolution + the settings switch ─
+
+test("FOC-1088 round 2: the project map resolves PER SESSION — workspace beta's session works in beta's repository, not alpha's", async () => {
+  const { base, repos } = laneRepos("alpha", "beta");
+  const projects = projectsFixture([
+    { linearProject: "Alpha", workspace: "alpha", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+    { linearProject: "Beta", workspace: "beta", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+  ]);
+  const { host, store } = build({
+    maxActive: 2,
+    resolveWorktrees: true,
+    env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects, GITHUB_ROOT: base },
+  });
+  const port = await listen(host);
+  try {
+    const a = await request(port, "POST", "/sessions", { body: mappedBody("alpha", "MAP-1") });
+    const b = await request(port, "POST", "/sessions", { body: mappedBody("beta", "MAP-2") });
+    assert.equal(a.status, 202);
+    assert.equal(b.status, 202);
+    await host.settled();
+    const list = await request(port, "GET", "/sessions");
+    const byId = new Map(list.json.sessions.map((s) => [s.sessionId, s]));
+    assert.equal(byId.get(a.json.session.sessionId).status, "running", JSON.stringify(byId.get(a.json.session.sessionId)));
+    assert.equal(byId.get(b.json.session.sessionId).status, "running", JSON.stringify(byId.get(b.json.session.sessionId)));
+    const dirA = resolve((await host.controllerFor(a.json.session.sessionId)).env.FENIX_REPO_DIR);
+    const dirB = resolve((await host.controllerFor(b.json.session.sessionId)).env.FENIX_REPO_DIR);
+    // Each session's worktree lives under ITS OWN repository's worktree root
+    // (the la-wt/<repo>/<branch> layout) — the resolution is memoized per
+    // resolved repository, never one root for the whole host.
+    assert.equal(dirA, join(base, "la-wt", "alpha", "map-1-task"), dirA);
+    assert.equal(dirB, join(base, "la-wt", "beta", "map-2-task"), dirB);
+    assert.equal(gitIn(dirA, "rev-parse", "--abbrev-ref", "HEAD"), "map-1-task");
+    assert.equal(gitIn(dirB, "rev-parse", "--abbrev-ref", "HEAD"), "map-2-task");
+    // The repos were found through the map alone — the ${GITHUB_ROOT}
+    // template expanded against env GITHUB_ROOT, no deps.repo pin involved.
+    assert.ok(existsSync(dirB), "beta's worktree must exist");
+    // Claims live in EACH repo's own registry, owner task-scoped.
+    assert.deepEqual(
+      readWorkspaceClaims({ gitRoot: repos.alpha }).claims.map((c) => [c.branch, c.ownerId]),
+      [["map-1-task", "task-session:alpha:MAP-1"]],
+    );
+    assert.deepEqual(
+      readWorkspaceClaims({ gitRoot: repos.beta }).claims.map((c) => [c.branch, c.ownerId]),
+      [["map-2-task", "task-session:beta:MAP-2"]],
+    );
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 round 2: an ambiguous project mapping fails closed with the operator remedy", async () => {
+  const { base } = laneRepos("beta");
+  // Two entries match workspace 'beta' and disagree on WHERE the repository
+  // lives (the clones root vs a full path elsewhere) — the map cannot name
+  // one repository, so the session fails closed instead of guessing.
+  const projects = projectsFixture([
+    { linearProject: "Beta", workspace: "beta", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+    { linearProject: "Beta alias", workspace: "beta", repo: join(base, "elsewhere", "beta"), deploy: { type: "none" } },
+  ]);
+  const { host, store } = build({
+    maxActive: 1,
+    resolveWorktrees: true,
+    env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects, GITHUB_ROOT: base },
+  });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: mappedBody("beta", "MAP-3") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const record = store.get(started.json.session.sessionId);
+    assert.equal(record.status, "waiting", JSON.stringify(record));
+    assert.match(record.lastError, /ambiguous/);
+    assert.match(record.lastError, /fenix repo add <repository url> --project/);
+    assert.match(record.lastError, /fenix settings set taskSessions\.worktrees false/);
+    assert.match(record.lastError, /fenix restart supervisor/);
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 round 2: with no readable project map the env candidates decide — all-fail still carries the remedy", async () => {
+  // An UNPARSEABLE LA_PROJECTS_FILE (projectsConfigPath pins it once it
+  // exists) leaves the lane without a project map: the env candidates decide.
+  // baseEnv here sets neither FENIX_REPO_DIR nor LA_SUPERVISOR_REPO, so
+  // nothing resolves — the error names what happened and both operator fixes.
+  const brokenMap = join(tempDir("broken-map"), "projects.json");
+  writeFileSync(brokenMap, "{ not json", "utf8");
+  const { host, store } = build({
+    maxActive: 1,
+    resolveWorktrees: true,
+    env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: brokenMap },
+  });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: mappedBody("workspace", "MAP-4") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const record = store.get(started.json.session.sessionId);
+    assert.equal(record.status, "waiting", JSON.stringify(record));
+    assert.match(record.lastError, /could not determine which repository/);
+    assert.match(record.lastError, /fenix repo add <repository url> --project/);
+    assert.match(record.lastError, /fenix settings set taskSessions\.worktrees false/);
+    assert.match(record.lastError, /fenix restart supervisor/);
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 round 2: the lane is ON by default — no settings file, no env flag, the session still gets a worktree", async () => {
+  const { repo } = laneRepo();
+  const { host, store } = build({ maxActive: 1, repo, resolveWorktrees: true, env: { LA_SETTINGS_FILE: noSettingsFile() } });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: laneBody("DEF-1") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const record = store.get(started.json.session.sessionId);
+    assert.equal(record.status, "running", JSON.stringify(record));
+    const dir = (await host.controllerFor(started.json.session.sessionId)).env.FENIX_REPO_DIR;
+    assert.ok(dir, "the default-on lane must hand the controller a FENIX_REPO_DIR");
+    assert.equal(gitIn(resolve(dir), "rev-parse", "--abbrev-ref", "HEAD"), "def-1-task");
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 round 2: taskSessions.worktrees=false restores the shared checkout — no FENIX_REPO_DIR, no claim", async () => {
+  const dir = tempDir("worktrees-off");
+  const settings = join(dir, "settings.json");
+  writeFileSync(settings, JSON.stringify({ taskSessions: { worktrees: false } }), "utf8");
+  // Even a perfectly resolvable repository pin is ignored: the switch is off.
+  const { repo } = laneRepo();
+  const { host, store } = build({ maxActive: 1, repo, resolveWorktrees: true, env: { LA_SETTINGS_FILE: settings } });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: laneBody("OFF-1") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const record = store.get(started.json.session.sessionId);
+    assert.equal(record.status, "running", JSON.stringify(record));
+    const env = (await host.controllerFor(started.json.session.sessionId)).env;
+    assert.ok(!("FENIX_REPO_DIR" in env), "the shared-checkout path must not carry FENIX_REPO_DIR");
+    assert.equal(readWorkspaceClaims({ gitRoot: repo }).claims.length, 0, "nothing may be claimed");
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 round 2: FENIX_TASK_WORKTREES stays an emergency override, winning over the overlay both ways", async () => {
+  const { repo } = laneRepo();
+  // env 0 + overlay default (on) → OFF: the operator who opted out before the
+  // lane went default-on keeps their opt-out.
+  const off = build({
+    maxActive: 1,
+    repo,
+    resolveWorktrees: true,
+    env: { LA_SETTINGS_FILE: noSettingsFile(), FENIX_TASK_WORKTREES: "0" },
+  });
+  const portOff = await listen(off.host);
+  try {
+    const started = await request(portOff, "POST", "/sessions", { body: laneBody("OVR-1") });
+    assert.equal(started.status, 202);
+    await off.host.settled();
+    const env = (await off.host.controllerFor(started.json.session.sessionId)).env;
+    assert.ok(!("FENIX_REPO_DIR" in env), "env 0 must force the shared checkout");
+    assert.equal(readWorkspaceClaims({ gitRoot: repo }).claims.length, 0);
+  } finally {
+    off.host.close();
+    off.store.close();
+  }
+  // env 1 + overlay off → ON: the emergency switch works in the other
+  // direction too, without editing the overlay.
+  const dir = tempDir("worktrees-off-env1");
+  const settings = join(dir, "settings.json");
+  writeFileSync(settings, JSON.stringify({ taskSessions: { worktrees: false } }), "utf8");
+  const on = build({
+    maxActive: 1,
+    repo,
+    resolveWorktrees: true,
+    env: { LA_SETTINGS_FILE: settings, FENIX_TASK_WORKTREES: "1" },
+  });
+  const portOn = await listen(on.host);
+  try {
+    const started = await request(portOn, "POST", "/sessions", { body: laneBody("OVR-2") });
+    assert.equal(started.status, 202);
+    await on.host.settled();
+    const record = on.store.get(started.json.session.sessionId);
+    assert.equal(record.status, "running", JSON.stringify(record));
+    const env = (await on.host.controllerFor(started.json.session.sessionId)).env;
+    assert.ok(env.FENIX_REPO_DIR, "env 1 must force the worktree lane on");
+  } finally {
+    on.host.close();
+    on.store.close();
   }
 });
