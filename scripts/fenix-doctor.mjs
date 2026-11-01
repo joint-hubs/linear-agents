@@ -77,6 +77,7 @@ const [
   hostClientH,
   supervisorLibH,
   supervisorLaunchH,
+  claimsH,
 ] = await Promise.all([
   loadHelper('./fenix-paths.mjs'),
   loadHelper('./supervisor-current-run.mjs'),
@@ -89,6 +90,7 @@ const [
   loadHelper('./supervisor-host-client.mjs'),
   loadHelper('./supervisor-lib.mjs'),
   loadHelper('./supervisor-launch.mjs'),
+  loadHelper('./workspace-claims.mjs'),
 ]);
 
 /** The first of the given helpers that did not load, else null. */
@@ -614,6 +616,50 @@ export function checkRunOwners({ env = process.env, readOwners } = {}) {
   };
 }
 
+// FOC-1086: the workspace-claim registry is the multi-Supervisor collision
+// guard (FOC-898). A claim stamped to a worktree that no longer exists on disk
+// is stale — cleanup_remove used to leave it behind, and a stale claim blocks a
+// future Supervisor from the same branch name forever. Warn with the count and
+// the first three paths; ok when every claimed worktree is present, and when
+// there is no claims file at all. The repo root is this script's own checkout
+// (the doctor has no repo parameter; in the container that checkout IS the
+// supervised repo). readClaims is the injectable seam (same shape as
+// checkRunOwners's readOwners) so tests need no git repo.
+export function checkWorkspaceClaims({ fsImpl = fs, root, readClaims } = {}) {
+  const name = 'workspace claims';
+  const missing = firstUnloaded(claimsH);
+  if (missing) return helperFail(name, missing);
+  const repoRoot = root || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const read = readClaims ?? (() => claimsH.mod.readWorkspaceClaims({ gitRoot: repoRoot }));
+  let store;
+  try {
+    store = read();
+  } catch (err) {
+    return {
+      name,
+      status: 'warn',
+      detail: `claims registry unreadable (${String(err.message).split('\n')[0]})`,
+      fix: 'fix or re-create the claims registry — never guess across versions',
+    };
+  }
+  const claims = store?.claims ?? [];
+  const stale = claims.filter((c) => !fsImpl.existsSync(c.worktree));
+  if (!stale.length) {
+    return {
+      name,
+      status: 'ok',
+      detail: claims.length ? `${claims.length} claim(s), every worktree present` : 'no claims recorded',
+    };
+  }
+  const list = (items) => `${items.slice(0, 3).join(', ')}${items.length > 3 ? `, … +${items.length - 3} more` : ''}`;
+  return {
+    name,
+    status: 'warn',
+    detail: `${stale.length} claim(s) name worktrees that no longer exist: ${list(stale.map((c) => c.worktree))} — a stale claim blocks a future Supervisor from the same branch`,
+    fix: 're-run cleanup remove for the removed child (it releases the claim), or release it through the claims registry',
+  };
+}
+
 // FOC-803: the image must be built for the host user's uid/gid. When it was
 // not, the bind-mounted host files keep their host ownership and stay
 // unreadable/unwritable inside the container: the Compose secrets (written
@@ -777,6 +823,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     await checkSupervisorPrompt({ env, fsImpl }),
     checkPermissionMode({ env }),
     checkRunOwners({ env }),
+    checkWorkspaceClaims({ fsImpl }),
   ];
   // FOC-803 uid checks: only meaningful in the container, where the process
   // runs as the image's user against host-owned bind mounts.

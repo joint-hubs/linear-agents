@@ -29,12 +29,15 @@ import {
   checkSecretsReadable,
   checkSupervisorPrompt,
   checkTaskSessions,
+  checkWorkspaceClaims,
   runChecks,
   summarize,
 } from "./fenix-doctor.mjs";
 import { buildManifest, compareToManifest, listCodeFiles, readManifest } from "./fenix-manifest.mjs";
 import { pidAlive } from "./supervisor-current-run.mjs";
 import { currentOwner } from "./run-owner.mjs";
+import { claimWorkspace } from "./workspace-claims.mjs";
+import { fixtureRepo, fixtureWorktree } from "./supervisor-test-fixtures.mjs";
 
 let passed = 0;
 let skipped = 0;
@@ -1265,6 +1268,61 @@ test("the Dockerfile bakes the manifest outside /opt/fenix, root-owned and read-
   const at = dockerfile.indexOf("fenix-manifest.mjs write");
   assert.ok(dockerfile.lastIndexOf("USER root", at) > dockerfile.lastIndexOf("USER node", at), "the manifest step must run as root");
   assert.ok(dockerfile.indexOf("USER node", at) > at, "the image must return to USER node after it");
+});
+
+console.log("\nfenix-doctor: workspace claims (FOC-1086)");
+
+// A real fixture repo: the claims registry lives under the common git dir, so
+// the seam-free tests need a repo git can answer for. Worktrees come from the
+// shared supervisor fixtures — the same shape a claim actually stamps.
+test("workspace claims: ok when there is no claims file", () => {
+  const { repo } = fixtureRepo();
+  const c = checkWorkspaceClaims({ root: repo });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /no claims/);
+});
+
+test("workspace claims: ok when every claimed worktree is present", () => {
+  const { repo } = fixtureRepo();
+  const wt = fixtureWorktree(repo);
+  claimWorkspace({ gitRoot: repo, branch: wt.branch, worktree: wt.worktree, ownerId: "run:dev-1" });
+  const c = checkWorkspaceClaims({ root: repo });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /1 claim\(s\), every worktree present/);
+});
+
+test("workspace claims: warn names the count and the worktree that is gone", () => {
+  const { repo } = fixtureRepo();
+  const wt = fixtureWorktree(repo);
+  claimWorkspace({ gitRoot: repo, branch: wt.branch, worktree: wt.worktree, ownerId: "old-run:dev-1" });
+  fs.rmSync(wt.worktree, { recursive: true, force: true });
+
+  const c = checkWorkspaceClaims({ root: repo });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /1 claim\(s\) name worktrees that no longer exist/);
+  assert.ok(c.detail.includes(wt.worktree), `the detail must name the stale path: ${c.detail}`);
+  assert.match(c.fix, /cleanup remove|claims registry/, "the fix must point at the claim release");
+});
+
+test("workspace claims: the detail carries the first three paths and counts the rest", () => {
+  const stale = (n) =>
+    Array.from({ length: n }, (_, i) => ({ branch: `b${i}`, ownerId: `o${i}`, worktree: `/data/worktrees/wt-${i}` }));
+  const c = checkWorkspaceClaims({
+    readClaims: () => ({ claims: [...stale(4), { branch: "live", ownerId: "o", worktree: import.meta.url }] }),
+    fsImpl: { ...fs, existsSync: (p) => p === import.meta.url },
+  });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /4 claim\(s\)/);
+  assert.ok(c.detail.includes("wt-0") && c.detail.includes("wt-2"), c.detail);
+  assert.ok(!c.detail.includes("wt-3"), `only the first three paths belong in the detail: ${c.detail}`);
+  assert.match(c.detail, /\+1 more/);
+});
+
+test("workspace claims: an unreadable registry warns instead of crashing the doctor", () => {
+  const c = checkWorkspaceClaims({ readClaims: () => { throw new Error("not readable JSON"); } });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /unreadable/);
+  assert.match(c.detail, /not readable JSON/);
 });
 
 console.log(`\nfenix-doctor: ${passed} passed, ${skipped} skipped, ${failures.length} failed`);

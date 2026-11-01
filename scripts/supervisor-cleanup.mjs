@@ -83,6 +83,10 @@ import {
   updateChild,
   worktreeRoot,
 } from "./supervisor-lib.mjs";
+// FOC-1086: the claim registry lives in the common git dir this script already
+// operates on; the release helper is imported one-way (workspace-claims imports
+// nothing from here).
+import { releaseClaimsForWorktree } from "./workspace-claims.mjs";
 
 const GATE_KIND = "cleanup-approval";
 
@@ -811,6 +815,10 @@ function cmdRemove(args) {
       }
     }
     updateChild(runId, childId, { worktreeRemovedAt: entry.worktreeRemovedAt ?? new Date().toISOString() });
+    // FOC-1086: the checkout was gone before we got here, so any claim stamped
+    // to its path is stale by definition — this reconciliation releases it too,
+    // or it blocks a future Supervisor from the branch name forever.
+    const releasedClaims = releaseStaleClaims(repo, entry.worktree);
     console.log(
       JSON.stringify(
         {
@@ -820,6 +828,8 @@ function cmdRemove(args) {
           pruned,
           worktree: entry.worktree,
           branch: entry.branch ?? null,
+          // FOC-1086: stale claims released alongside the reconciliation.
+          releasedClaims: releasedClaims.map((c) => ({ branch: c.branch, ownerId: c.ownerId })),
           note: "the checkout was already gone; nothing was destroyed and no approval was needed",
         },
         null,
@@ -1133,6 +1143,22 @@ function trackedSymlinkPaths(worktree) {
  * they die here too, but their TARGETS are the point of the list.
  * Skipping is fine; skipping silently is not.
  */
+/**
+ * FOC-1086: the worktree is gone, so its claim is stale by definition — release
+ * it (owner-independently, by worktree path) instead of leaving a lock on the
+ * branch name for the next Supervisor run. Best effort: the removal has already
+ * happened, so a failed release must not failJson the whole command away — it
+ * says so on stderr and the report lists nothing released.
+ */
+function releaseStaleClaims(repo, worktree) {
+  try {
+    return releaseClaimsForWorktree({ gitRoot: repo, worktree }).released;
+  } catch (err) {
+    process.stderr.write(`[cleanup] claim release skipped (${err?.message ?? err})\n`);
+    return [];
+  }
+}
+
 function performRemoval({ runId, childId, entry, repo, state, forced, keys, archive, registryExtra = {} }) {
   // FOC-1153 ordering: the links come out before the one destructive act, so
   // git never sees them. The verdict/archive steps above ran on the tree AS
@@ -1156,6 +1182,12 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, arch
   // of a branch that still exists. On the grant path, `cleanupGrant` is added:
   // the removal record names the grant that stood in for the human key.
   updateChild(runId, childId, { worktreeRemovedAt: new Date().toISOString(), ...registryExtra });
+
+  // FOC-1086: the checkout is gone, so its workspace claim is stale by
+  // definition — a claim left behind blocks a future Supervisor from the same
+  // branch name. Released AFTER the remove succeeded: a refused removal leaves
+  // the claim standing, exactly like the worktree it vouches for.
+  const releasedClaims = releaseStaleClaims(repo, entry.worktree);
 
   console.log(
     JSON.stringify(
@@ -1198,6 +1230,10 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, arch
         removedLinks: removedLinks.map(
           (l) => `${l.path} — reparse point${l.target ? ` → ${l.target}` : ""}, unlinked before removal: git worktree remove follows junctions`,
         ),
+        // List 6 (FOC-1086): the workspace claims this removal released — a
+        // claim whose worktree died with the tree is stale by definition, and
+        // keeping it would block a future Supervisor from the branch name.
+        releasedClaims: releasedClaims.map((c) => ({ branch: c.branch, ownerId: c.ownerId })),
         keys,
       },
       null,

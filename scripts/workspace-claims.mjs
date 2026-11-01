@@ -529,6 +529,40 @@ export function releaseClaim({ gitRoot, branch, ownerId }) {
   });
 }
 
+/**
+ * Release every claim stamped to `worktree` (FOC-1086). `cleanup_remove` used
+ * to remove the worktree and leave its claim behind — and a stale claim blocks
+ * a future Supervisor from the same branch name (the FOC-898 collision guard).
+ * A claim on a REMOVED worktree is stale by definition, so release here is
+ * worktree-path-keyed and owner-INDEPENDENT: the claim's owner may be an old
+ * run nobody can release as, and `releaseClaim`'s owner-keyed refusal (kept
+ * unchanged above) must not stand in the way of reclaiming a dead path.
+ *
+ * Matching uses the same path normalization as claim stamping (samePath), so
+ * the Windows and Docker spellings of one directory cannot produce two
+ * answers. Same discipline as every mutation: the whole read-filter-write runs
+ * under the repo-wide integration lock, through the fail-closed validated
+ * read. A claim on a path that still exists is never touched.
+ *
+ * @returns {{ ok: true, released: object[] }} the claims that were removed
+ */
+export function releaseClaimsForWorktree({ gitRoot, worktree }) {
+  if (!gitRoot) throw new Error("releaseClaimsForWorktree: gitRoot is required");
+  if (!worktree) throw new Error("releaseClaimsForWorktree: worktree is required");
+
+  const commonDir = commonGitDir(gitRoot);
+  return withIntegrationLock(gitRoot, "cleanup-remove:worktree-claim-release", () => {
+    const path = claimsPathFor(commonDir);
+    if (!existsSync(path)) return { ok: true, released: [] };
+    const store = readClaimsStore(path, commonDir);
+    const released = store.claims.filter((c) => samePath(c.worktree, worktree));
+    if (!released.length) return { ok: true, released: [] };
+    store.claims = store.claims.filter((c) => !samePath(c.worktree, worktree));
+    atomicWriteJSON(path, store);
+    return { ok: true, released };
+  });
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 // A local minimal parser (same flag semantics as supervisor-lib's parseArgs)
