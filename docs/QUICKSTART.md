@@ -245,12 +245,14 @@ Cockpit, bodies capped at 8 KB, and no response ever carries a key value.
 | `fenix doctor` | host preflight plus in-container diagnostics |
 | `fenix keys` | key wizard: provider choice, enter or replace keys (validated live in the container through `scripts/key-check.mjs`) |
 | `fenix keys <openrouter\|provider\|linear\|github>` | rotate one key; `provider` means the active provider's key |
+| `fenix settings get <dotted.path>` / `fenix settings set <dotted.path> <value>` | read or write one key of the settings overlay (`.fenix/config/settings.json`); the node CLI validates the value (exit 1 on a rejected one). A `taskSessions.*` change applies only after `fenix restart supervisor` — the command prints that reminder |
 | `fenix repo add <url\|owner/name> [--project <Linear project>]` | clone a repository into the workspaces volume (optionally map a Linear project) |
 | `fenix repo list` | repositories in the workspaces volume and the project map |
 | `fenix attach [--new]` | attach to the Supervisor (Claude Code) running in tmux in `fenix-supervisor`; Ctrl-b d detaches and the Supervisor keeps running, `--new` starts a fresh session (kills the current one) |
 | `fenix shell [service]` | shell in a service (default: `fenix-supervisor`) |
 | `fenix cleanup <list\|propose\|remove> [--run <runId>] [--child <id>] [--repo <path>]` | reclaim a finished child's worktree from the host, with the Linear key the script needs. `remove` still refuses unless TEST made the issue Done and you answered the cleanup-approval gate yes; the branch and its commits stay. The Supervisor does the same itself through its `fenix-lifecycle` tool |
 | `fenix update` | `git pull --ff-only`, rebuild with fresh base images, restart |
+| `fenix restart [api\|supervisor]` | recreate a service (default: both) with the pinned image — the same ref `fenix up` resolves; the stack is never recreated by hand |
 | `fenix test [pattern]` | lint and the test suite on Linux, inside the image, on a throwaway copy of this checkout (uncommitted changes included) — the same job CI runs on every PR |
 
 The Supervisor runs permanently inside the container, in a tmux session.
@@ -292,7 +294,9 @@ At most `taskSessions.maxActive` sessions are active at once (`starting`,
 `running` or `waiting`) — 1 by default in 1.0. Two sessions on the same
 repository still share its main checkout (FOC-1088), so raise the cap only for
 sessions on different repositories: `fenix settings set taskSessions.maxActive 2`
-(survives `fenix update`), or
+(survives `fenix update`; the cap is read only at container start —
+`fenix restart supervisor` applies it, and the command prints the same
+reminder), or
 per-process with the env override `FENIX_MAX_ACTIVE_SUPERVISORS`. Excess
 tickets queue — visible in the cockpit's Tasks switcher; a queued start or
 resume answers 409 `queued`. The store, the `fenix doctor` line and
@@ -435,6 +439,11 @@ Runs `git pull --ff-only`, pulls the image version the updated checkout pins
 instead (`docker compose build --pull`). Keys and the data
 volume are untouched; on start the squad config is re-seeded from the image
 with the same dpkg rule as every other start (see "Where things live").
+
+Never recreate a container by hand: `docker compose up --force-recreate` skips
+the launcher's pinned image ref and can build `fenix:dev` from source (a
+hand-recreated supervisor crash-looped once). Use `fenix restart [api|supervisor]`
+— it recreates through the same image resolution as `fenix up`.
 
 Upgrade note (FOC-783): if `fenix doctor` warns about the **Cockpit hooks** —
 your `agents/supervisor/settings.json` was edited locally and the image now
