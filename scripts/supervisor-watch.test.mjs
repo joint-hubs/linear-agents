@@ -30,9 +30,13 @@ import { fileURLToPath } from "node:url";
 
 import {
   childShareHelperArgv,
+  descendantsInProcessTable,
   ensureRunDir,
+  enumerateWin32Processes,
   installEnvFileSignalHandlers,
+  parseWin32ProcessTable,
   readRegistry,
+  reapChildDescendants,
   runDir,
   shareChildTranscripts,
   sweepChildProcesses,
@@ -1132,6 +1136,225 @@ test("an empty /proc and a non-Linux host with the real /proc default both skip"
   if (process.platform === "win32") {
     assert.deepEqual(sweepChildProcesses({ mark: "a/b/c" }), { killed: [], skipped: "no /proc" });
   }
+});
+
+// ── FOC-1162: the win32 descendant reap — the verification rules, unit level ──
+// Synthetic tables: the rules under test are the ones that make a reused pid
+// safe, so they are exercised on tables where the reuse is PROVABLE (a real
+// host cannot be made to recycle a pid on demand). The kill and the liveness
+// probe are injected the same way sweepChildProcesses' tests inject `kill`.
+console.log("\nFOC-1162: descendant reap — verification rules (unit)");
+
+const TABLE = (rows) => rows.map(([pid, ppid, creation]) => ({ pid, ppid, creation, name: `p${pid}` }));
+
+test("FOC-1162: the anchor's pre-exit children are accepted, a reused anchor's late children are not", () => {
+  // The child (pid 100) exited at t=1000; the table shows pid 100 occupied by
+  // a reuse stranger born at 1100 — the reap never looks at the anchor's own
+  // row, only at rows whose ppid claims it. The stranger's child (born 1150,
+  // after the exit) must be refused; the child's genuine grandchild (born
+  // 900, before the exit) must be accepted.
+  const rows = TABLE([
+    [100, 4, 1100], // the anchor slot — a stranger now; the rule ignores this row
+    [201, 100, 900], // born by the child before it died → ours
+    [202, 100, 1150], // born by whoever holds pid 100 NOW → refused
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 800, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid), [201]);
+});
+
+test("FOC-1162: the chain walks live verified parents, including births after the exit", () => {
+  const rows = TABLE([
+    [201, 100, 900], // verified anchor child, alive
+    [301, 201, 1500], // its child, born during the drain — ours through the live parent
+    [302, 201, 850], // born by the DEAD previous holder of pid 201 — refused
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 800, maxCreationMs: 1000 });
+  assert.deepEqual(
+    desc.map((d) => d.pid).sort((a, b) => a - b),
+    [201, 301],
+  );
+});
+
+test("FOC-1162: a chain through a reused descendant pid breaks at the reuse (safe miss)", () => {
+  // pid 301 belonged to our C (born 950 by the verified 201), C died, and a
+  // stranger reusing pid 301 now holds the row. C's genuine child G (born
+  // 980, ppid 301) and the stranger's own child F (ppid 301) both point at
+  // that row — and BOTH are refused: G cannot be proven ours through a pid a
+  // stranger now holds, and F was born by the stranger. A miss, never a
+  // false kill.
+  const rows = TABLE([
+    [201, 100, 900], // ours, alive
+    [301, 7, 1200], // the stranger now holding pid 301 (its real parent is 7)
+    [401, 301, 980], // C's genuine orphan — refused (predates the stranger's birth)
+    [402, 301, 1300], // the stranger's child — refused (postdates it, but 301 ∉ accepted)
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 800, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid), [201]);
+});
+
+test("FOC-1162: without an exit bound nothing is accepted — fail-safe", () => {
+  const rows = TABLE([[201, 100, 900]]);
+  assert.deepEqual(descendantsInProcessTable(rows, 100, { minCreationMs: 800 }), []);
+});
+
+test("FOC-1162: a pre-spawn row claiming the anchor's ppid is refused (lower bound)", () => {
+  // The watcher spawned the child at t=500; a row whose ppid claims pid 100
+  // but whose creation predates the spawn was born by whoever held pid 100
+  // THEN, not by our child. The spawn window — both ends of it — is what
+  // proves ownership of the anchor's direct children.
+  const rows = TABLE([
+    [201, 100, 400], // pre-spawn — pid 100 was not ours when this was born
+    [202, 100, 900], // born inside [500, 1000] → ours
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 500, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid), [202]);
+});
+
+test("FOC-1162: a pre-spawn row's descendants follow the anchor out", () => {
+  const rows = TABLE([
+    [201, 100, 400], // the refused pre-spawn anchor
+    [301, 201, 450], // its child — a stranger's tree, never ours
+    [202, 100, 900], // ours
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 500, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid), [202]);
+});
+
+test("FOC-1162: rows inside the spawn window, inclusive at both ends, are accepted", () => {
+  const rows = TABLE([
+    [201, 100, 500], // born exactly at the spawn instant
+    [202, 100, 1000], // born exactly at the exit instant
+    [203, 100, 400], // one tick before the spawn — refused
+    [204, 100, 1001], // one tick after the exit — refused
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 500, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid).sort((a, b) => a - b), [201, 202]);
+});
+
+test("FOC-1162: without a spawn bound nothing is accepted — fail-safe", () => {
+  const rows = TABLE([[201, 100, 900]]);
+  assert.deepEqual(descendantsInProcessTable(rows, 100, { maxCreationMs: 1000 }), []);
+});
+
+test("FOC-1162: the reap kills the verified tree tops through the injected kill, and only them", () => {
+  let call = 0;
+  const enumerate = () => {
+    call++;
+    if (call === 1) {
+      return {
+        entries: TABLE([
+          [100, 4, 1100],
+          [201, 100, 900], // top — the anchor child the kill targets
+          [202, 100, 1150], // the reuse stranger's child — refused
+          [301, 201, 1500], // deep — dies with 201's taskkill /T walk, not killed directly
+        ]),
+        skipped: null,
+      };
+    }
+    // After the kill: 201 and its tree are gone; the refused 202 stays.
+    return { entries: TABLE([[100, 4, 1100], [202, 100, 1150]]), skipped: null };
+  };
+  const kills = [];
+  const kill = (pid, mode) => {
+    kills.push({ pid, mode });
+    return true;
+  };
+  const res = reapChildDescendants({
+    rootPid: 100,
+    exitAtMs: 1000,
+    spawnAtMs: 800,
+    enumerate,
+    kill,
+    alive: () => false,
+    graceMs: 10,
+  });
+  assert.deepEqual(res.skipped, null, "a synthetic-table reap is not a skip");
+  assert.deepEqual(kills, [{ pid: 201, mode: "force" }], "only the verified top was killed");
+  assert.deepEqual(res.killed.map((k) => k.pid), [201]);
+  assert.deepEqual(res.survivors, [], "a landed kill must verify clean");
+  assert.equal(call, 2, "the verification enumeration ran exactly once after the kills");
+});
+
+test("FOC-1162: a survivor is named, not claimed dead", () => {
+  const enumerate = () => ({
+    entries: TABLE([
+      [100, 4, 1100],
+      [201, 100, 900], // refuses to die — taskkill returned, the table still shows it
+    ]),
+    skipped: null,
+  });
+  const res = reapChildDescendants({
+    rootPid: 100,
+    exitAtMs: 1000,
+    spawnAtMs: 800,
+    enumerate,
+    kill: () => true,
+    alive: () => true, // still alive through the whole grace
+    graceMs: 10,
+  });
+  assert.deepEqual(res.killed, [{ pid: 201, name: "p201", ok: true }]);
+  assert.deepEqual(res.survivors, [{ pid: 201, ppid: 100, creation: 900, name: "p201" }]);
+});
+
+test("FOC-1162: a reused pid in the verification table is not named a survivor", () => {
+  // 201 died and a stranger took its pid: the fresh row's creation differs,
+  // so the survivor check refuses to name the innocent occupant.
+  const enumerate = () => ({
+    entries: TABLE([
+      [100, 4, 1100],
+      [201, 100, 900], // the snapshot's row — the kill reported ok
+    ]),
+    skipped: null,
+  });
+  let call = 0;
+  const verifyTable = { entries: TABLE([[100, 4, 1100], [201, 9, 5000]]), skipped: null };
+  const res = reapChildDescendants({
+    rootPid: 100,
+    exitAtMs: 1000,
+    spawnAtMs: 800,
+    enumerate: () => (call++ === 0 ? enumerate() : verifyTable),
+    kill: () => true,
+    alive: () => false,
+    graceMs: 10,
+  });
+  assert.deepEqual(res.survivors, [], "a reused pid is not its dead owner");
+});
+
+test("FOC-1162: a failed enumeration degrades to a skip and kills nothing", () => {
+  const kills = [];
+  const res = reapChildDescendants({
+    rootPid: 100,
+    exitAtMs: 1000,
+    spawnAtMs: 800,
+    enumerate: () => ({ entries: [], skipped: "process table enumeration failed: boom" }),
+    kill: (pid) => kills.push(pid),
+    graceMs: 10,
+  });
+  assert.deepEqual(res.skipped, "process table enumeration failed: boom");
+  assert.deepEqual(res.killed, []);
+  assert.deepEqual(kills, [], "nothing was killed on an unverified table");
+});
+
+test("FOC-1162: the parser refuses one garbled line by refusing the whole table", () => {
+  const good = "201|100|1338000000000|node.exe\n\n";
+  assert.deepEqual(parseWin32ProcessTable(good), {
+    entries: [{ pid: 201, ppid: 100, creation: 1338000000000, name: "node.exe" }],
+    skipped: null,
+  });
+  const res = parseWin32ProcessTable(`${good}boom\n`);
+  assert.deepEqual(res.entries, [], "a garbled table is refused entirely");
+  assert.match(res.skipped, /^unexpected process-table output: boom/);
+});
+
+test("FOC-1162: the real enumeration sees this very process (win32 smoke)", () => {
+  if (process.platform !== "win32") return; // /proc hosts have no CIM table
+  const { entries, skipped } = enumerateWin32Processes();
+  assert.equal(skipped, null, `the real enumeration failed: ${skipped}`);
+  const me = entries.find((e) => e.pid === process.pid);
+  assert.ok(me, "the running test process is missing from the real table");
+  const age = Date.now() - me.creation;
+  assert.ok(age >= 0 && age < 600_000, `the creation stamp is not a plausible epoch ms (age ${age} ms)`);
+  assert.ok(me.ppid > 0, "the test process has a recorded parent");
 });
 
 test("sweepChildProcesses takes the root helper path when asked: TERM, grace, KILL for the survivors", () => {
