@@ -420,8 +420,17 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   // FOC-902: the autonomous-pickup note rides on every detail branch — the
   // doctor line answers both "how full is the cap" and "is pickup on" in one
   // place. A settings.error (overlay ignored) reads autoPickup as null → off.
+  // FOC-1147 round 3: when the pickup's project scope is pinned via
+  // taskSessions.autoPickup.projects, the line names it — the operator sees
+  // the scope without reading the overlay. (This auto-pickup line is the
+  // doctor's only FOC-1147 touch-point; the workspace-claims/cleanup sections
+  // are FOC-1086 turf.)
   const autoNote = settings.autoPickup?.enabled
-    ? `; auto-pickup: on (every ${settings.autoPickup.pollSeconds}s, states ${settings.autoPickup.states.join(",")})`
+    ? `; auto-pickup: on (every ${settings.autoPickup.pollSeconds}s, states ${settings.autoPickup.states.join(",")}` +
+      (Array.isArray(settings.autoPickup.projects) && settings.autoPickup.projects.length > 0
+        ? `, projects ${settings.autoPickup.projects.join(",")}`
+        : "") +
+      ")"
     : "; auto-pickup: off";
   let exists = false;
   try {

@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   PARKED_PROMPT_DEFAULTS,
+  normalizeAutoPickup,
   normalizeParkedPrompt,
   readSettings,
   readTaskSessionsSettings,
@@ -853,6 +854,70 @@ test("validateSettings: taskSessions.autoPickup unknown keys and bad values refu
   assert.ok(notObject.errors.includes("taskSessions.autoPickup: must be an object"));
 });
 
+// --- taskSessions.autoPickup.projects (FOC-1147 round 3) ---------------------
+// The owner scope as an explicit list of Linear project names: array of
+// non-empty strings, trimmed and deduplicated; refused (never defaulted) when
+// invalid, both by validateSettings (`fenix settings set` refuses the same
+// shapes) and by normalizeAutoPickup (the host deps seam — a silently dropped
+// scope would fall back to the projects map and pick different tickets than
+// the operator configured).
+
+test("validateSettings: taskSessions.autoPickup.projects accepts an array of non-empty strings or null, refuses the rest (FOC-1147)", () => {
+  assert.equal(validateSettings({ taskSessions: { autoPickup: {} } }).ok, true); // absent = map fallback
+  assert.equal(validateSettings({ taskSessions: { autoPickup: { projects: null } } }).ok, true);
+  assert.equal(validateSettings({ taskSessions: { autoPickup: { projects: ["Alpha", "Beta"] } } }).ok, true);
+  const cases = [
+    [{ projects: "Alpha" }, "taskSessions.autoPickup.projects: must be an array"],
+    [{ projects: [] }, "taskSessions.autoPickup.projects: must be an array"],
+    [{ projects: [""] }, "taskSessions.autoPickup.projects: must be an array"],
+    [{ projects: ["Alpha", "   "] }, "taskSessions.autoPickup.projects: must be an array"],
+    [{ projects: [1] }, "taskSessions.autoPickup.projects: must be an array"],
+    [{ projects: ["Alpha", "Alpha"] }, "taskSessions.autoPickup.projects: duplicate project 'Alpha'"],
+    [{ projects: ["Alpha", "  Alpha  "] }, "taskSessions.autoPickup.projects: duplicate project 'Alpha'"],
+  ];
+  for (const [patch, message] of cases) {
+    const { ok, errors } = validateSettings({ taskSessions: { autoPickup: patch } });
+    assert.equal(ok, false, `${JSON.stringify(patch)} must be refused`);
+    assert.ok(errors.some((e) => e.startsWith(message)), `${JSON.stringify(patch)}: ${JSON.stringify(errors)}`);
+  }
+});
+
+test("normalizeAutoPickup: projects is trimmed and deduplicated when valid, REFUSED (throws) when invalid (FOC-1147)", () => {
+  assert.deepEqual(normalizeAutoPickup({ projects: ["  Alpha ", "Beta"] }).projects, ["Alpha", "Beta"]);
+  assert.deepEqual(normalizeAutoPickup({}).projects, null);
+  assert.deepEqual(normalizeAutoPickup({ projects: null }).projects, null);
+  for (const bad of ["Alpha", [], [""], ["Alpha", "Alpha"], ["Alpha", "  Alpha  "]]) {
+    assert.throws(() => normalizeAutoPickup({ projects: bad }), /taskSessions\.autoPickup\.projects/,
+      `${JSON.stringify(bad)} must be refused, not defaulted`);
+  }
+});
+
+test("CLI set: taskSessions.autoPickup.projects round-trips; invalid values exit 1 with the documented message (FOC-1147)", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "taskSessions.autoPickup.projects", '["Alpha","Beta"]');
+    const got = await runGet(path, "taskSessions.autoPickup.projects");
+    assert.equal(got.stdout.trim(), '["Alpha","Beta"]');
+    await assert.rejects(runSet(path, "taskSessions.autoPickup.projects", '["Alpha","Alpha"]'), (err) => {
+      assert.equal(err.code, 1);
+      assert.ok(err.stderr.includes("duplicate project"));
+      return true;
+    });
+    // Not JSON → stored as a plain string → refused as a non-array; the file
+    // stays untouched by the failed set.
+    await assert.rejects(runSet(path, "taskSessions.autoPickup.projects", "Alpha"), (err) => {
+      assert.equal(err.code, 1);
+      assert.ok(err.stderr.includes("must be an array"));
+      return true;
+    });
+    const got2 = await runGet(path, "taskSessions.autoPickup.projects");
+    assert.equal(got2.stdout.trim(), '["Alpha","Beta"]');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("readTaskSessionsSettings: autoPickup is normalized with the documented defaults", () => {
   const dir = tempDir();
   try {
@@ -864,7 +929,7 @@ test("readTaskSessionsSettings: autoPickup is normalized with the documented def
     );
     assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
       maxActive: 3,
-      autoPickup: { enabled: true, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null },
+      autoPickup: { enabled: true, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null, projects: null },
       parkedPrompt: { mode: "wait", minutes: 30 },
       worktrees: true,
     });

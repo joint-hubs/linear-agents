@@ -43,7 +43,15 @@ test("no runtime path/state variable (scripts/test-runtime-env.json) in the suit
   if (leaked.length) fail(`leaked into the suite env: ${leaked.join(", ")}`);
 });
 
-console.log(`\n${passed}/2 passed.`);
+// FOC-1147: no Linear API key may reach a suite file either — test-run.mjs
+// strips the prefix (covering the suffixed variants, e.g. LINEAR_API_KEY_PISI)
+// and test-runtime-env.json lists the two known names for the container shell.
+test("no LINEAR_API_KEY* variable in the suite environment", () => {
+  const leaked = Object.keys(process.env).filter((k) => k.startsWith("LINEAR_API_KEY"));
+  if (leaked.length) fail(`leaked into the suite env: ${leaked.join(", ")}`);
+});
+
+console.log(`\n${passed}/3 passed.`);
 if (failures.length > 0) {
   console.error(`${failures.length} test(s) failed.`);
   process.exit(1);

@@ -178,15 +178,28 @@ jointhubs:FOC-2 (sup-…, waiting, stale)`. A missing or unreadable store reads
 
 The host can fill its queue by itself. Off by default; turn it on in the settings overlay
 (`fenix settings set taskSessions.autoPickup.enabled true`, plus optionally `pollSeconds` 60–3600, default 300;
-`states`, default `["Backlog"]`; `label`; `workspace`). When enabled, `task-session-host serve` polls Linear every
+`states`, default `["Backlog"]`; `label`; `workspace`; and `projects` — the owner scope below, an array of
+Linear project names). When enabled, `task-session-host serve` polls Linear every
 `pollSeconds` (first tick 10 s after start): it queries each configured state
-(`node linear-query.mjs issues --status <state> [--label <l>] --json`), keeps only the owner scope's project, orders
+(`node linear-query.mjs issues --status <state> [--label <l>] --json`), keeps only candidates whose Linear project
+is in the owner scope, orders
 by priority (urgent first) then age, and enqueues every candidate that has NO row in the task-sessions store —
-queued, active and terminal rows alike, so a completed or failed ticket is never re-picked. Enqueuing stops at
-`taskSessions.maxActive`; the ordinary scheduler (`claimNext`) starts sessions from the queue as usual. The host
+queued, active and terminal rows alike, so a completed or failed ticket is never re-picked. The owner scope is
+BY PROJECT, never by workspace (FOC-1147): when the task-ownership module is present its `checkOwnership` decides
+(FOC-902 §D); otherwise `taskSessions.autoPickup.projects`, when set, IS the scope (the projects map is not
+consulted at all); without the setting, the scope is the set of distinct `linearProject` values across the
+projects map. The pickup workspace name (the task key's workspace half, `workspaceNameFor`) never filters
+entries — it is only how picked tickets are keyed. Entries for another workspace (e.g. `pisi`) are harmless:
+candidates only come from the host's own Linear key, so a foreign workspace's tickets never appear in the
+candidate list to begin with. Any gap — no setting and a missing/unreadable map, or no `linearProject` on any
+entry — fails the tick closed with the remedy in `GET /pickup`'s `lastError`; the remedy names BOTH ways out
+(`taskSessions.autoPickup.projects` and `fenix-projects add --linear-project`).
+Enqueuing stops at `taskSessions.maxActive`; the ordinary scheduler (`claimNext`) starts sessions from the queue as
+usual. The host
 never writes to Linear — the claim comment stays with the Supervisor's triage. `GET /pickup` on the host reports
 `{ enabled, pollSeconds, states, lastTickAt, lastError, lastEnqueued }`, and the doctor's `task sessions` line ends
-with `auto-pickup: off` or `auto-pickup: on (every <n>s, states <a,b>)`.
+with `auto-pickup: off` or `auto-pickup: on (every <n>s, states <a,b>)` — plus `, projects <a,b>` when the
+scope is pinned via `taskSessions.autoPickup.projects`.
 
 ## What the cockpit shows
 

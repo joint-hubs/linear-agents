@@ -36,17 +36,24 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 
-import { createTaskSessionStore, OWNER_STATUSES } from "./task-sessions.mjs";
+import { createTaskSessionStore, OWNER_STATUSES, resolveTaskKey, workspaceNameFor } from "./task-sessions.mjs";
 import {
   createTaskSessionHost,
   ownershipKeeps,
+  repoRefPath,
   seedSessionConfig,
   sessionBranchFor,
   sessionHomePath,
 } from "./task-session-host.mjs";
+// The round-3 owner-scope resolver arrives with the by-project fix; resolving
+// it through the module namespace at CALL time keeps this file loadable — and
+// every test below RED with its own failure, not one import error — while the
+// fix is still uncommitted.
+import * as taskSessionHostModule from "./task-session-host.mjs";
+const ownerProjectsFor = (env, projectsSetting) => taskSessionHostModule.ownerProjectsFor(env, projectsSetting);
 import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
 import { checkOwnership } from "./task-ownership.mjs";
 import { fixtureRepo, gitIn } from "./supervisor-test-fixtures.mjs";
@@ -241,6 +248,10 @@ const build = (opts = {}) => {
     // FOC-839: the legacy-migration hook is injectable; null (the default
     // here) skips it so existing tests are unaffected.
     ...(opts.migrateLegacy !== undefined ? { migrateLegacy: opts.migrateLegacy } : { migrateLegacy: null }),
+    // FOC-1147: the owner-scope module seam — null exercises the projects-map
+    // fallback through a real tick (the real task-ownership module would
+    // shadow it, the shipped module always wins otherwise).
+    ...(opts.taskOwnership !== undefined ? { taskOwnership: opts.taskOwnership } : {}),
   });
   return { host, store, fakes, fakeFor, legacyFake, tmp, stops };
 };
@@ -1112,6 +1123,325 @@ test('GET /pickup with pickup enabled reports the configured shape and the last 
     assert.deepEqual(r.json.lastEnqueued, ['workspace:ISSUE-P1']);
     assert.ok(typeof r.json.lastTickAt === 'string');
   } finally { host.close(); store.close(); }
+});
+
+// ── FOC-1147: the auto-pickup owner scope ────────────────────────────────────
+// Round 3 (delivery-owner redesign): the owner scope is BY PROJECT, never by
+// workspace. Setting first — `taskSessions.autoPickup.projects`, an array of
+// Linear project names, IS the scope when set (the projects map is not
+// consulted at all); otherwise the scope is the set of DISTINCT
+// `linearProject` values across the projects map, and a candidate is kept iff
+// `issue.project.name` is in that set. The rounds-1-2 rule (match
+// `entry.workspace` against the task-key workspace) died here for good: the
+// real map carries workspace 'joi'/'pisi' (`fenix-projects add` defaults
+// `--workspace joi`), so that rule only ever matched its own test fixtures and
+// failed every real tick closed.
+//
+// The full-tick tests drive the REAL listCandidates: their linear-query child
+// runs hermetically — LA_LINEAR_NO_ENV_FILE=1 (no .env read), a fake
+// LINEAR_API_KEY, and a stubbed global fetch (NODE_OPTIONS --import) that
+// answers the team and issues queries from a literal file. No network.
+
+// A Linear GraphQL fetch stub for the linear-query child: answers the team
+// resolution and the issues query from the JSON file the test passes.
+const linearQueryFetchStub = (issuesFile) => `
+import { readFileSync } from "node:fs";
+const issues = JSON.parse(readFileSync(${JSON.stringify(issuesFile)}, "utf8"));
+globalThis.fetch = async (_url, opts) => {
+  const body = JSON.parse(opts.body);
+  const data = body.query.includes("issues")
+    ? { team: { id: "team-1", issues: { nodes: issues } } }
+    : { teams: { nodes: [{ id: "team-1", name: "FEN", key: "FEN" }] } };
+  return { ok: true, status: 200, json: async () => ({ data }) };
+};
+`;
+
+// The REAL config's shape (config/projects.json): 'joi' entries ×2 and a
+// 'pisi' entry. The pickup workspace ('jointhubs', the shared default) appears
+// in NO entry — under the dead workspace-name rule this map failed every tick
+// closed; under the by-project rule the linearProjects are the scope. No
+// fixture entry may ever carry a 'jointhubs' alias — that is the property.
+const realShapedMap = () =>
+  projectsFixture([
+    { linearProject: "Neo", workspace: "joi", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+    { linearProject: "AU", workspace: "joi", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+    { linearProject: "PISI", workspace: "pisi", repo: "${GITHUB_ROOT}/pisi-repo", deploy: { type: "none" } },
+  ]);
+
+test("FOC-1147: the owner scope is the map's distinct linearProjects; the setting, when set, IS the scope", () => {
+  // No setting: every mapped linearProject is in scope, whatever its entry's
+  // workspace says — the pickup workspace name never filters entries.
+  assert.deepEqual([...ownerProjectsFor({ LA_PROJECTS_FILE: realShapedMap() }, null)], ["Neo", "AU", "PISI"]);
+  // Setting first: the map is not consulted at all.
+  assert.deepEqual([...ownerProjectsFor({ LA_PROJECTS_FILE: realShapedMap() }, ["Fenix"])], ["Fenix"]);
+});
+
+test("FOC-1147: a real-shaped map picks the mapped project's tickets; an unmapped project is dropped with no error", async () => {
+  const base = tempDir("foc-1147-owner");
+  const issues = [
+    { identifier: "NEO-1", title: "mapped", priority: 1, createdAt: "2026-01-01T00:00:00.000Z", project: { name: "Neo" } },
+    { identifier: "GHS-1", title: "unmapped project", priority: 1, createdAt: "2026-01-01T00:00:00.000Z", project: { name: "Ghost Project" } },
+  ];
+  const issuesFile = join(tempDir("foc-1147-issues"), "issues.json");
+  writeFileSync(issuesFile, JSON.stringify(issues), "utf8");
+  const stub = join(tempDir("foc-1147-stub"), "linear-fetch-stub.mjs");
+  writeFileSync(stub, linearQueryFetchStub(issuesFile), "utf8");
+  const store = createTaskSessionStore({ dbPath: ":memory:", maxActive: 5 });
+  const { host } = build({
+    store,
+    maxActive: 5,
+    autoPickup: { enabled: true }, // no workspace override, no projects setting — the map decides
+    taskOwnership: null, // the projects-map fallback decides (the real module would shadow it)
+    pickupDeps: fakeTimers(),
+    env: {
+      LA_PROJECTS_FILE: realShapedMap(),
+      GITHUB_ROOT: base,
+      LA_LINEAR_NO_ENV_FILE: "1",
+      LINEAR_TEAM_KEY: "FEN",
+      LINEAR_API_KEY: "fake-key-for-stub",
+      NODE_OPTIONS: `--import=${pathToFileURL(stub).href}`,
+    },
+  });
+  try {
+    const result = await host.pickupTick();
+    // `candidates` counts the OWNER-SCOPED list (what listCandidates returned),
+    // not the raw child output — GHS-1 was filtered out before the sort.
+    assert.deepEqual(result, { candidates: 1, enqueued: ["jointhubs:NEO-1"], skipped: 0 });
+    assert.equal(host.pickupState.lastError, null);
+  } finally { host.close(); store.close(); }
+});
+
+test("FOC-1147: taskSessions.autoPickup.projects IS the owner scope — a mapped project outside the setting is dropped", async () => {
+  const base = tempDir("foc-1147-setting");
+  const map = projectsFixture([
+    { linearProject: "Alpha", workspace: "joi", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+    { linearProject: "Beta", workspace: "pisi", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+  ]);
+  const issues = [
+    { identifier: "ALP-1", title: "in the setting", priority: 1, createdAt: "2026-01-01T00:00:00.000Z", project: { name: "Alpha" } },
+    { identifier: "BET-1", title: "mapped but not in the setting", priority: 1, createdAt: "2026-01-01T00:00:00.000Z", project: { name: "Beta" } },
+  ];
+  const issuesFile = join(tempDir("foc-1147-issues-b"), "issues.json");
+  writeFileSync(issuesFile, JSON.stringify(issues), "utf8");
+  const stub = join(tempDir("foc-1147-stub-b"), "linear-fetch-stub.mjs");
+  writeFileSync(stub, linearQueryFetchStub(issuesFile), "utf8");
+  const store = createTaskSessionStore({ dbPath: ":memory:", maxActive: 5 });
+  const { host } = build({
+    store,
+    maxActive: 5,
+    autoPickup: { enabled: true, projects: ["Alpha"] },
+    taskOwnership: null,
+    pickupDeps: fakeTimers(),
+    env: {
+      LA_PROJECTS_FILE: map,
+      GITHUB_ROOT: base,
+      LA_LINEAR_NO_ENV_FILE: "1",
+      LINEAR_TEAM_KEY: "FEN",
+      LINEAR_API_KEY: "fake-key-for-stub",
+      NODE_OPTIONS: `--import=${pathToFileURL(stub).href}`,
+    },
+  });
+  try {
+    const result = await host.pickupTick();
+    assert.deepEqual(result, { candidates: 1, enqueued: ["jointhubs:ALP-1"], skipped: 0 });
+    assert.equal(host.pickupState.lastError, null);
+  } finally { host.close(); store.close(); }
+});
+
+test("FOC-1147: no setting + an unreadable projects map → the remedy names BOTH taskSessions.autoPickup.projects and fenix-projects add --linear-project", async () => {
+  const base = tempDir("foc-1147-nomap");
+  // (A MISSING file is not this case — projectsConfigPath falls back to the
+  // repo's config/projects.json — so the fixture must exist and be
+  // unparseable; the unreadable map is the fail-closed family this test pins.)
+  const brokenMap = join(tempDir("foc-1147-broken-map"), "projects.json");
+  writeFileSync(brokenMap, "{ not json", "utf8");
+  // The candidate query itself must SUCCEED (an empty list is enough) — the
+  // fail-closed scope throw must be what the tick reports, not a query error.
+  const issuesFile = join(tempDir("foc-1147-issues-c"), "issues.json");
+  writeFileSync(issuesFile, JSON.stringify([]), "utf8");
+  const stub = join(tempDir("foc-1147-stub-c"), "linear-fetch-stub.mjs");
+  writeFileSync(stub, linearQueryFetchStub(issuesFile), "utf8");
+  const store = createTaskSessionStore({ dbPath: ":memory:", maxActive: 5 });
+  const { host } = build({
+    store,
+    maxActive: 5,
+    autoPickup: { enabled: true },
+    taskOwnership: null,
+    pickupDeps: fakeTimers(),
+    env: {
+      LA_PROJECTS_FILE: brokenMap,
+      GITHUB_ROOT: base,
+      LA_LINEAR_NO_ENV_FILE: "1",
+      LINEAR_TEAM_KEY: "FEN",
+      LINEAR_API_KEY: "fake-key-for-stub",
+      NODE_OPTIONS: `--import=${pathToFileURL(stub).href}`,
+    },
+  });
+  try {
+    const result = await host.pickupTick();
+    assert.match(result.error, /missing or unreadable/);
+    assert.match(result.error, /taskSessions\.autoPickup\.projects/);
+    assert.match(result.error, /fenix-projects\.mjs add --linear-project/);
+    // The remedy must NEVER tell anyone to rewrite entries to a particular
+    // workspace — the workspace-name rule is dead.
+    assert.ok(!/workspace jointhubs/.test(result.error), `workspace remedy survived: ${result.error}`);
+    assert.equal(host.pickupState.lastError, result.error);
+  } finally { host.close(); store.close(); }
+});
+
+test("FOC-1147: the owner scope fails closed when the map names no linearProject at all — same both-remedies message", () => {
+  const noProject = projectsFixture([{ workspace: "joi", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } }]);
+  assert.throws(
+    () => ownerProjectsFor({ LA_PROJECTS_FILE: noProject }, null),
+    (err) => {
+      assert.match(err.message, /no owner scope for auto-pickup/);
+      assert.match(err.message, /taskSessions\.autoPickup\.projects/);
+      assert.match(err.message, /fenix-projects\.mjs add --linear-project/);
+      assert.ok(!/workspace jointhubs/.test(err.message), `workspace remedy survived: ${err.message}`);
+      return true;
+    },
+  );
+  // An unreadable map is its own case: the scope is undecidable. (A MISSING
+  // file is not this case — projectsConfigPath falls back to the repo's
+  // config/projects.json, so the fixture must exist and be unparseable.)
+  const brokenMap = join(tempDir("foc-1147-broken-map-direct"), "projects.json");
+  writeFileSync(brokenMap, "{ not json", "utf8");
+  assert.throws(
+    () => ownerProjectsFor({ LA_PROJECTS_FILE: brokenMap }, null),
+    /missing or unreadable/,
+  );
+});
+
+test("FOC-1147: several distinct linearProjects across the map are all in scope; duplicates of one project dedupe; ambiguity was a workspace-rule concept", () => {
+  const map = projectsFixture([
+    { linearProject: "Fenix", workspace: "joi", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+    { linearProject: "Neo", workspace: "joi", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+  ]);
+  assert.deepEqual([...ownerProjectsFor({ LA_PROJECTS_FILE: map }, null)], ["Fenix", "Neo"]);
+  const deduped = projectsFixture([
+    { linearProject: "Fenix", workspace: "joi", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+    { linearProject: "Fenix", workspace: "joi", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+  ]);
+  assert.deepEqual([...ownerProjectsFor({ LA_PROJECTS_FILE: deduped }, null)], ["Fenix"]);
+});
+
+test("FOC-1147: through a real tick — the pickup enqueues only the mapped project's tickets under the shared jointhubs: prefix", async () => {
+  const base = tempDir("foc-1147-owner");
+  const issues = [
+    { identifier: "FEN-1", title: "first", priority: 1, createdAt: "2026-01-01T00:00:00.000Z", project: { name: "Fenix" } },
+    { identifier: "NEO-1", title: "another workspace's ticket", priority: 1, createdAt: "2026-01-01T00:00:00.000Z", project: { name: "Neo" } },
+    { identifier: "FEN-2", title: "second", priority: 3, createdAt: "2026-01-02T00:00:00.000Z", project: { name: "Fenix" } },
+  ];
+  const issuesFile = join(tempDir("foc-1147-issues"), "issues.json");
+  writeFileSync(issuesFile, JSON.stringify(issues), "utf8");
+  const stub = join(tempDir("foc-1147-stub"), "linear-fetch-stub.mjs");
+  writeFileSync(stub, linearQueryFetchStub(issuesFile), "utf8");
+  const store = createTaskSessionStore({ dbPath: ":memory:", maxActive: 5 });
+  const { host } = build({
+    store,
+    maxActive: 5,
+    autoPickup: { enabled: true }, // no workspace override, no projects setting — the map decides
+    taskOwnership: null, // the projects-map fallback decides (the real module would shadow it)
+    pickupDeps: fakeTimers(),
+    env: {
+      // A joi-workspace entry — `fenix-projects add`'s default shape. The map
+      // matches by linearProject only: the pickup workspace ('jointhubs')
+      // appears in no entry and is never compared.
+      LA_PROJECTS_FILE: projectsFixture([
+        { linearProject: "Fenix", workspace: "joi", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+      ]),
+      GITHUB_ROOT: base,
+      LA_LINEAR_NO_ENV_FILE: "1",
+      LINEAR_TEAM_KEY: "FEN",
+      LINEAR_API_KEY: "fake-key-for-stub",
+      NODE_OPTIONS: `--import=${pathToFileURL(stub).href}`,
+    },
+  });
+  try {
+    const result = await host.pickupTick();
+    // `candidates` counts the OWNER-SCOPED list (what listCandidates returned),
+    // not the raw child output — NEO-1 was filtered out before the sort.
+    assert.deepEqual(result, { candidates: 2, enqueued: ["jointhubs:FEN-1", "jointhubs:FEN-2"], skipped: 0 });
+    assert.equal(host.pickupState.lastError, null);
+  } finally { host.close(); store.close(); }
+});
+
+test("FOC-1147: picked and dashboard-started tickets share one key space — the pickup workspace is workspaceNameFor's rule", async () => {
+  const store = createTaskSessionStore({ dbPath: ":memory:", maxActive: 2 });
+  const { host } = build({
+    store,
+    maxActive: 2,
+    autoPickup: { enabled: true }, // no override
+    env: { FENIX_WORK_WORKSPACE: "acme" },
+    pickupDeps: fakeTimers(),
+    listCandidates: async () => [pickupIssue("WS1")],
+  });
+  try {
+    const result = await host.pickupTick();
+    assert.deepEqual(result.enqueued, ["acme:ISSUE-WS1"]);
+    // The pin: the picked key is EXACTLY the key work-routes would build for
+    // a dashboard start under the same env — one rule, one key space.
+    assert.equal(
+      result.enqueued[0],
+      resolveTaskKey({ workspace: workspaceNameFor({ FENIX_WORK_WORKSPACE: "acme" }), issueId: "ISSUE-WS1" }),
+    );
+  } finally { host.close(); store.close(); }
+});
+
+test("FOC-1147: an invalid taskSessions.autoPickup.projects on the host deps seam is refused at build, never silently defaulted", () => {
+  const store = createTaskSessionStore({ dbPath: ":memory:", maxActive: 2 });
+  try {
+    assert.throws(() => build({ store, autoPickup: { enabled: true, projects: "Alpha" } }), /taskSessions\.autoPickup\.projects/);
+    assert.throws(() => build({ store, autoPickup: { enabled: true, projects: ["Alpha", "Alpha"] } }), /duplicate project/);
+  } finally { store.close(); }
+});
+
+test("FOC-1147: a pickup error echoing credentials (a tried repo URL with userinfo, a token in a query) is redacted in lastError", async () => {
+  const { host, store } = build({
+    autoPickup: { enabled: true, workspace: "workspace" },
+    pickupDeps: fakeTimers(),
+    listCandidates: async () => {
+      // Assembled at runtime (same precedent as supervisor-spawn.test.mjs):
+      // a literal user:pass@ URL in this source trips secretlint's basicauth
+      // rule and fails the security scan; the assertion runs against the
+      // assembled string.
+      const credUrl = ["https://user:secret", "@github.com/owner/repo"].join("");
+      throw new Error(
+        `no repository for managed task 'workspace:FEN-9': tried ${credUrl} and https://api.github.com/repos/owner/repo?token=abc123`,
+      );
+    },
+  });
+  const port = await listen(host);
+  try {
+    const result = await host.pickupTick();
+    assert.match(result.error, /https:\/\/\*\*\*@github\.com\/owner\/repo/);
+    assert.ok(!result.error.includes("secret"), `userinfo leaked: ${result.error}`);
+    assert.ok(!result.error.includes("token=abc123"), `query token leaked: ${result.error}`);
+    assert.equal(host.pickupState.lastError, result.error);
+    const r = await request(port, "GET", "/pickup");
+    assert.equal(r.json.lastError, result.error);
+  } finally { host.close(); store.close(); }
+});
+
+// repoRefPath is exported for these tests; its only production caller is the
+// FOC-1088 lane's oneRepoFor, where a throw fails the session closed through
+// start's usual catch (the remedy appends there).
+test("FOC-1147: repoRefPath expands the ${GITHUB_ROOT} template and passes other refs through", () => {
+  assert.equal(repoRefPath("${GITHUB_ROOT}/alpha", { GITHUB_ROOT: join("C:", "clones") }), join("C:", "clones", "alpha"));
+  assert.equal(repoRefPath("C:/repos/alpha", {}), "C:/repos/alpha");
+  assert.equal(repoRefPath("alpha", {}), "alpha");
+  assert.equal(repoRefPath(null, {}), null);
+  assert.equal(repoRefPath("   ", {}), null);
+});
+
+test("FOC-1147: repoRefPath throws the remedy when GITHUB_ROOT cannot expand the template", () => {
+  assert.throws(() => repoRefPath("${GITHUB_ROOT}/alpha", {}), /GITHUB_ROOT is unset/);
+  assert.throws(() => repoRefPath("${GITHUB_ROOT}/alpha", { GITHUB_ROOT: "   " }), /GITHUB_ROOT is unset/);
+});
+
+test("FOC-1147: repoRefPath refuses a '..' segment — the expansion stays inside the clones root", () => {
+  assert.throws(() => repoRefPath("${GITHUB_ROOT}/../evil", { GITHUB_ROOT: "C:/clones" }), /\.\./);
+  assert.throws(() => repoRefPath("${GITHUB_ROOT}/a/../../evil", { GITHUB_ROOT: "C:/clones" }), /\.\./);
 });
 
 // ── FOC-839: legacy migration hook at serve start ────────────────────────────
