@@ -1158,7 +1158,7 @@ test("FOC-1162: the anchor's pre-exit children are accepted, a reused anchor's l
     [201, 100, 900], // born by the child before it died → ours
     [202, 100, 1150], // born by whoever holds pid 100 NOW → refused
   ]);
-  const desc = descendantsInProcessTable(rows, 100, { maxCreationMs: 1000 });
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 800, maxCreationMs: 1000 });
   assert.deepEqual(desc.map((d) => d.pid), [201]);
 });
 
@@ -1168,7 +1168,7 @@ test("FOC-1162: the chain walks live verified parents, including births after th
     [301, 201, 1500], // its child, born during the drain — ours through the live parent
     [302, 201, 850], // born by the DEAD previous holder of pid 201 — refused
   ]);
-  const desc = descendantsInProcessTable(rows, 100, { maxCreationMs: 1000 });
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 800, maxCreationMs: 1000 });
   assert.deepEqual(
     desc.map((d) => d.pid).sort((a, b) => a - b),
     [201, 301],
@@ -1188,13 +1188,52 @@ test("FOC-1162: a chain through a reused descendant pid breaks at the reuse (saf
     [401, 301, 980], // C's genuine orphan — refused (predates the stranger's birth)
     [402, 301, 1300], // the stranger's child — refused (postdates it, but 301 ∉ accepted)
   ]);
-  const desc = descendantsInProcessTable(rows, 100, { maxCreationMs: 1000 });
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 800, maxCreationMs: 1000 });
   assert.deepEqual(desc.map((d) => d.pid), [201]);
 });
 
 test("FOC-1162: without an exit bound nothing is accepted — fail-safe", () => {
   const rows = TABLE([[201, 100, 900]]);
-  assert.deepEqual(descendantsInProcessTable(rows, 100, {}), []);
+  assert.deepEqual(descendantsInProcessTable(rows, 100, { minCreationMs: 800 }), []);
+});
+
+test("FOC-1162: a pre-spawn row claiming the anchor's ppid is refused (lower bound)", () => {
+  // The watcher spawned the child at t=500; a row whose ppid claims pid 100
+  // but whose creation predates the spawn was born by whoever held pid 100
+  // THEN, not by our child. The spawn window — both ends of it — is what
+  // proves ownership of the anchor's direct children.
+  const rows = TABLE([
+    [201, 100, 400], // pre-spawn — pid 100 was not ours when this was born
+    [202, 100, 900], // born inside [500, 1000] → ours
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 500, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid), [202]);
+});
+
+test("FOC-1162: a pre-spawn row's descendants follow the anchor out", () => {
+  const rows = TABLE([
+    [201, 100, 400], // the refused pre-spawn anchor
+    [301, 201, 450], // its child — a stranger's tree, never ours
+    [202, 100, 900], // ours
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 500, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid), [202]);
+});
+
+test("FOC-1162: rows inside the spawn window, inclusive at both ends, are accepted", () => {
+  const rows = TABLE([
+    [201, 100, 500], // born exactly at the spawn instant
+    [202, 100, 1000], // born exactly at the exit instant
+    [203, 100, 400], // one tick before the spawn — refused
+    [204, 100, 1001], // one tick after the exit — refused
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, { minCreationMs: 500, maxCreationMs: 1000 });
+  assert.deepEqual(desc.map((d) => d.pid).sort((a, b) => a - b), [201, 202]);
+});
+
+test("FOC-1162: without a spawn bound nothing is accepted — fail-safe", () => {
+  const rows = TABLE([[201, 100, 900]]);
+  assert.deepEqual(descendantsInProcessTable(rows, 100, { maxCreationMs: 1000 }), []);
 });
 
 test("FOC-1162: the reap kills the verified tree tops through the injected kill, and only them", () => {
@@ -1223,6 +1262,7 @@ test("FOC-1162: the reap kills the verified tree tops through the injected kill,
   const res = reapChildDescendants({
     rootPid: 100,
     exitAtMs: 1000,
+    spawnAtMs: 800,
     enumerate,
     kill,
     alive: () => false,
@@ -1246,6 +1286,7 @@ test("FOC-1162: a survivor is named, not claimed dead", () => {
   const res = reapChildDescendants({
     rootPid: 100,
     exitAtMs: 1000,
+    spawnAtMs: 800,
     enumerate,
     kill: () => true,
     alive: () => true, // still alive through the whole grace
@@ -1270,6 +1311,7 @@ test("FOC-1162: a reused pid in the verification table is not named a survivor",
   const res = reapChildDescendants({
     rootPid: 100,
     exitAtMs: 1000,
+    spawnAtMs: 800,
     enumerate: () => (call++ === 0 ? enumerate() : verifyTable),
     kill: () => true,
     alive: () => false,
@@ -1283,6 +1325,7 @@ test("FOC-1162: a failed enumeration degrades to a skip and kills nothing", () =
   const res = reapChildDescendants({
     rootPid: 100,
     exitAtMs: 1000,
+    spawnAtMs: 800,
     enumerate: () => ({ entries: [], skipped: "process table enumeration failed: boom" }),
     kill: (pid) => kills.push(pid),
     graceMs: 10,

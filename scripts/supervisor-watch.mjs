@@ -349,6 +349,12 @@ const spawnOpts = {
 // FOC-802: when isolated, the EXACT argv claude would get today rides after
 // `--` on the helper's command line; nothing about the child's command line or
 // this watcher's pipe handling changes. Unisolated is today's spawn verbatim.
+// FOC-1162: the instant before the spawn, recorded as the creation LOWER bound
+// the win32 descendant reap verifies against — a grandchild the child spawned
+// was born after this moment; a stale row that merely claims the child's ppid
+// predates it (whoever held the pid then spawned that). Declared here because
+// finalizeTurn reads it on every path.
+const childSpawnAt = Date.now();
 const child = isolated
   ? spawn(
       sudo.command,
@@ -813,9 +819,10 @@ child.on("error", (err) => {
 // where terminateTurn can measure against it.
 let finalized = false;
 // FOC-1162: the instant the child's 'exit' fires, recorded as the creation
-// bound the win32 descendant reap verifies against — a process the child
-// spawned was born before this moment, a pid-reuse stranger's child after
-// it. Declared here because finalizeTurn reads it on every path.
+// UPPER bound the win32 descendant reap verifies against — a process the
+// child spawned was born before this moment, a pid-reuse stranger's child
+// after it. The matching lower bound is childSpawnAt, taken at the spawn.
+// Declared here because finalizeTurn reads it on every path.
 let childExitAt = null;
 function finalizeTurn(code, signal) {
   if (finalized) return;
@@ -956,8 +963,9 @@ function finalizeTurn(code, signal) {
   // win32 there is no /proc to read — a grandchild the child spawned and left
   // behind survives it, and killTree walks from a live parent, which the
   // child no longer is. So the reap walks the process table from the child's
-  // pid instead, verifies every candidate against the child's exit time (a
-  // reused pid is refused, never killed), and kills the verified tree tops
+  // pid instead, verifies every candidate against the child's spawn window
+  // (a stale pre-spawn row or a reused pid is refused, never killed), and
+  // kills the verified tree tops
   // with the same force taskkill the linger path uses. Only a child that
   // demonstrably exited is reaped: a turn the linger path is still fighting
   // for keeps its own semantics (its kill already walks the live tree), and a
@@ -973,6 +981,7 @@ function finalizeTurn(code, signal) {
       const reap = reapChildDescendants({
         rootPid: child.pid,
         exitAtMs: childExitAt,
+        spawnAtMs: childSpawnAt,
         excludePids: [process.pid],
       });
       reapedTreePids = (reap.killed ?? []).filter((k) => k.ok).map((k) => k.pid);

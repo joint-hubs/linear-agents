@@ -3440,10 +3440,13 @@ export function parseWin32ProcessTable(text) {
  * never a kill. Two rules, both built on creation stamps:
  *
  *  · The anchor's direct children are accepted only when they were born
- *    before the child's exit (`maxCreationMs`). A process our child spawned
- *    was born before the child died; a stranger that reused the child's pid
- *    was born after — and its children with it. The bound is what keeps a
- *    reused anchor from adopting a stranger's tree.
+ *    inside the window the watcher owned the child's pid-slot: after the
+ *    spawn (`minCreationMs`) and before the child's exit (`maxCreationMs`).
+ *    A process our child spawned was born between the two; a stale row that
+ *    merely claims the anchor's ppid predates the spawn — pid 100 was held
+ *    by someone else then — and a stranger that reused the child's pid was
+ *    born after the exit. Either bound out and the row is refused, with its
+ *    whole subtree: the chain rule follows the anchor.
  *  · A deeper process joins only through a LIVE verified parent (the snapshot
  *    is internally consistent, so a ppid link names the pid that actually
  *    holds it now), and only when it was born after that parent — everything
@@ -3458,12 +3461,16 @@ export function parseWin32ProcessTable(text) {
  *
  * @param {Array<{pid: number, ppid: number, creation: number}>} entries
  * @param {number} rootPid the child's pid — never part of the result
- * @param {{ maxCreationMs?: number }} opts the child's exit time (epoch ms);
- *   without a finite bound no anchor child can be verified, so nothing is
- *   returned — fail-safe.
+ * @param {{ minCreationMs?: number, maxCreationMs?: number }} opts the child's
+ *   spawn and exit times (epoch ms); without BOTH finite bounds no anchor
+ *   child can be verified, so nothing is returned — fail-safe.
  * @returns {Array<{pid: number, ppid: number, creation: number, name: string}>}
  */
-export function descendantsInProcessTable(entries, rootPid, { maxCreationMs = Number.NaN } = {}) {
+export function descendantsInProcessTable(
+  entries,
+  rootPid,
+  { minCreationMs = Number.NaN, maxCreationMs = Number.NaN } = {},
+) {
   const childrenOf = new Map();
   for (const e of entries) {
     if (!Number.isInteger(e?.pid) || !Number.isInteger(e?.ppid) || !Number.isInteger(e?.creation)) continue;
@@ -3471,9 +3478,9 @@ export function descendantsInProcessTable(entries, rootPid, { maxCreationMs = Nu
     childrenOf.get(e.ppid).push(e);
   }
   const accepted = new Map();
-  if (Number.isFinite(maxCreationMs)) {
+  if (Number.isFinite(minCreationMs) && Number.isFinite(maxCreationMs)) {
     for (const c of childrenOf.get(rootPid) ?? []) {
-      if (c.creation <= maxCreationMs) accepted.set(c.pid, c);
+      if (minCreationMs <= c.creation && c.creation <= maxCreationMs) accepted.set(c.pid, c);
     }
   }
   // The frontier only ever holds LIVE table entries (every accepted pid came
@@ -3510,7 +3517,7 @@ export function descendantsInProcessTable(entries, rootPid, { maxCreationMs = Nu
  * verified descendant must be gone, or it is named a survivor. The whole
  * call is best-effort — every failure mode returns a report, never a throw.
  *
- * @param {{ rootPid: number, exitAtMs: number, excludePids?: number[], graceMs?: number,
+ * @param {{ rootPid: number, exitAtMs: number, spawnAtMs: number, excludePids?: number[], graceMs?: number,
  *          enumerate?: () => { entries: Array, skipped: string|null },
  *          kill?: (pid: number, mode: string) => boolean,
  *          alive?: (pid: number) => boolean }} opts
@@ -3521,14 +3528,15 @@ export function descendantsInProcessTable(entries, rootPid, { maxCreationMs = Nu
 export function reapChildDescendants({
   rootPid,
   exitAtMs,
+  spawnAtMs,
   excludePids = [],
   enumerate = enumerateWin32Processes,
   kill = killTree,
   alive = processAlive,
   graceMs = 2000,
 } = {}) {
-  if (!Number.isSafeInteger(rootPid) || !Number.isFinite(exitAtMs)) {
-    return { killed: [], survivors: null, skipped: "no root pid or no exit bound" };
+  if (!Number.isSafeInteger(rootPid) || !Number.isFinite(exitAtMs) || !Number.isFinite(spawnAtMs)) {
+    return { killed: [], survivors: null, skipped: "no root pid or no spawn/exit bound" };
   }
   const table = enumerate();
   if (table.skipped) return { killed: [], survivors: null, skipped: table.skipped };
@@ -3536,7 +3544,7 @@ export function reapChildDescendants({
   const desc = descendantsInProcessTable(
     table.entries.filter((e) => !exclude.has(e.pid)),
     rootPid,
-    { maxCreationMs: exitAtMs },
+    { minCreationMs: spawnAtMs, maxCreationMs: exitAtMs },
   );
   if (!desc.length) return { killed: [], survivors: [], skipped: null, via: "table" };
   const inTree = new Set(desc.map((d) => d.pid));

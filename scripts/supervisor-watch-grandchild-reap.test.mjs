@@ -18,11 +18,11 @@
 //         status "exited", exitCode 0). THEN the grandchild must be gone.
 //         On the current code the grandchild is still alive → RED.
 //
-// Liveness is verified by PID EXISTENCE only — `Get-CimInstance Win32_Process`
-// (wmic does not exist on this host; CIM CreationDate is locale-formatted and
-// is never parsed). The poll window is bounded (15 s past finalize) so a fixed
-// tree can pass; 15 s ≪ the grandchild's 60 s lifetime, so it cannot die of old
-// age inside the window and fake a pass.
+// Liveness is verified by PID EXISTENCE only — signal 0 (ESRCH means dead,
+// any other answer means alive), which works identically on win32 and POSIX.
+// The poll window is bounded (15 s past finalize) so a fixed tree can pass;
+// 15 s ≪ the grandchild's 60 s lifetime, so it cannot die of old age inside
+// the window and fake a pass.
 //
 // Teardown is unconditional: the test's own grandchild is killed (taskkill /T
 // /F via killTree) whether the assertion passes, fails or throws — a RED run
@@ -34,7 +34,7 @@
 // Run: node scripts/supervisor-watch-grandchild-reap.test.mjs
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -179,14 +179,17 @@ async function waitForExitRow(timeoutMs = 60_000) {
   throw new Error(`the watcher never enqueued ${EXIT_KEY} within ${timeoutMs} ms`);
 }
 
-// Liveness by PID EXISTENCE only (never CreationDate parsing — locale text).
-const aliveViaCim = (pid) => {
-  const r = spawnSync(
-    "powershell",
-    ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}") -ne $null`],
-    { encoding: "utf8", timeout: 15_000, windowsHide: true },
-  );
-  return String(r.stdout ?? "").trim() === "True";
+// Liveness by PID EXISTENCE only — signal 0, cross-platform. ESRCH is the one
+// unambiguous "no such process" answer; success or EPERM both mean something
+// is there. (A powershell CIM probe here would report every pid dead on a
+// POSIX host — empty stdout — and pass the test vacuously.)
+const aliveBySignal = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code !== "ESRCH";
+  }
 };
 
 const grandchildPid = () => {
@@ -252,7 +255,7 @@ test("the grandchild spawned by the child is GONE after the normal-path finalize
   const deadline = Date.now() + 15_000;
   let alive = true;
   while (Date.now() < deadline) {
-    alive = aliveViaCim(pid);
+    alive = aliveBySignal(pid);
     if (!alive) break;
     await sleep(500);
   }
