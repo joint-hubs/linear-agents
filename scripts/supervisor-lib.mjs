@@ -3037,6 +3037,18 @@ export function comparableProgress(a, b) {
  * reads it too, and a CLI script is the wrong thing for another script to import.
  * Same rule the registry and the gate paths already follow.
  */
+// Where a run id becomes a PATH SEGMENT — `--work-run` on the CLI, and
+// `workRun` / `verdictRuns` read back from disk (FOC-1155) — this is the only
+// shape accepted. Permissive on purpose: legacy `test-*` and `run-*` ids are
+// legal dir names and the strict launcher shape (RUN_ID_RE in utils.mjs)
+// would reject them; but path separators are refused, so a provenance value
+// can never climb out of the state home. `.` and `..` are refused too — as a
+// lone segment each names the parent dir.
+const PATH_SAFE_RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
+export function isPathSafeRunId(id) {
+  return typeof id === "string" && PATH_SAFE_RUN_ID_RE.test(id) && id !== "." && id !== "..";
+}
+
 export function roundsFor(runId, taskId) {
   const prefix = `${String(taskId).toLowerCase()}-round`;
   // FOC-1155: a launcher restart mid-task splits one task's verdict chain
@@ -3049,6 +3061,9 @@ export function roundsFor(runId, taskId) {
   // provenance nothing is followed: single-run behaviour is identical to
   // before. Records are keyed by "<runId>/<file>" so a record can never be
   // counted twice when two views of the chain are merged.
+  //
+  // A workRun value that is not a path-safe run id is never followed — it
+  // would become a path, and an unvalidated disk value must not.
   const merged = new Map();
   const queue = [runId];
   const seen = new Set(queue);
@@ -3068,12 +3083,34 @@ export function roundsFor(runId, taskId) {
       }
     }
     for (const [key, rec] of merged) {
-      if (known.has(key) || !rec?.workRun || seen.has(rec.workRun)) continue;
+      if (known.has(key) || !rec?.workRun || seen.has(rec.workRun) || !isPathSafeRunId(rec.workRun)) continue;
       seen.add(rec.workRun);
       queue.push(rec.workRun);
     }
   }
   return [...merged.values()].sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
+}
+
+/**
+ * One task's verdict chain across SEVERAL runs, oldest first (FOC-1155).
+ *
+ * Each run is read through roundsFor — which itself follows workRun
+ * provenance — and records seen in overlapping chains dedupe on
+ * round+recordedAt: a record lives in exactly one run's dir, so equal
+ * round+recordedAt is the same record seen twice, never two records.
+ */
+export function roundsAcross(runIds, taskId) {
+  const seen = new Set();
+  const chain = [];
+  for (const rid of runIds) {
+    for (const r of roundsFor(rid, taskId)) {
+      const key = `${r.round ?? "?"}@${r.recordedAt ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      chain.push(r);
+    }
+  }
+  return chain.sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
 }
 
 export function latestVerdict(runId, taskId) {

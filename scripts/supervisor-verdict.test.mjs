@@ -542,6 +542,130 @@ test("without --work-run the record carries no workRun and the old single-regist
   assert.equal("workRun" in out, false);
 });
 
+// ── 3c. the reverse bridge: the loop reads the chain from the WORK run ───────
+// (FOC-1155 round 2) A launcher restart leaves dev-1 registered in run A, so
+// the Supervisor resumes the loop with `--run A`. The provenance stamped round
+// 1 points only B→A (the record in B carries workRun: A) — invisible from A,
+// where the loop actually runs. The bridge's other half is `verdictRuns` on
+// the work child's entry: the runs whose registries hold this task's verdicts.
+console.log("\nmost zwrotny: pętla czyta łańcuch z runu PRACY (--run A)");
+
+test("the review loop in run A opens on a TEST fail recorded in run B", () => {
+  const s = splitRunScenario();
+  const fail1 = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(fail1.ok, true, fail1.error);
+
+  // The REAL path: dev-1 lives in A, so the Supervisor resumes the loop there.
+  const loop = parse(followup(s.runA, "dev-1", ["--review-loop"]), fail);
+  assert.equal(loop.ok, true, loop.error);
+  // The round it opened is measured on the CHAIN — B's fail is the latest
+  // round the guard saw, not an empty history.
+  assert.equal(loop.progress.rounds, 1);
+  assert.equal(loop.progress.latest, fail1.fingerprint.combined);
+
+  // The bridge's other half: dev-1's entry in A names the run holding the verdict.
+  assert.deepEqual(readRegistry(s.runA).children["dev-1"].verdictRuns, [s.runB]);
+});
+
+test("a repeated cross-run fail is refused as a repeat — the FOC-1146 semantics survive the split", () => {
+  const s = splitRunScenario();
+  recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  // No tree movement: the same work, the same failure, one round later.
+  const fail2 = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(fail2.ok, true, fail2.error);
+  assert.equal(fail2.round, 2);
+
+  const loop = parse(followup(s.runA, "dev-1", ["--review-loop"]), fail);
+  // Refused — but for the RIGHT reason: a reproduced round, not "nothing was
+  // ever recorded". Refuse only same verdict AND same findings (FOC-1146).
+  assert.equal(loop.ok, false);
+  assert.match(loop.error, /reproduced round/);
+  assert.equal(loop.fingerprints.previous.combined, loop.fingerprints.latest.combined);
+});
+
+test("a cross-run fail stamps verdictRuns on the work child's entry on a PASS too", () => {
+  const s = splitRunScenario();
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.deepEqual(readRegistry(s.runA).children["dev-1"].verdictRuns, [s.runB]);
+});
+
+test("verdictRuns is deduplicated across repeated cross-run records", () => {
+  const s = splitRunScenario();
+  for (const n of [1, 2]) {
+    advance(s, `move-${n}.txt`);
+    const out = recordIn(s, [
+      "--child", "recorder-1", "--verdict", "fail",
+      "--finding", CITED, "--failing-test", `suite/${n}`,
+      "--work-run", s.runA, "--work-child", "dev-1",
+    ]);
+    assert.equal(out.ok, true, out.error);
+  }
+  assert.deepEqual(readRegistry(s.runA).children["dev-1"].verdictRuns, [s.runB]);
+});
+
+test("a single-run loop leaves no verdictRuns on the entry and no workRun on the record", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal("workRun" in out, false);
+  const before = readRegistry(s.runId).children["review-1"];
+  assert.equal("verdictRuns" in before, false);
+
+  parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
+  assert.equal("verdictRuns" in readRegistry(s.runId).children["review-1"], false);
+});
+
+test("a --work-run value that is not a legal run id is refused, naming the value", () => {
+  const s = splitRunScenario();
+  // `<runB>/../<runB>` NORMALIZES to an existing registry — the pre-fix
+  // missing-run branch would happily read it and fingerprint recorder-1's
+  // tree with a traversal-shaped id. Only the shape check refuses it, and the
+  // refusal names the offending value.
+  const bad = `${s.runB}/../${s.runB}`;
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", bad, "--work-child", "recorder-1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.ok(out.error.includes(bad), out.error);
+});
+
+test("an illegal run id read from verdictRuns is refused, naming the value", () => {
+  const s = splitRunScenario();
+  recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  const reg = readRegistry(s.runA);
+  reg.children["dev-1"].verdictRuns = ["../escape"];
+  writeRegistry(s.runA, reg);
+
+  const loop = parse(followup(s.runA, "dev-1", ["--review-loop"]), fail);
+  assert.equal(loop.ok, false);
+  assert.ok(loop.error.includes("../escape"), loop.error);
+});
+
 // A fail that is not test-backed — a design failure — is a real category, so
 // the gate is escapable; but the escape is an explicit declaration with a
 // reason, and it rides the record out. "Declared none, here is why" and "an

@@ -77,12 +77,14 @@ import {
   asArray,
   ensureRunDir,
   failJson,
+  isPathSafeRunId,
   normalizeFailingTests,
   parseArgs,
   producerOf,
   progressFingerprint,
   readRegistry,
   registryPath,
+  roundsAcross,
   roundsFor,
   updateChild,
   verdictPath,
@@ -241,27 +243,10 @@ function loadGraphOrNull() {
 }
 
 // ── rounds ───────────────────────────────────────────────────────────────────
-// roundsFor / latestVerdict live in supervisor-lib.mjs (supervisor-followup
-// reads the same chain); the byte-identical copies that used to sit here are
-// gone — the lib one now also follows workRun provenance across a run split.
-
-/**
- * This task's verdict chain for round numbering: this run's verdicts plus,
- * when `--work-run` names another run, that run's. The lib roundsFor already
- * follows `workRun` provenance — but the FIRST cross-run record has not been
- * written yet when it is read, so the work run is consulted explicitly and
- * records seen in both chains dedupe on round+recordedAt.
- */
-function taskRounds(runId, workRunId, taskId) {
-  const chain = roundsFor(runId, taskId);
-  if (!workRunId || workRunId === runId) return chain;
-  const seen = new Set(chain.map((r) => `${r.round ?? "?"}@${r.recordedAt ?? ""}`));
-  for (const r of roundsFor(workRunId, taskId)) {
-    const key = `${r.round ?? "?"}@${r.recordedAt ?? ""}`;
-    if (!seen.has(key)) chain.push(r);
-  }
-  return chain.sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
-}
+// roundsFor / latestVerdict / roundsAcross live in supervisor-lib.mjs
+// (supervisor-followup reads the same chain); the byte-identical copies that
+// used to sit here are gone — the lib ones follow workRun provenance and
+// merge multi-run chains across a run split.
 
 // The consulted allowlist for the fail-transition emitter — NOT documentation.
 // Contains ONLY review: test's emitter is deferred (F-05 → FOC-165) and stays
@@ -748,6 +733,13 @@ function cmdRecord(args) {
     if (args["work-run"] === undefined) return null;
     if (args["work-run"] === true) failJson("--work-run needs a run id: --work-run <supervisorRunId>");
     const id = String(args["work-run"]);
+    // FOC-1155 round 2: the value becomes a path segment (registryPath), so a
+    // traversal-shaped id is refused by SHAPE, not by luck of the filesystem —
+    // `<runB>/../<runB>` normalizes to an existing registry and would
+    // otherwise read fine.
+    if (!isPathSafeRunId(id)) {
+      failJson(`--work-run "${id}" is not a legal run id — path separators, "." and ".." are refused (the value becomes a path)`);
+    }
     if (!existsSync(registryPath(id))) {
       failJson(`missing run ${id} — no registry at ${registryPath(id)}`);
     }
@@ -768,10 +760,10 @@ function cmdRecord(args) {
     warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under review`);
   }
 
-  // Round numbering continues across the split (taskRounds reads the work
+  // Round numbering continues across the split (roundsAcross reads the work
   // run's chain when --work-run was given) — a restart mid-task must not make
   // round 3 of a loop think it is round 1.
-  const prior = taskRounds(runId, workRunId, taskId).slice(-1)[0] ?? null;
+  const prior = roundsAcross([runId, ...(workRunId ? [workRunId] : [])], taskId).slice(-1)[0] ?? null;
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);
 
   const record = {
@@ -807,8 +799,29 @@ function cmdRecord(args) {
     });
   }
 
-  // AFTER the round check: a refused record must not touch Linear.
-  //
+  // FOC-1155 round 2, the reverse half of the bridge: the record carries
+  // `workRun` (B → A), and this stamps the work child's entry in ITS run with
+  // the run holding the verdict (A → B) — so a review loop resumed with
+  // `--run A` (the only run dev-1 can be resumed from) reads the full chain
+  // instead of stale findings or a bogus "nothing recorded". Both verdicts
+  // stamp alike; the dedup keeps repeated cross-run records idempotent.
+  // Stamped BEFORE the record write: a bridge without a record is a harmless
+  // no-op (roundsFor reads nothing there), the reverse is a blind loop. A
+  // failed stamp refuses the record — fail closed, an unstamped bridge is the
+  // bug this fixes, not a degraded feature.
+  if (workRunId && workChildRunId !== runId) {
+    const workEntry = workRegistry.children[workChild.childId] ?? {};
+    const verdictRuns = [...new Set([...(workEntry.verdictRuns ?? []), runId])];
+    try {
+      updateChild(workChildRunId, workChild.childId, { verdictRuns });
+    } catch (err) {
+      failJson(
+        `verdictRuns could not be stamped on child "${workChild.childId}" in run "${workChildRunId}": ` +
+          `${err.message.split("\n")[0]} — refusing to record a cross-run verdict without its bridge`,
+      );
+    }
+  }
+
   // Record FIRST (round 2, N3): the file lands with per-op status "pending"
   // before any Linear op can run, so no Linear write happens without a verdict
   // record on disk. A crash between this write and the amend leaves "pending"

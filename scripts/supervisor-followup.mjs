@@ -46,7 +46,8 @@ import {
   parseArgs,
   printBgWaitCeilingEnv,
   readRegistry,
-  roundsFor,
+  isPathSafeRunId,
+  roundsAcross,
   runDir,
   shareChildTranscripts,
   teeAbsPath,
@@ -173,7 +174,33 @@ assertStageBudget(runId, entry.squad, { graph: (() => {
 // twice, and spawning a third would buy the same result a third time.
 let progress = null;
 if (args["review-loop"]) {
-  const rounds = roundsFor(runId, entry.taskId);
+  // FOC-1155 round 2: the chain this loop compares spans runs. The work child
+  // (dev-1) lives in the OLD run — a launcher restart left it there, and it
+  // can only be resumed with `--run A` — while the rounds recorded after the
+  // restart sit in the new run's verdicts dir. The work child's entry carries
+  // the bridge: `verdictRuns` names every run holding a verdict for this task
+  // (stamped by supervisor-verdict on every cross-run record). Each run is
+  // read through roundsFor, which also follows workRun provenance, and the
+  // merged chain dedupes overlapping records. No directory scan, no second
+  // source of truth — the provenance on the entry is the source.
+  const verdictRuns = entry.verdictRuns ?? [];
+  if (!Array.isArray(verdictRuns)) {
+    failJson(
+      `verdictRuns on child "${childId}" is not an array (${typeof verdictRuns}) — ` +
+        `refusing to read the chain from a corrupt provenance`,
+    );
+  }
+  for (const rid of verdictRuns) {
+    // These values become paths (verdictsDir) — an unvalidated disk value must
+    // not. Fail closed, naming the offending value.
+    if (!isPathSafeRunId(rid)) {
+      failJson(
+        `verdictRuns on child "${childId}" carries an illegal run id: ${JSON.stringify(rid)} — ` +
+          `path separators, "." and ".." are refused (the value becomes a path)`,
+      );
+    }
+  }
+  const rounds = roundsAcross([runId, ...verdictRuns], entry.taskId);
 
   // Without a recorded verdict there is nothing to loop ON: no findings to hand
   // back, and no fingerprint to compare. This also closes the obvious bypass —
