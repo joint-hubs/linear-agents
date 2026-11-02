@@ -113,8 +113,9 @@ function checkProviderCustom(custom, errors) {
 // `fenix update`. FOC-902 adds the opt-in autonomous pickup block. Kept in
 // its own function so the open branches that edit the same validate loop
 // keep merging trivially.
-const AUTO_PICKUP_KEYS = new Set(["enabled", "pollSeconds", "states", "label", "workspace"]);
+const AUTO_PICKUP_KEYS = new Set(["enabled", "pollSeconds", "states", "label", "workspace", "projects"]);
 const AUTO_PICKUP_MAX_STATES = 10;
+const AUTO_PICKUP_MAX_PROJECTS = 20;
 const AUTO_PICKUP_MAX_STRING = 100;
 
 function autoPickupErrors(value, errors) {
@@ -161,6 +162,48 @@ function autoPickupErrors(value, errors) {
       "taskSessions.autoPickup.workspace: must be null or a canonical workspace identifier matching /^[A-Za-z0-9._-]+$/ of at most 200 characters",
     );
   }
+  // FOC-1147 round 3: the owner scope as an explicit list of Linear project
+  // names. `null` is the unset value (the projects-map fallback applies);
+  // an empty array is NOT the off switch — a set-but-empty value is a
+  // mistake, the same rule `states` follows.
+  if (value.projects !== undefined && value.projects !== null) {
+    const projectsError = projectsSettingError(value.projects);
+    if (projectsError) errors.push(projectsError);
+  }
+}
+
+/**
+ * Validate taskSessions.autoPickup.projects (FOC-1147 round 3) — an array of
+ * 1..AUTO_PICKUP_MAX_PROJECTS non-empty strings of at most
+ * AUTO_PICKUP_MAX_STRING characters, with no duplicate entries (duplicates are
+ * compared AFTER trimming, so `"Alpha"` and `" Alpha "` collide). Returns the
+ * error message, or null when the value is valid. Shared by
+ * autoPickupErrors (the settings overlay / `fenix settings set` path, which
+ * refuses the value) and normalizeAutoPickup (which throws on the same shapes
+ * instead of silently defaulting — the host's deps seam must never fall back
+ * to a different owner scope than the operator configured).
+ */
+function projectsSettingError(value) {
+  const ok =
+    Array.isArray(value) &&
+    value.length >= 1 &&
+    value.length <= AUTO_PICKUP_MAX_PROJECTS &&
+    value.every((p) => typeof p === "string" && p.trim() !== "" && p.trim().length <= AUTO_PICKUP_MAX_STRING);
+  if (!ok) {
+    return (
+      `taskSessions.autoPickup.projects: must be an array of 1 to ${AUTO_PICKUP_MAX_PROJECTS} ` +
+      `non-empty Linear project names of at most ${AUTO_PICKUP_MAX_STRING} characters`
+    );
+  }
+  const seen = new Set();
+  for (const p of value) {
+    const trimmed = p.trim();
+    if (seen.has(trimmed)) {
+      return `taskSessions.autoPickup.projects: duplicate project '${trimmed}' — keep one entry per Linear project`;
+    }
+    seen.add(trimmed);
+  }
+  return null;
 }
 
 function taskSessionsErrors(value) {
@@ -380,21 +423,37 @@ export function validateSettings(obj) {
 // surface where it fits.
 // autoPickup, when configured, is returned NORMALIZED with the documented
 // defaults filled in: { enabled: false, pollSeconds: 300, states: ["Backlog"],
-// label: null, workspace: null }. parkedPrompt is ALWAYS an object —
-// { mode: "wait", minutes: 30 } when unset or when the section is invalid
-// (the safe behaviour: an invalid overlay discards the whole taskSessions
-// section — never half a config — and waiting is the parked-prompt default).
+// label: null, workspace: null, projects: null }. parkedPrompt is ALWAYS an
+// object — { mode: "wait", minutes: 30 } when unset or when the section is
+// invalid (the safe behaviour: an invalid overlay discards the whole
+// taskSessions section — never half a config — and waiting is the
+// parked-prompt default).
 // ---------------------------------------------------------------------------
 
-const AUTO_PICKUP_DEFAULTS = { enabled: false, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null };
+const AUTO_PICKUP_DEFAULTS = { enabled: false, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null, projects: null };
 
 export function normalizeAutoPickup(raw) {
+  // FOC-1147 round 3: taskSessions.autoPickup.projects. Valid values are
+  // stored TRIMMED and deduplicated; an INVALID value is REFUSED (throws) —
+  // never defaulted. The settings-overlay path never reaches this throw (its
+  // autoPickupErrors validation refuses the same shapes first); the host's
+  // deps seam does, deliberately: a silently dropped scope would fall back to
+  // the projects map and pick different tickets than the operator configured.
+  let projects = AUTO_PICKUP_DEFAULTS.projects;
+  if (raw.projects !== undefined && raw.projects !== null) {
+    const projectsError = projectsSettingError(raw.projects);
+    if (projectsError) {
+      throw new TypeError(`${projectsError} (refused — fix the value, it will not be defaulted)`);
+    }
+    projects = [...new Set(raw.projects.map((p) => p.trim()))];
+  }
   return {
     enabled: raw.enabled ?? AUTO_PICKUP_DEFAULTS.enabled,
     pollSeconds: raw.pollSeconds ?? AUTO_PICKUP_DEFAULTS.pollSeconds,
     states: Array.isArray(raw.states) && raw.states.length > 0 ? [...raw.states] : [...AUTO_PICKUP_DEFAULTS.states],
     label: typeof raw.label === "string" ? raw.label : AUTO_PICKUP_DEFAULTS.label,
     workspace: typeof raw.workspace === "string" ? raw.workspace : AUTO_PICKUP_DEFAULTS.workspace,
+    projects,
   };
 }
 

@@ -74,11 +74,11 @@ import {
   createTaskSessionStore,
   issuePartOf,
   resolveTaskKey,
+  workspaceNameFor,
 } from "./task-sessions.mjs";
 import { readProcessIdentity, matchesProcess } from "./task-process-identity.mjs";
 import { readCurrentRun } from "./supervisor-current-run.mjs";
 import { readTaskSessionsSettings, normalizeAutoPickup } from "./fenix-settings.mjs";
-import { repoRefName } from "./fenix-projects.mjs";
 import { startText } from "./work-board.mjs";
 import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
 import { buildBranchName } from "./dev-branch.mjs";
@@ -105,11 +105,29 @@ const loadIssueFacts = async () => {
   return issueFactsRef.fetchIssueFacts;
 };
 
+// FOC-1147: operator-visible error text is redacted through supervisor-lib's
+// redact() — repository-resolution failures echo the candidate values they
+// tried (a URL whose authority carries credentials, an api_key=… echo), and
+// lastError is served verbatim to the Cockpit and the /pickup route.
+// Redacting AT THE WRITE means every reader sees the redacted text. Lazy like
+// loadLib (the module load costs ~160 ms, the redaction is on the error path
+// only); on any failure it returns the text unredacted — never worse than
+// before, and never a thrown error inside a catch block.
+let redactRef = null;
+const redactOperatorText = async (text) => {
+  try {
+    if (!redactRef) redactRef = (await loadLib()).redact;
+    return redactRef(text);
+  } catch {
+    return String(text ?? "");
+  }
+};
+
 // FOC-902 §D: when the task-ownership helper exists (branch
 // fenix-task-ownership), its checkOwnership decides the pickup owner scope;
-// until it lands, the projects.json rule in createTaskSessionHost applies.
-// One try import, resolved once at module load — a missing module is the
-// normal case here, never an error.
+// until it lands, the by-project scope rule in createTaskSessionHost applies
+// (FOC-1147 round 3). One try import, resolved once at module load — a
+// missing module is the normal case here, never an error.
 let taskOwnership = null;
 try {
   taskOwnership = await import("./task-ownership.mjs");
@@ -183,24 +201,70 @@ function projectEntries(env) {
 }
 
 /**
- * The projects.json entries whose `repo` ref names `workspace` — the matching
- * rule behind the auto-pickup owner scope (which Linear project the workspace
- * maps to). repoRefName normalizes the `${GITHUB_ROOT}/<name>` template, a
- * full path and a bare name to the repo dir name, so the match is against the
- * workspace half of a task key.
+ * The auto-pickup owner scope as a set of Linear project names (FOC-1147
+ * round 3, the delivery-owner redesign). The scope is BY PROJECT, never by
+ * workspace — the workspace-name comparison is dead here, no survivors:
  *
- * The FOC-1088 worktree lane does NOT resolve by this rule (round 3: the
- * workspace half is the Linear workspace name — "jointhubs" — never a
- * repository name); it resolves through the issue's Linear project instead.
+ * 1. `taskSessions.autoPickup.projects` (an array of Linear project names),
+ *    when set, IS the owner scope — the projects map is not consulted at all.
+ * 2. Without the setting, the scope is the set of DISTINCT `linearProject`
+ *    values across the projects map (each issue flows to its Linear project
+ *    via `issue.project.name`, the FOC-1088 direction). The task-key
+ *    workspace ("jointhubs") NEVER filters entries: matching
+ *    `entry.workspace` against it was the rounds-1-2 rule and it only ever
+ *    matched its own test fixtures — the real map carries workspace
+ *    'joi'/'pisi' (`fenix-projects add` defaults `--workspace joi`), so the
+ *    committed rule failed every real tick closed. By-project is also the
+ *    safe direction: candidates only come from the host's OWN Linear key, so
+ *    a foreign workspace's projects (pisi) never appear in the candidate
+ *    list to begin with.
  *
- * @returns {Array<object>|null} the matching entries, or null when the map is
- *   missing or unreadable. A READABLE map with no matching entry is an empty
- *   array, not null: a mapping gap fails closed, it does not fall through to
- *   the host env.
+ * Fail closed WITH the operator remedy when there is no setting AND the map
+ * is missing/unreadable or names no linearProject at all. The remedy names
+ * BOTH ways out — the taskSessions.autoPickup.projects setting and
+ * `fenix-projects add --linear-project …` — and never suggests rewriting
+ * entries to a particular workspace. The throw lands in pickup.lastError
+ * through the tick's catch. The map is local and synchronous — no Linear
+ * call in the pickup tick.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string[]|null|undefined} projectsSetting the normalized
+ *   taskSessions.autoPickup.projects (null/undefined = unset)
+ * @returns {Set<string>} the Linear project names in scope
+ * @throws {Error} when the scope cannot be proven
  */
-function projectEntriesForWorkspace(env, workspace) {
+export function ownerProjectsFor(env, projectsSetting) {
+  if (Array.isArray(projectsSetting) && projectsSetting.length > 0) {
+    return new Set(projectsSetting);
+  }
+  const settingRemedy =
+    `set taskSessions.autoPickup.projects to the Linear project names this host picks ` +
+    `(fenix settings set taskSessions.autoPickup.projects '["<Linear project>"]')`;
+  const mapRemedy = `or map the repositories: node scripts/fenix-projects.mjs add --linear-project <name> --repo <repo template>`;
   const entries = projectEntries(env);
-  return entries === null ? null : entries.filter((entry) => repoRefName(entry?.repo) === workspace);
+  if (entries === null) {
+    throw new Error(
+      `no owner scope for auto-pickup: the projects map (${projectsConfigPath(env)}) is missing or unreadable — ` +
+        `${settingRemedy}, ${mapRemedy}, or turn the pickup off ` +
+        `(fenix settings set taskSessions.autoPickup.enabled false + fenix restart supervisor)`,
+    );
+  }
+  const projects = new Set();
+  for (const entry of entries) {
+    if (typeof entry?.linearProject === "string" && entry.linearProject.trim()) projects.add(entry.linearProject.trim());
+  }
+  if (projects.size === 0) {
+    const shape =
+      entries.length === 0
+        ? "is empty"
+        : `carries ${entries.length} entr${entries.length === 1 ? "y" : "ies"} but none names a linearProject`;
+    throw new Error(
+      `no owner scope for auto-pickup: the projects map (${projectsConfigPath(env)}) ${shape} — ` +
+        `${settingRemedy}, ${mapRemedy}, or set each entry's linearProject field to the ` +
+        `Linear project whose tickets this host picks`,
+    );
+  }
+  return projects;
 }
 
 /**
@@ -209,15 +273,40 @@ function projectEntriesForWorkspace(env, workspace) {
  * expands against env GITHUB_ROOT (the clones root the template names;
  * /data/workspaces in the container). Any other value — a full path, a bare
  * name — passes through unchanged and must resolve (or fail) as a git repo on
- * its own. No env GITHUB_ROOT leaves a template unexpandable: null.
+ * its own.
+ *
+ * FOC-1147: an unexpandable template (no env GITHUB_ROOT) is a configuration
+ * error the operator must see, not a silent null that reads as "no match" —
+ * throw naming what to set. A `..` segment is refused the same way: the
+ * expansion must stay inside the clones root, never escape it. (The caller,
+ * the lane's oneRepoFor, has no try around this — the throw fails the
+ * session closed through the usual start catch, remedy appended there.)
+ *
+ * @param {unknown} repo
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string} the expanded path, or the pass-through value
+ * @throws {Error} when a `${GITHUB_ROOT}/...` template cannot expand or tries
+ *   to escape the clones root
  */
-function repoRefPath(repo, env) {
+export function repoRefPath(repo, env) {
   if (typeof repo !== "string" || !repo.trim()) return null;
   const ref = repo.trim();
   const template = /^\$\{GITHUB_ROOT\}\/(.+)$/.exec(ref);
   if (!template) return ref;
   const root = typeof env.GITHUB_ROOT === "string" ? env.GITHUB_ROOT.trim() : "";
-  return root ? join(root, template[1]) : null;
+  if (!root) {
+    throw new Error(
+      `repo ref '${ref}' cannot expand: env GITHUB_ROOT is unset — set it to the clones root ` +
+        `(/data/workspaces in the container, the directory the entrypoint's repo-add clones into)`,
+    );
+  }
+  if (template[1].split(/[\\/]/).includes("..")) {
+    throw new Error(
+      `repo ref '${ref}' tries to escape the clones root with a '..' segment — refusing to expand it outside GITHUB_ROOT; ` +
+        `map the repository where it really lives`,
+    );
+  }
+  return join(root, template[1]);
 }
 
 /**
@@ -614,7 +703,9 @@ export function createTaskSessionHost(deps = {}) {
     deps.worktrees ??
     (envWorktrees === "0" || envWorktrees === "1"
       ? envWorktrees === "1"
-      : (readTaskSessionsSettings(baseEnv).worktrees ?? true));
+      // readTaskSessionsSettings already defaults worktrees to true — no
+      // second default here (the old `?? true` was dead).
+      : readTaskSessionsSettings(baseEnv).worktrees);
   const sessionWorkspace = deps.sessionWorkspace !== undefined
     ? deps.sessionWorkspace
     : worktrees
@@ -673,6 +764,10 @@ export function createTaskSessionHost(deps = {}) {
   const autoPickup = normalizeAutoPickup(
     deps.autoPickup ?? readTaskSessionsSettings(baseEnv).autoPickup ?? {},
   );
+  // The owner-scope module: deps.taskOwnership replaces it (tests — null
+  // exercises the projects-map fallback through a real tick, FOC-1147);
+  // undefined keeps the module-level try import.
+  const ownership = deps.taskOwnership !== undefined ? deps.taskOwnership : taskOwnership;
   const pickupClock = {
     now: deps.now ?? (() => Date.now()),
     setInterval:
@@ -696,29 +791,21 @@ export function createTaskSessionHost(deps = {}) {
   let pickupInterval = null;
   let pickupKick = null;
 
-  // The task-key workspace: same rule as work-routes workWorkspace /
-  // task-sessions workspaceNameFor (a deliberate 3-line copy until the shared
-  // helper export merges — see the FOC-902 plan §D note), overridable per
-  // autoPickup.workspace.
-  const pickupWorkspace = () => autoPickup.workspace || baseEnv.FENIX_WORK_WORKSPACE || "jointhubs";
+  // The task-key workspace: the SHARED rule (task-sessions workspaceNameFor —
+  // FENIX_WORK_WORKSPACE overrides it, "jointhubs" is the default; the same
+  // rule work-routes' workWorkspace applies to dashboard starts),
+  // overridable per autoPickup.workspace. FOC-1147: the old inline copy is
+  // gone — one rule, one key space: a picked and a dashboard-started ticket
+  // share the `<workspace>:` prefix.
+  const pickupWorkspace = () => autoPickup.workspace || workspaceNameFor(baseEnv);
 
-  // The owner scope's Linear project: the projects.json entries whose repo
-  // name matches the workspace (projectEntriesForWorkspace — the auto-pickup
-  // owner-scope rule; the FOC-1088 lane resolves the session repository
-  // through the issue's Linear project instead), yielding exactly one
-  // distinct project. No mapping or an ambiguous one → null: auto-pickup
-  // never picks tickets outside a proven owner scope.
-  const linearProjectForWorkspace = (workspace) => {
-    const entries = projectEntriesForWorkspace(baseEnv, workspace);
-    if (entries === null) return null;
-    const matched = new Set();
-    for (const entry of entries) {
-      if (repoRefName(entry?.repo) === workspace && typeof entry?.linearProject === "string") {
-        matched.add(entry.linearProject);
-      }
-    }
-    return matched.size === 1 ? [...matched][0] : null;
-  };
+  // FOC-1147 round 3: the owner-scope rule behind the fallback (below) — the
+  // taskSessions.autoPickup.projects setting when set, otherwise the projects
+  // map's distinct linearProjects; never a workspace comparison. Exported as
+  // ownerProjectsFor; tests drive it directly and through a real tick via the
+  // deps.taskOwnership seam. Resolved per tick, so an operator fix (a set
+  // key, a repaired map) takes effect without a host restart.
+  const ownerScope = () => ownerProjectsFor(baseEnv, autoPickup.projects);
 
   // listCandidates: one `node linear-query.mjs issues --status <state>
   // [--label <l>] --json` per configured state (the offline env rules —
@@ -726,7 +813,9 @@ export function createTaskSessionHost(deps = {}) {
   // filtered to the owner scope. One failed state fails the whole tick: a
   // partial candidate list could silently skip tickets living in the state
   // that failed. When task-ownership's checkOwnership exists it replaces the
-  // projects.json rule, one call per candidate.
+  // by-project scope rule, one call per candidate (deps.taskOwnership replaces
+  // the module for tests — undefined keeps the real module; null exercises
+  // the setting/map fallback through a real tick).
   const listCandidates = deps.listCandidates ?? (async () => {
     const script = join(HERE, "linear-query.mjs");
     const runOne = (state) =>
@@ -769,21 +858,21 @@ export function createTaskSessionHost(deps = {}) {
         issues.push(issue);
       }
     }
-    if (typeof taskOwnership?.checkOwnership === "function") {
-      const { kept, verdicts } = ownershipKeeps(issues, taskOwnership.checkOwnership);
+    if (typeof ownership?.checkOwnership === "function") {
+      const { kept, verdicts } = ownershipKeeps(issues, ownership.checkOwnership);
       pickup.lastOwnership = verdicts;
       if (kept.length !== issues.length) {
         console.log(`auto-pickup: ownership kept ${kept.length} of ${issues.length} candidate(s) — ${JSON.stringify(verdicts)}`);
       }
       return kept;
     }
-    const ownerProject = linearProjectForWorkspace(pickupWorkspace());
-    if (!ownerProject) {
-      throw new Error(
-        `no owner scope for workspace '${pickupWorkspace()}' — no projects.json entry maps exactly one Linear project to a repo of that name`,
-      );
-    }
-    return issues.filter((issue) => issue?.project?.name === ownerProject);
+    // FOC-1147 round 3: the fallback scope is the setting's project list when
+    // set, otherwise the projects map's distinct linearProjects — by project,
+    // never by workspace (the old entry.workspace === pickup-workspace rule
+    // only ever matched its own fixtures). Fails closed WITH the remedy —
+    // the throw lands in pickup.lastError through the tick's catch.
+    const scope = ownerScope();
+    return issues.filter((issue) => scope.has(issue?.project?.name));
   });
 
   const pickupTick = async () => {
@@ -862,7 +951,7 @@ export function createTaskSessionHost(deps = {}) {
       if (enqueued.length > 0) void pump();
       return { candidates: ordered.length, enqueued, skipped };
     } catch (err) {
-      const reason = String(err?.message ?? err);
+      const reason = await redactOperatorText(String(err?.message ?? err));
       pickup.lastError = reason;
       console.error(`auto-pickup: tick failed (${reason})`);
       return { error: reason };
@@ -1000,7 +1089,9 @@ export function createTaskSessionHost(deps = {}) {
       // re-claims the same branch deterministically) and surface the reason.
       releaseWorkspace(record);
       try {
-        store.update(sessionId, { status: "waiting", lastError: `start failed (${err?.message ?? err}); capacity reserved until scoped stop or recovery` });
+        // FOC-1147: redacted — the resolution failure echoes the candidate
+        // values it tried (a URL with userinfo, an api_key=… echo).
+        store.update(sessionId, { status: "waiting", lastError: `start failed (${await redactOperatorText(`${err?.message ?? err}`)}); capacity reserved until scoped stop or recovery` });
       } catch {
         /* store gone — nothing more we can do */
       }
@@ -1029,9 +1120,11 @@ export function createTaskSessionHost(deps = {}) {
         // FOC-1088: a workspace that cannot be re-ensured after a restart
         // (repository gone, claim held) must not crash the whole reconcile
         // pass — surface the reason on the record; capacity stays reserved
-        // until an operator resolves it.
+        // until an operator resolves it. FOC-1147: redacted — the resolution
+        // error echoes the candidate values it tried.
+        const reason = await redactOperatorText(`${err?.message ?? err}`);
         try {
-          store.update(rec.sessionId, { status: 'waiting', lastError: `workspace unavailable: ${err?.message ?? err}` });
+          store.update(rec.sessionId, { status: 'waiting', lastError: `workspace unavailable: ${reason}` });
         } catch { /* record gone */ }
         continue;
       }

@@ -38,7 +38,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -63,6 +63,7 @@ import {
   parse,
 } from "./supervisor-test-fixtures.mjs";
 import { readRegistry, unarchivedIgnoredContent, writeRegistry } from "./supervisor-lib.mjs";
+import { claimWorkspace, readWorkspaceClaims } from "./workspace-claims.mjs";
 
 const { test, fail, summary } = harness();
 
@@ -773,6 +774,89 @@ test("narrowed inventory flows into the grant precondition: only work product bl
   assert.equal(out.ok, true, out.error);
   assert.match(out.keys.archive, /1 ignored\/untracked file\(s\) covered/);
   assert.match(out.skippedCache.join("\n"), /node_modules/);
+});
+
+// ── 5. FOC-1086: removal releases the worktree's claim ───────────────────────
+//
+// A claim whose worktree is gone is stale by definition, and a stale claim
+// blocks a future Supervisor from the same branch name (FOC-898's collision
+// guard). Every removal path — grant, two-key, already-removed — must release
+// the claim and list it in the report. Release is worktree-path-keyed and
+// owner-INDEPENDENT: the claim's owner may be an old run nobody can release
+// as. Local branch deletion stays out of scope (branchNote unchanged), and
+// claims on OTHER worktrees are untouched.
+
+// The owner is deliberately a run that no longer exists: release must not
+// depend on being the claim's owner, only on the worktree being gone.
+const seedClaim = (s, ownerId = "old-run-42:dev-1") =>
+  claimWorkspace({ gitRoot: s.repo, branch: s.branch, worktree: s.worktree, ownerId });
+const claimsFor = (s) => readWorkspaceClaims({ gitRoot: s.repo }).claims;
+
+test("FOC-1086 grant path: removal releases the worktree's claim and lists it", () => {
+  const s = scenario();
+  seedClaim(s);
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg }), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.deepEqual(
+    out.releasedClaims,
+    [{ branch: s.branch, ownerId: "old-run-42:dev-1" }],
+    `the report must list the released claim: ${JSON.stringify(out.releasedClaims)}`,
+  );
+  assert.deepEqual(claimsFor(s), [], "the claim outlived the worktree it names");
+  assert.match(out.branchNote, /untouched/, "branch deletion stays out of scope — branchNote must not change");
+});
+
+test("FOC-1086 two-key path: removal releases the worktree's claim and lists it", () => {
+  const s = scenario();
+  seedClaim(s);
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.deepEqual(
+    out.releasedClaims,
+    [{ branch: s.branch, ownerId: "old-run-42:dev-1" }],
+    `the report must list the released claim: ${JSON.stringify(out.releasedClaims)}`,
+  );
+  assert.deepEqual(claimsFor(s), [], "the claim outlived the worktree it names");
+});
+
+test("FOC-1086 already-removed path: remove releases the stale claim without any key", () => {
+  const s = scenario();
+  seedClaim(s);
+  rmSync(s.worktree, { recursive: true, force: true });
+
+  // --repo is needed here and only here: with the checkout already gone,
+  // mainRepoFor falls back to the process's own repo (the right answer in the
+  // container, where the Fenix checkout IS the supervised repo), so the test
+  // names the fixture repo the way an operator names a foreign one.
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--repo", s.repo, "--issue-file", s.done]), fail);
+  assert.equal(out.alreadyRemoved, true, JSON.stringify(out));
+  assert.deepEqual(
+    out.releasedClaims,
+    [{ branch: s.branch, ownerId: "old-run-42:dev-1" }],
+    `the already-removed report must list the released claim: ${JSON.stringify(out.releasedClaims)}`,
+  );
+  assert.deepEqual(claimsFor(s), [], "the stale claim survived the already-removed reconciliation");
+});
+
+test("FOC-1086 a claim on another worktree of the same repo survives the removal", () => {
+  const s = scenario();
+  seedClaim(s);
+  const other = fixtureWorktree(s.repo, "foc-456-dev");
+  claimWorkspace({ gitRoot: s.repo, branch: other.branch, worktree: other.worktree, ownerId: "other-run:dev-9" });
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg }), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.releasedClaims.length, 1, JSON.stringify(out.releasedClaims));
+  const left = claimsFor(s);
+  assert.equal(left.length, 1, JSON.stringify(left));
+  assert.equal(left[0].branch, other.branch, "a claim on another worktree must be untouched");
+  assert.equal(left[0].ownerId, "other-run:dev-9");
 });
 
 summary();

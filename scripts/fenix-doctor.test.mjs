@@ -24,17 +24,21 @@ import {
   ghBelowFloor,
   checkFenixCode,
   checkPermissionMode,
+  checkPisiSecret,
   checkProjectsDir,
   checkRunOwners,
   checkSecretsReadable,
   checkSupervisorPrompt,
   checkTaskSessions,
+  checkWorkspaceClaims,
   runChecks,
   summarize,
 } from "./fenix-doctor.mjs";
 import { buildManifest, compareToManifest, listCodeFiles, readManifest } from "./fenix-manifest.mjs";
 import { pidAlive } from "./supervisor-current-run.mjs";
 import { currentOwner } from "./run-owner.mjs";
+import { claimWorkspace } from "./workspace-claims.mjs";
+import { fixtureRepo, fixtureWorktree } from "./supervisor-test-fixtures.mjs";
 
 let passed = 0;
 let skipped = 0;
@@ -235,6 +239,7 @@ test("without FENIX_IN_CONTAINER the uid checks are absent", async () => {
   });
   assert.equal(checks.some((c) => c.name === "secrets readable"), false);
   assert.equal(checks.some((c) => c.name === "config writable"), false);
+  assert.equal(checks.some((c) => c.name === "pisi secret"), false);
 });
 
 test("with FENIX_IN_CONTAINER=1 both uid checks run, with injected paths", async () => {
@@ -250,15 +255,21 @@ test("with FENIX_IN_CONTAINER=1 both uid checks run, with injected paths", async
     });
     const secrets = checks.find((c) => c.name === "secrets readable");
     const config = checks.find((c) => c.name === "config writable");
+    const pisi = checks.find((c) => c.name === "pisi secret");
     assert.ok(secrets, "secrets readable check missing");
     assert.ok(config, "config writable check missing");
+    assert.ok(pisi, "pisi secret check missing");
     assert.equal(secrets.status, "ok");
+    // The temp secrets dir has no linear_api_key_pisi — absent warns, never fails.
+    assert.equal(pisi.status, "warn");
+    assert.match(pisi.detail, /absent/);
     assert.equal(config.status, "ok");
     // After the existing checks, before anything else.
-    assert.equal(checks[checks.length - 2].name, "secrets readable");
+    assert.equal(checks[checks.length - 2].name, "pisi secret");
     assert.equal(checks[checks.length - 1].name, "config writable");
+    assert.equal(checks[checks.length - 3].name, "secrets readable");
     // FOC-988: the drift check runs in the container too, just ahead of them.
-    assert.equal(checks[checks.length - 3].name, "fenix code");
+    assert.equal(checks[checks.length - 4].name, "fenix code");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -547,6 +558,25 @@ test("the task sessions detail reports the enabled pickup's pollSeconds and stat
     const c = checkTaskSessions({ env: { LA_DATA_HOME: dir, LA_SETTINGS_FILE: settings }, fsImpl: fs });
     assert.equal(c.status, "ok");
     assert.match(c.detail, /auto-pickup: on \(every 120s, states Todo,In Progress\)$/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the task sessions detail reports the pickup's project scope when taskSessions.autoPickup.projects is set (FOC-1147)", () => {
+  const dir = tempDir();
+  const settings = path.join(dir, "settings.json");
+  fs.writeFileSync(
+    settings,
+    JSON.stringify({
+      taskSessions: { autoPickup: { enabled: true, pollSeconds: 120, states: ["Todo"], projects: ["Alpha", "Beta"] } },
+    }),
+    "utf8",
+  );
+  try {
+    const c = checkTaskSessions({ env: { LA_DATA_HOME: dir, LA_SETTINGS_FILE: settings }, fsImpl: fs });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /auto-pickup: on \(every 120s, states Todo, projects Alpha,Beta\)$/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1265,6 +1295,111 @@ test("the Dockerfile bakes the manifest outside /opt/fenix, root-owned and read-
   const at = dockerfile.indexOf("fenix-manifest.mjs write");
   assert.ok(dockerfile.lastIndexOf("USER root", at) > dockerfile.lastIndexOf("USER node", at), "the manifest step must run as root");
   assert.ok(dockerfile.indexOf("USER node", at) > at, "the image must return to USER node after it");
+});
+
+console.log("\nfenix-doctor: workspace claims (FOC-1086)");
+
+// A real fixture repo: the claims registry lives under the common git dir, so
+// the seam-free tests need a repo git can answer for. Worktrees come from the
+// shared supervisor fixtures — the same shape a claim actually stamps.
+test("workspace claims: ok when there is no claims file", () => {
+  const { repo } = fixtureRepo();
+  const c = checkWorkspaceClaims({ root: repo });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /no claims/);
+});
+
+test("workspace claims: ok when every claimed worktree is present", () => {
+  const { repo } = fixtureRepo();
+  const wt = fixtureWorktree(repo);
+  claimWorkspace({ gitRoot: repo, branch: wt.branch, worktree: wt.worktree, ownerId: "run:dev-1" });
+  const c = checkWorkspaceClaims({ root: repo });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /1 claim\(s\), every worktree present/);
+});
+
+test("workspace claims: warn names the count and the worktree that is gone", () => {
+  const { repo } = fixtureRepo();
+  const wt = fixtureWorktree(repo);
+  claimWorkspace({ gitRoot: repo, branch: wt.branch, worktree: wt.worktree, ownerId: "old-run:dev-1" });
+  fs.rmSync(wt.worktree, { recursive: true, force: true });
+
+  const c = checkWorkspaceClaims({ root: repo });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /1 claim\(s\) name worktrees that no longer exist/);
+  assert.ok(c.detail.includes(wt.worktree), `the detail must name the stale path: ${c.detail}`);
+  assert.match(c.fix, /cleanup remove|claims registry/, "the fix must point at the claim release");
+});
+
+test("workspace claims: the detail carries the first three paths and counts the rest", () => {
+  const stale = (n) =>
+    Array.from({ length: n }, (_, i) => ({ branch: `b${i}`, ownerId: `o${i}`, worktree: `/data/worktrees/wt-${i}` }));
+  const c = checkWorkspaceClaims({
+    readClaims: () => ({ claims: [...stale(4), { branch: "live", ownerId: "o", worktree: import.meta.url }] }),
+    fsImpl: { ...fs, existsSync: (p) => p === import.meta.url },
+  });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /4 claim\(s\)/);
+  assert.ok(c.detail.includes("wt-0") && c.detail.includes("wt-2"), c.detail);
+  assert.ok(!c.detail.includes("wt-3"), `only the first three paths belong in the detail: ${c.detail}`);
+  assert.match(c.detail, /\+1 more/);
+});
+
+test("workspace claims: an unreadable registry warns instead of crashing the doctor", () => {
+  const c = checkWorkspaceClaims({ readClaims: () => { throw new Error("not readable JSON"); } });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /unreadable/);
+  assert.match(c.detail, /not readable JSON/);
+});
+
+console.log("\nfenix-doctor: pisi secret (FOC-1148)");
+
+// The check must never read the key's content, so the tests fake only
+// statSync against a fixed path — no temp-dir randomness can then leak a digit
+// that collides with the fixture length, and the leak assertions below stay
+// deterministic.
+function fsWithPisiStat(size, statError) {
+  // path.join so the comparison matches the check's own path building on every
+  // platform (win32 joins with backslashes).
+  const pisiPath = path.join("/run/secrets", "linear_api_key_pisi");
+  return {
+    statSync: (p) => {
+      if (p === pisiPath) {
+        if (statError) throw statError;
+        return { size };
+      }
+      return fs.statSync(p);
+    },
+  };
+}
+
+test("pisi secret: a present, non-empty file is ok and never leaks the value or its length", () => {
+  const VALUE = "lin_api_fixture_0123456789"; // synthetic — never a real key
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(VALUE.length), "/run/secrets");
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /present/);
+  const dump = JSON.stringify(c);
+  assert.ok(!dump.includes(VALUE), "the key value must never enter the check output");
+  assert.ok(!dump.includes(String(VALUE.length)), "the key length must never enter the check output");
+});
+
+test("pisi secret: the empty placeholder is ok — the integration is off, not a failure", () => {
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(0), "/run/secrets");
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /empty/);
+  assert.match(c.detail, /off/);
+});
+
+test("pisi secret: an absent file warns — the secret is not mounted, exit code unchanged", () => {
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(undefined, Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" })), "/run/secrets");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /absent/);
+});
+
+test("pisi secret: a stat failure that is not ENOENT warns without a fake 'absent'", () => {
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(undefined, Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })), "/run/secrets");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /EACCES/);
 });
 
 console.log(`\nfenix-doctor: ${passed} passed, ${skipped} skipped, ${failures.length} failed`);

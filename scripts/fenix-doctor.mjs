@@ -77,6 +77,7 @@ const [
   hostClientH,
   supervisorLibH,
   supervisorLaunchH,
+  claimsH,
 ] = await Promise.all([
   loadHelper('./fenix-paths.mjs'),
   loadHelper('./supervisor-current-run.mjs'),
@@ -89,6 +90,7 @@ const [
   loadHelper('./supervisor-host-client.mjs'),
   loadHelper('./supervisor-lib.mjs'),
   loadHelper('./supervisor-launch.mjs'),
+  loadHelper('./workspace-claims.mjs'),
 ]);
 
 /** The first of the given helpers that did not load, else null. */
@@ -418,8 +420,17 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   // FOC-902: the autonomous-pickup note rides on every detail branch — the
   // doctor line answers both "how full is the cap" and "is pickup on" in one
   // place. A settings.error (overlay ignored) reads autoPickup as null → off.
+  // FOC-1147 round 3: when the pickup's project scope is pinned via
+  // taskSessions.autoPickup.projects, the line names it — the operator sees
+  // the scope without reading the overlay. (This auto-pickup line is the
+  // doctor's only FOC-1147 touch-point; the workspace-claims/cleanup sections
+  // are FOC-1086 turf.)
   const autoNote = settings.autoPickup?.enabled
-    ? `; auto-pickup: on (every ${settings.autoPickup.pollSeconds}s, states ${settings.autoPickup.states.join(",")})`
+    ? `; auto-pickup: on (every ${settings.autoPickup.pollSeconds}s, states ${settings.autoPickup.states.join(",")}` +
+      (Array.isArray(settings.autoPickup.projects) && settings.autoPickup.projects.length > 0
+        ? `, projects ${settings.autoPickup.projects.join(",")}`
+        : "") +
+      ")"
     : "; auto-pickup: off";
   let exists = false;
   try {
@@ -614,6 +625,50 @@ export function checkRunOwners({ env = process.env, readOwners } = {}) {
   };
 }
 
+// FOC-1086: the workspace-claim registry is the multi-Supervisor collision
+// guard (FOC-898). A claim stamped to a worktree that no longer exists on disk
+// is stale — cleanup_remove used to leave it behind, and a stale claim blocks a
+// future Supervisor from the same branch name forever. Warn with the count and
+// the first three paths; ok when every claimed worktree is present, and when
+// there is no claims file at all. The repo root is this script's own checkout
+// (the doctor has no repo parameter; in the container that checkout IS the
+// supervised repo). readClaims is the injectable seam (same shape as
+// checkRunOwners's readOwners) so tests need no git repo.
+export function checkWorkspaceClaims({ fsImpl = fs, root, readClaims } = {}) {
+  const name = 'workspace claims';
+  const missing = firstUnloaded(claimsH);
+  if (missing) return helperFail(name, missing);
+  const repoRoot = root || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const read = readClaims ?? (() => claimsH.mod.readWorkspaceClaims({ gitRoot: repoRoot }));
+  let store;
+  try {
+    store = read();
+  } catch (err) {
+    return {
+      name,
+      status: 'warn',
+      detail: `claims registry unreadable (${String(err.message).split('\n')[0]})`,
+      fix: 'fix or re-create the claims registry — never guess across versions',
+    };
+  }
+  const claims = store?.claims ?? [];
+  const stale = claims.filter((c) => !fsImpl.existsSync(c.worktree));
+  if (!stale.length) {
+    return {
+      name,
+      status: 'ok',
+      detail: claims.length ? `${claims.length} claim(s), every worktree present` : 'no claims recorded',
+    };
+  }
+  const list = (items) => `${items.slice(0, 3).join(', ')}${items.length > 3 ? `, … +${items.length - 3} more` : ''}`;
+  return {
+    name,
+    status: 'warn',
+    detail: `${stale.length} claim(s) name worktrees that no longer exist: ${list(stale.map((c) => c.worktree))} — a stale claim blocks a future Supervisor from the same branch`,
+    fix: 're-run cleanup remove for the removed child (it releases the claim), or release it through the claims registry',
+  };
+}
+
 // FOC-803: the image must be built for the host user's uid/gid. When it was
 // not, the bind-mounted host files keep their host ownership and stay
 // unreadable/unwritable inside the container: the Compose secrets (written
@@ -683,6 +738,28 @@ export function checkSecretsReadable(env, fsImpl, secretsDir = DEFAULT_SECRETS_D
     };
   }
   return { name: 'secrets readable', status: 'ok', detail: `${names.length} file(s) readable under ${secretsDir}` };
+}
+
+// FOC-1148: the optional pisi Linear key rides the same Compose-secret path as
+// the required keys, but it is OPTIONAL — the empty placeholder `fenix up`
+// creates means the second-workspace integration is off, which is the healthy
+// default. Presence only, like every key check here: the value and its length
+// never enter the report. Container-only (the secret exists at /run/secrets
+// only inside the stack); secretsDir is injectable like checkSecretsReadable's.
+export function checkPisiSecret(env, fsImpl, secretsDir = DEFAULT_SECRETS_DIR) {
+  const name = 'pisi secret';
+  const file = path.join(secretsDir, 'linear_api_key_pisi');
+  let st;
+  try {
+    st = fsImpl.statSync(file);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { name, status: 'warn', detail: `${file} absent — the pisi secret is not mounted`, fix: 'fenix up' };
+    }
+    return { name, status: 'warn', detail: `${file} unreadable (${String(err?.message || err).split('\n')[0]})`, fix: UID_FIX };
+  }
+  if (st.size > 0) return { name, status: 'ok', detail: `${file} present` };
+  return { name, status: 'ok', detail: `${file} empty — the pisi (second Linear workspace) integration is off` };
 }
 
 /** LA_PROJECTS_FILE's directory exists but must also be writable. */
@@ -777,6 +854,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     await checkSupervisorPrompt({ env, fsImpl }),
     checkPermissionMode({ env }),
     checkRunOwners({ env }),
+    checkWorkspaceClaims({ fsImpl }),
   ];
   // FOC-803 uid checks: only meaningful in the container, where the process
   // runs as the image's user against host-owned bind mounts.
@@ -784,7 +862,9 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     // FOC-988 first: the two uid checks stay the last two lines of the container
     // block (a test pins their position).
     if (code) checks.push(code);
-    checks.push(checkSecretsReadable(env, fsImpl, secretsDir), checkProjectsDir(env, fsImpl, projectsFile));
+    // FOC-1148: the pisi-secret line sits with the other secret-file checks,
+    // ahead of the config-writable line (a test pins this order).
+    checks.push(checkSecretsReadable(env, fsImpl, secretsDir), checkPisiSecret(env, fsImpl, secretsDir), checkProjectsDir(env, fsImpl, projectsFile));
   }
   if (withApi) checks.push(await checkApi(fetchImpl, env));
   return checks;

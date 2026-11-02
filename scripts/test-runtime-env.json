@@ -1,5 +1,5 @@
 {
-  "comment": "FOC-990: the Fenix runtime's path/state env that a suite file must never inherit. ONE list, two consumers: scripts/test-run.mjs strips it from every suite process (so a child running `node scripts/test-run.mjs` inside the container is as hermetic as CI) and docker/test-in-container.sh unsets it before the suite. The image points these at the /data volume; a test that honours one writes into the live install. LA_SUPERVISOR* is stripped by prefix in test-run.mjs and is not listed here except LA_SUPERVISOR_STATE_HOME, which the shell needs by name.",
+  "comment": "FOC-990: the Fenix runtime's path/state env that a suite file must never inherit. ONE list, two consumers: scripts/test-run.mjs strips it from every suite process (so a child running `node scripts/test-run.mjs` inside the container is as hermetic as CI) and docker/test-in-container.sh unsets it before the suite. The image points these at the /data volume; a test that honours one writes into the live install. LA_SUPERVISOR* is stripped by prefix in test-run.mjs and is not listed here except LA_SUPERVISOR_STATE_HOME, which the shell needs by name. FOC-1147 adds the Linear API keys: a suite must never reach the live workspace (the suffixed variants beyond these two names are covered by the LINEAR_API_KEY* prefix strip in test-run.mjs).",
   "unset": [
     "LA_DATA_HOME",
     "LA_TELEMETRY_HOME",
@@ -10,6 +10,8 @@
     "GITHUB_ROOT",
     "LA_PROJECTS_FILE",
     "FENIX_IN_CONTAINER",
-    "TELEMETRY_HOST"
+    "TELEMETRY_HOST",
+    "LINEAR_API_KEY",
+    "LINEAR_API_KEY_PISI"
   ]
 }
