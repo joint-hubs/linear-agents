@@ -50,6 +50,7 @@ import {
   killTree,
   parseArgs,
   readRegistry,
+  reapChildDescendants,
   shareChildTranscripts,
   stallSilenceMs,
   sweepChildProcesses,
@@ -811,6 +812,11 @@ child.on("error", (err) => {
 // on it forever. TAIL_DRAIN_MS itself is declared beside signalTerminated,
 // where terminateTurn can measure against it.
 let finalized = false;
+// FOC-1162: the instant the child's 'exit' fires, recorded as the creation
+// bound the win32 descendant reap verifies against — a process the child
+// spawned was born before this moment, a pid-reuse stranger's child after
+// it. Declared here because finalizeTurn reads it on every path.
+let childExitAt = null;
 function finalizeTurn(code, signal) {
   if (finalized) return;
   finalized = true;
@@ -945,6 +951,61 @@ function finalizeTurn(code, signal) {
     }
   }
 
+  // ── FOC-1162 (win32): reap the descendants the child left behind ───────────
+  // The FOC-808 sweep above reaches only what carries LA_CHILD_MARK, and on
+  // win32 there is no /proc to read — a grandchild the child spawned and left
+  // behind survives it, and killTree walks from a live parent, which the
+  // child no longer is. So the reap walks the process table from the child's
+  // pid instead, verifies every candidate against the child's exit time (a
+  // reused pid is refused, never killed), and kills the verified tree tops
+  // with the same force taskkill the linger path uses. Only a child that
+  // demonstrably exited is reaped: a turn the linger path is still fighting
+  // for keeps its own semantics (its kill already walks the live tree), and a
+  // turn with no exit anchor has no bound to verify against. All best
+  // effort — a failure is a note in the tee, never a crash.
+  let reapedTreePids = [];
+  if (
+    process.platform === "win32" &&
+    childExitAt !== null &&
+    (child.exitCode !== null || child.signalCode !== null)
+  ) {
+    try {
+      const reap = reapChildDescendants({
+        rootPid: child.pid,
+        exitAtMs: childExitAt,
+        excludePids: [process.pid],
+      });
+      reapedTreePids = (reap.killed ?? []).filter((k) => k.ok).map((k) => k.pid);
+      if (reap.skipped) {
+        note({
+          subtype: "child_tree_reap_skipped",
+          message: `win32 descendant reap skipped: ${reap.skipped}`,
+        });
+      }
+      if (reapedTreePids.length) {
+        note({
+          subtype: "child_tree_reap",
+          message:
+            `win32 descendant reap: killed ${reapedTreePids.length} stray process(es) ` +
+            `[${reap.killed
+              .filter((k) => k.ok)
+              .map((k) => `${k.pid} ${k.name || "unknown"}`)
+              .join(", ")}]`,
+        });
+      }
+      if (reap.survivors?.length) {
+        note({
+          subtype: "child_tree_reap_survivors",
+          message:
+            `win32 descendant reap: ${reap.survivors.length} verified descendant(s) survived the kill ` +
+            `[${reap.survivors.map((s) => `${s.pid} ${s.name || "unknown"}`).join(", ")}]`,
+        });
+      }
+    } catch (err) {
+      note({ subtype: "child_tree_reap_failed", message: err.message });
+    }
+  }
+
   const turns = entry.turns || [];
   // FOC-607: the turn closes with what was requested vs what actually served —
   // initModel is null when the child never emitted system/init.
@@ -957,6 +1018,9 @@ function finalizeTurn(code, signal) {
     // FOC-808 (slice B): the pids the sweep killed — the registry record the
     // plan names, so a turn's teardown is auditable without the tee.
     sweptPids,
+    // FOC-1162: the child's descendants the win32 reap verified and killed —
+    // beside sweptPids, same audit rule.
+    reapedTreePids,
     // FOC-1154: the last-resort finalize after both force kills failed — the
     // child may still be alive; the Supervisor should see why this turn closed
     // without an exit.
@@ -1097,6 +1161,8 @@ function finalizeTurn(code, signal) {
 }
 
 child.on("exit", (code, signal) => {
+  // FOC-1162: this is the reap's creation bound — see childExitAt above.
+  childExitAt = Date.now();
   // The stream tail gets a bounded window to land; 'close' below normally
   // finalizes within milliseconds of 'exit'.
   setTimeout(() => finalizeTurn(code, signal), TAIL_DRAIN_MS);

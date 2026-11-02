@@ -3343,6 +3343,228 @@ export function sweepChildProcesses({
   };
 }
 
+// ── win32 descendant reap (FOC-1162) ─────────────────────────────────────────
+// killTree's win32 branch is `taskkill /T`: a tree walk FROM a live parent.
+// The moment the child exits on its own the anchor is gone and every orphaned
+// grandchild it left behind survives the finalize — and the FOC-808 sweep
+// cannot close that gap on win32, because it reads LA_CHILD_MARK out of
+// /proc/<pid>/environ and Windows has no /proc. What Windows does expose in
+// one query is the whole process table, and every entry carries the
+// ParentProcessId recorded at its creation — a link that survives its
+// parent's death. So the reap walks the table from the child's pid instead of
+// walking live processes from the child, and every pid it kills is verified
+// before it dies (the two rules in descendantsInProcessTable): a reused pid
+// is refused, never killed.
+
+// One query serves the whole table. The creation stamp is converted to Unix
+// epoch ms INSIDE PowerShell because the raw FILETIME (100 ns ticks since
+// 1601) exceeds JS's safe-integer range; [long] truncates the sub-ms rest,
+// which only ever loosens the exit bound by under a millisecond. The probe
+// this script was written against verified two facts on this Windows build:
+// CreationDate arrives with Kind=Local (so ToFileTimeUtc converts correctly,
+// no timezone skew) and carries microsecond precision (so the descendant
+// rules' creation-order checks are not quantised away). Processes whose
+// CreationDate is missing are dropped — an unstamped process is never
+// verified, and only verified pids die.
+const WIN32_TABLE_SCRIPT =
+  "Get-CimInstance Win32_Process | Where-Object { $_.CreationDate } | " +
+  "ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.ProcessId, $_.ParentProcessId, " +
+  "([long](($_.CreationDate.ToFileTimeUtc() - 116444736000000000) / 10000)), $_.Name }";
+
+// A hung enumeration must never hang the finalize: the timeout degrades the
+// reap to a skip, which the watcher notes and survives.
+const WIN32_TABLE_TIMEOUT_MS = 10_000;
+
+/**
+ * One `Get-CimInstance Win32_Process` query, parsed into
+ * `{ pid, ppid, creation, name }` rows (creation = Unix epoch ms).
+ *
+ * Fail-closed: any line the parser cannot read refuses the WHOLE table — a
+ * garbled table could hide a wrong creation stamp, and a wrong stamp is
+ * exactly the false kill the verification rules exist to prevent.
+ *
+ * @param {{ timeoutMs?: number }} [opts]
+ * @returns {{ entries: Array<{pid: number, ppid: number, creation: number, name: string}>, skipped: string|null }}
+ */
+export function enumerateWin32Processes({ timeoutMs = WIN32_TABLE_TIMEOUT_MS } = {}) {
+  if (process.platform !== "win32") return { entries: [], skipped: "not win32" };
+  let stdout;
+  try {
+    stdout = execFileSync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", WIN32_TABLE_SCRIPT],
+      {
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+    ).toString();
+  } catch (err) {
+    return { entries: [], skipped: `process table enumeration failed: ${err.message}` };
+  }
+  return parseWin32ProcessTable(stdout);
+}
+
+/**
+ * Parse the enumerator's `pid|ppid|epochMs|name` lines. Exported for the unit
+ * tests, which must be able to prove the fail-closed behaviour without a
+ * PowerShell.
+ */
+export function parseWin32ProcessTable(text) {
+  const entries = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const cols = line.split("|");
+    const pid = Number(cols[0]);
+    const ppid = Number(cols[1]);
+    const creation = Number(cols[2]);
+    if (
+      cols.length < 4 ||
+      !Number.isInteger(pid) ||
+      !Number.isInteger(ppid) ||
+      !Number.isInteger(creation) ||
+      creation <= 0
+    ) {
+      return { entries: [], skipped: `unexpected process-table output: ${line.slice(0, 80)}` };
+    }
+    entries.push({ pid, ppid, creation, name: cols.slice(3).join("|") });
+  }
+  return { entries, skipped: null };
+}
+
+/**
+ * The child's verified descendants inside one process-table snapshot.
+ *
+ * Pure — a table in, a set of entries out; every refusal is a NOT-killed,
+ * never a kill. Two rules, both built on creation stamps:
+ *
+ *  · The anchor's direct children are accepted only when they were born
+ *    before the child's exit (`maxCreationMs`). A process our child spawned
+ *    was born before the child died; a stranger that reused the child's pid
+ *    was born after — and its children with it. The bound is what keeps a
+ *    reused anchor from adopting a stranger's tree.
+ *  · A deeper process joins only through a LIVE verified parent (the snapshot
+ *    is internally consistent, so a ppid link names the pid that actually
+ *    holds it now), and only when it was born after that parent — everything
+ *    born by the pid's CURRENT holder postdates the holder's own creation; a
+ *    leftover child of a dead previous holder predates it.
+ *
+ * What this costs is stated, not hidden: a descendant chain whose middle link
+ * died AND whose dead pid was reused breaks at the reuse (a safe miss — the
+ * orphan survives, never an innocent dies), and a great-grandchild spawned
+ * after the anchor's exit by a still-live descendant is accepted through its
+ * live parent and dies with that parent's taskkill /T walk.
+ *
+ * @param {Array<{pid: number, ppid: number, creation: number}>} entries
+ * @param {number} rootPid the child's pid — never part of the result
+ * @param {{ maxCreationMs?: number }} opts the child's exit time (epoch ms);
+ *   without a finite bound no anchor child can be verified, so nothing is
+ *   returned — fail-safe.
+ * @returns {Array<{pid: number, ppid: number, creation: number, name: string}>}
+ */
+export function descendantsInProcessTable(entries, rootPid, { maxCreationMs = Number.NaN } = {}) {
+  const childrenOf = new Map();
+  for (const e of entries) {
+    if (!Number.isInteger(e?.pid) || !Number.isInteger(e?.ppid) || !Number.isInteger(e?.creation)) continue;
+    if (!childrenOf.has(e.ppid)) childrenOf.set(e.ppid, []);
+    childrenOf.get(e.ppid).push(e);
+  }
+  const accepted = new Map();
+  if (Number.isFinite(maxCreationMs)) {
+    for (const c of childrenOf.get(rootPid) ?? []) {
+      if (c.creation <= maxCreationMs) accepted.set(c.pid, c);
+    }
+  }
+  // The frontier only ever holds LIVE table entries (every accepted pid came
+  // straight from the snapshot), so the chain rule below always has its
+  // parent's creation stamp to order against.
+  const frontier = [...accepted.values()];
+  while (frontier.length) {
+    const parent = frontier.pop();
+    for (const c of childrenOf.get(parent.pid) ?? []) {
+      if (accepted.has(c.pid)) continue;
+      if (c.creation > parent.creation) {
+        accepted.set(c.pid, c);
+        frontier.push(c);
+      }
+    }
+  }
+  return [...accepted.values()];
+}
+
+/**
+ * Reap the child's verified descendants through the NORMAL finalize path —
+ * no new wake class, no second finalizer (the FOC-1154 shape).
+ *
+ * Only the TOP of the verified tree is killed directly: `taskkill /T` walks
+ * the killed pid's live subtree, which covers every deeper descendant,
+ * including any born after the child's exit that no table snapshot could
+ * have seen. Each top pid is verified by descendantsInProcessTable before
+ * its kill; a refused pid is never killed.
+ *
+ * The kill is `killTree(pid, "force")` — the same primitive the linger path
+ * uses — and both the kill and the liveness probe are injectable, which is
+ * how the unit tests record kills instead of delivering them (the sweep's
+ * seam pattern). After the kills the tree is re-enumerated once: every
+ * verified descendant must be gone, or it is named a survivor. The whole
+ * call is best-effort — every failure mode returns a report, never a throw.
+ *
+ * @param {{ rootPid: number, exitAtMs: number, excludePids?: number[], graceMs?: number,
+ *          enumerate?: () => { entries: Array, skipped: string|null },
+ *          kill?: (pid: number, mode: string) => boolean,
+ *          alive?: (pid: number) => boolean }} opts
+ * @returns {{ killed: Array<{pid: number, name: string, ok: boolean}>, survivors: Array<{pid: number, name: string}>|null, skipped: string|null, via: "table" }}
+ *   `survivors: null` means the verification enumeration failed (unknown —
+ *   never read as "all dead"); `skipped` means no reap was attempted.
+ */
+export function reapChildDescendants({
+  rootPid,
+  exitAtMs,
+  excludePids = [],
+  enumerate = enumerateWin32Processes,
+  kill = killTree,
+  alive = processAlive,
+  graceMs = 2000,
+} = {}) {
+  if (!Number.isSafeInteger(rootPid) || !Number.isFinite(exitAtMs)) {
+    return { killed: [], survivors: null, skipped: "no root pid or no exit bound" };
+  }
+  const table = enumerate();
+  if (table.skipped) return { killed: [], survivors: null, skipped: table.skipped };
+  const exclude = new Set([...excludePids, process.pid].map(Number));
+  const desc = descendantsInProcessTable(
+    table.entries.filter((e) => !exclude.has(e.pid)),
+    rootPid,
+    { maxCreationMs: exitAtMs },
+  );
+  if (!desc.length) return { killed: [], survivors: [], skipped: null, via: "table" };
+  const inTree = new Set(desc.map((d) => d.pid));
+  const killed = [];
+  for (const d of desc.filter((x) => !inTree.has(x.ppid))) {
+    let ok = false;
+    try {
+      ok = kill(d.pid, "force") === true;
+    } catch {
+      ok = false;
+    }
+    killed.push({ pid: d.pid, name: d.name, ok });
+  }
+  const unlanded = () => killed.filter((k) => k.ok && alive(k.pid));
+  const deadline = Date.now() + graceMs;
+  while (unlanded().length && Date.now() < deadline) waitSync(50);
+  const verify = enumerate();
+  const survivors = verify.skipped
+    ? null
+    : desc.filter((d) => {
+        const now = verify.entries.find((e) => e.pid === d.pid);
+        // The creation stamp must match too: a reused pid would satisfy a
+        // bare "still in the table" and name an innocent process.
+        return now && now.creation === d.creation;
+      });
+  return { killed, survivors, skipped: null, via: "table" };
+}
+
 /**
  * Best-effort group-read on a launch dir's transcript files (FOC-980).
  *
