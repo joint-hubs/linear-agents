@@ -862,6 +862,332 @@ test("a refused re-record of the same round touches no Linear write", () => {
   assert.equal(again.linearEffects, undefined);
 });
 
+// ── 5c. delivery verdicts (FOC-1169) ─────────────────────────────────────────
+console.log("\ndelivery verdykty — etykiety bez dziecka");
+
+const deliveryRecord = (s, extra = []) =>
+  parse(verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", ...extra]), fail);
+
+// The byte-level pin of a NORMAL record, captured from the pre-FOC-1169 tool
+// (the recordedAt, runId and fingerprint hashes are the only dynamic parts —
+// normalized to "<ts>", "<run>" and "<hash>"). It is a regression guard, not an
+// evidence test: its job is to fail if `--delivery` ever leaks a key into the
+// normal shape. A pin that could only have been written one way is honest about
+// exactly that.
+const GOLDEN_NORMAL_RECORD = `{
+  "taskId": "FOC-123",
+  "runId": "<run>",
+  "childId": "review-1",
+  "squad": "review",
+  "round": 1,
+  "verdict": "fail",
+  "findings": [
+    {
+      "text": "resolvePrice ignores cacheRead",
+      "evidence": "scripts/ledger.mjs:88 resolvePrice"
+    }
+  ],
+  "acMapping": [],
+  "declaredAcs": 1,
+  "fingerprint": {
+    "diff": "<hash>",
+    "tests": "<hash>",
+    "combined": "<hash>",
+    "changedFiles": 0,
+    "failingTests": [
+      "suite/a"
+    ],
+    "error": null
+  },
+  "recordedAt": "<ts>",
+  "linearEffects": {
+    "dryRun": true,
+    "dryRunTrigger": "REVIEW_DRY_RUN=1",
+    "label": {
+      "status": "applied",
+      "detail": "[dry-run] would set labels: current=[] planned=[returned-by:review]"
+    },
+    "transition": {
+      "status": "applied",
+      "detail": "[dry-run:review] would transition FOC-123 -> In Progress"
+    }
+  }
+}`;
+
+test("the record shape without --delivery is unchanged (byte-level pin)", () => {
+  const s = scenario();
+  advance(s, "golden.txt");
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const rec = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  const norm = {
+    ...rec,
+    runId: "<run>",
+    recordedAt: "<ts>",
+    fingerprint: { ...rec.fingerprint, diff: "<hash>", tests: "<hash>", combined: "<hash>" },
+  };
+  // Key ORDER is part of the shape: a key appended later shifts every byte after it.
+  assert.equal(
+    Object.keys(rec).join(","),
+    "taskId,runId,childId,squad,round,verdict,findings,acMapping,declaredAcs,fingerprint,recordedAt,linearEffects",
+  );
+  assert.equal(JSON.stringify(norm, null, 2), GOLDEN_NORMAL_RECORD);
+  // The delivery-only keys must not leak into a normal record.
+  for (const k of ["recordedBy", "reason", "backfill"]) {
+    assert.ok(!(k in rec), `${k} leaked into a record without --delivery`);
+  }
+});
+
+test("a delivery fail is recorded without a child, fingerprinting the dev child's tree", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.squad, "delivery");
+  assert.equal(out.childId, null);
+  assert.equal(out.recordedBy, "delivery");
+  assert.equal(out.reason, "design");
+  assert.equal(out.verdict, "fail");
+  assert.equal(out.round, 1);
+  // The fingerprint measures DEV's tree — the work being delivered, not a reviewer's.
+  const fp = progressFingerprint({ worktree: s.worktree, baseRevision: s.baseRevision, failingTests: [] });
+  assert.equal(out.fingerprint.combined, fp.combined);
+  // Delivery has no return emitter: the side effects are inert BY SHAPE.
+  assert.equal(out.linearEffects.label.status, "not-applicable");
+  assert.equal(out.linearEffects.transition.status, "not-applicable");
+  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  assert.equal(onDisk.recordedBy, "delivery");
+  assert.equal(onDisk.childId, null);
+});
+
+test("a delivery pass needs no reason and no AC mapping", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass"]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.squad, "delivery");
+  assert.equal(out.recordedBy, "delivery");
+  assert.equal(out.reason, null);
+  assert.deepEqual(out.acMapping, []);
+  assert.deepEqual(out.findings, []);
+});
+
+test("--recorded-at without --backfill is refused", () => {
+  const s = scenario();
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci",
+    "--recorded-at", "2026-11-01T10:00:00.000Z",
+    "--no-failing-tests", NO_TESTS_REASON,
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
+test("--recorded-at with --backfill lands with backfill:true and the given timestamp", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-01T10:00:00.000Z", "--backfill",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.backfill, true);
+  assert.equal(out.recordedAt, "2026-11-01T10:00:00.000Z");
+  assert.equal(out.reason, "ci");
+});
+
+test("an unknown delivery reason is refused", () => {
+  const s = scenario();
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "vibes", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /unknown delivery reason "vibes"/);
+});
+
+test("a delivery fail without a reason is refused", () => {
+  const s = scenario();
+  const out = deliveryRecord(s, ["--verdict", "fail", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--reason/);
+});
+
+test("--child is refused in --delivery mode — the record has no child", () => {
+  const s = scenario();
+  const out = parse(
+    verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", "--child", "review-1", "--verdict", "pass"]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--child/);
+});
+
+test("a delivery fail after a REVIEW pass on the same tree opens the round (FOC-1146 interplay)", () => {
+  // The FOC-1146 guard refuses only a repeat of verdict AND findings. A REVIEW
+  // pass contradicted by a delivery fail on the same tree is a NEW opinion, so
+  // the round it asks for must open — the delivery verdict joins the same
+  // roundsFor chain that guard reads.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+  ]);
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.round, 2, "the delivery verdict joins the task's round chain");
+
+  const loop = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
+  assert.equal(loop.ok, true, loop.error);
+  assert.equal(loop.progress.repeated, true, "the tree did not move — and that is not the blocker");
+  assert.equal(loop.progress.rounds, 2);
+});
+
+test("--ac is refused in --delivery mode — an AC mapping is a REVIEW approve requirement", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = parse(
+    verdict([
+      "record", "--delivery", "--run", s.runId, "--task", "FOC-123", "--verdict", "pass",
+      "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    ]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--ac/);
+});
+
+test("--backfill without --recorded-at is refused — a backfill without its when is half a declaration", () => {
+  // The AC only forces --recorded-at without --backfill to be refused; the
+  // mirror case is a policy call, pinned here: backfill:true with a NOW
+  // timestamp would claim to be history without saying when that history was.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci", "--backfill"]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
+test("a delivery verdict with no dev child in the run is refused, not guessed at", () => {
+  const { repo } = fixtureRepo();
+  const review = fixtureWorktree(repo, "foc-123-review");
+  const runId = fixtureRun();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "review-1": {
+        childId: "review-1", squad: "review", taskId: "FOC-123", status: "exited", turns: [],
+        worktree: review.worktree, baseRevision: review.baseRevision,
+      },
+    },
+    rounds: {},
+  });
+  const out = parse(
+    verdict([
+      "record", "--delivery", "--run", runId, "--task", "FOC-123",
+      "--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON,
+    ]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /no dev child for FOC-123/);
+  // The hint names WHO would be fingerprinted — not a null childId.
+  assert.ok(!String(out.hint ?? "").includes("null"), `the hint interpolates a null childId: ${out.hint}`);
+});
+
+test("two dev children for the task are ambiguous — --work-child names the tree", () => {
+  const { repo } = fixtureRepo();
+  const devA = fixtureWorktree(repo, "foc-123-dev-a");
+  const devB = fixtureWorktree(repo, "foc-123-dev-b");
+  const runId = fixtureRun();
+  const child = (id, wt) => ({
+    childId: id, squad: "dev", taskId: "FOC-123", status: "exited", turns: [],
+    worktree: wt.worktree, baseRevision: wt.baseRevision,
+  });
+  writeRegistry(runId, { runId, children: { "dev-1": child("dev-1", devA), "dev-2": child("dev-2", devB) }, rounds: {} });
+  const mk = (extra = []) =>
+    parse(
+      verdict([
+        "record", "--delivery", "--run", runId, "--task", "FOC-123",
+        "--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON,
+        ...extra,
+      ]),
+      fail,
+    );
+
+  const refused = mk();
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /2 dev children carry FOC-123/);
+
+  // Naming one resolves the ambiguity; the record still has no child.
+  const named = mk(["--work-child", "dev-2"]);
+  assert.equal(named.ok, true, named.error);
+  assert.equal(named.childId, null);
+});
+
+test("a --recorded-at that Date.parse accepts but ISO does not is refused", () => {
+  // Todo-1 round 1: Date.parse("11/01/2026") is readable, but a backdated
+  // record whose when is locale-shaped is not a baseline anyone can reproduce.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "11/01/2026", "--backfill",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
+test("a calendar-overflow --recorded-at is refused, not rolled over to a date the operator never typed", () => {
+  // Round 2: Date.parse("2026-02-30T00:00:00Z") is 2026-03-02 — a backfill
+  // storing that WHEN would reorder the signal inputs by a stamp nobody
+  // typed. Every rollover case refuses; the message names the typed date.
+  for (const stamp of ["2026-02-30T00:00:00Z", "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z"]) {
+    const s = scenario();
+    advance(s, "attempt.txt");
+    const out = deliveryRecord(s, [
+      "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+      "--recorded-at", stamp, "--backfill",
+    ]);
+    assert.equal(out.ok, false, `${stamp} was accepted`);
+    assert.match(out.error, new RegExp(`--recorded-at "${stamp}" is not a real calendar date`));
+  }
+});
+
+test("a --recorded-at offset is bounded to ISO 8601 (±14:00 exactly), a real offset still records", () => {
+  // Round 2 nit 1: [+-]\d{2}:\d{2} read +99:99. Bounded to ±14:00 per ISO.
+  // Round 3: the first bound was ±14:59 — (?:0\d|1[0-4]):[0-5]\d admits
+  // +14:01..+14:59 and Date.parse does not NaN them, so the gate accepted
+  // them end-to-end while every comment claimed ±14:00. Hour 14 admits only
+  // :00 now, and the boundary pins below can actually go red.
+  for (const stamp of [
+    "2026-11-01T10:00:00+99:99",
+    "2026-11-01T10:00:00+14:01",
+    "2026-11-01T10:00:00+14:59",
+  ]) {
+    const s = scenario();
+    advance(s, "attempt.txt");
+    const refused = deliveryRecord(s, [
+      "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+      "--recorded-at", stamp, "--backfill",
+    ]);
+    assert.equal(refused.ok, false, `${stamp} was accepted`);
+    assert.ok(
+      refused.error.includes(`--recorded-at "${stamp}" is not an ISO timestamp`),
+      refused.error,
+    );
+  }
+
+  // A +14:00 stamp legitimately shifts the UTC instant (23:30+14:00 is
+  // 09:30Z) — the record keeps the parsed instant, not the typed wall clock.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-01T23:30:00+14:00", "--backfill",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.recordedAt, "2026-11-01T09:30:00.000Z");
+});
+
 // ── 6. the two stall conditions stay distinct ────────────────────────────────
 console.log("\ndwa warunki zastoju, osobno raportowane");
 

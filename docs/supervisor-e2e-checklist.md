@@ -192,6 +192,27 @@ typed by hand walks past both keys (TEST pass, answered gate).
 
 ---
 
+## Delivery verdicts (FOC-1169) — when delivery records one
+
+Delivery (the Supervisor's delivery stage, not a child) records a verdict for every accept/reject
+of a `READY TO PUSH` — pass or fail, each with its `reason` from the closed set
+(`design | evidence | test-gap | ci | scope | other`; required on a fail) — and for every CI red
+after `READY TO PUSH` (`--verdict fail --reason ci`). There is no child to record it: run
+
+```bash
+node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n \
+  --verdict fail --reason ci --failing-test <id>   # or --no-failing-tests "<why>"
+```
+
+The record fingerprints the task's dev-child tree through the same `resolveWorkChild` path a
+review verdict uses, lands in the task's round chain, and feeds the three delivery signals
+(`deliveryFirstTimeRight`, `reviewFalsePass`, `ciRedAfterReady`) on the Costs & quality board.
+Backfilling a historical session (the 2026-11-01/02 baseline) adds
+`--recorded-at <iso> --backfill` — the pair is required together; `--recorded-at` alone is
+refused.
+
+---
+
 ## What to do with a failed box
 
 Do not fix it inside the walk. Note the box, the command, and what actually happened, then finish

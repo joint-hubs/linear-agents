@@ -325,6 +325,17 @@ export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 3
         records.map((record) => ({
           round: typeof record.round === "number" ? record.round : 0,
           verdict: record.unreadable ? "UNKNOWN" : verdictOf(record),
+          // FOC-1169: the delivery quality signals read squad / fingerprint /
+          // reason off these rows. A record from before the field existed reads
+          // null there — UNKNOWN, never counted as delivery or review evidence.
+          squad: record.unreadable ? null : record.squad ?? null,
+          fingerprint: record.unreadable ? null : record.fingerprint?.combined ?? null,
+          // The TREE axis (the fingerprint's diff hash). reviewFalsePass matches
+          // on this, not on `combined`: the combined hash folds in the declared
+          // failing-test axis, which a delivery fail always declares — matching
+          // on combined would make the CI-red-after-READY case uncountable.
+          fingerprintDiff: record.unreadable ? null : record.fingerprint?.diff ?? null,
+          reason: record.unreadable ? null : record.reason ?? null,
           at: record.recordedAt ?? null,
           path: useLib
             ? verdictPath(runId, taskId, record.round ?? 0)
@@ -785,7 +796,12 @@ function buildTimeline(facts) {
     events.push({
       at: verdict.at,
       kind: "verdict",
-      text: `review round ${verdict.round}: ${verdict.verdict}`,
+      // A delivery verdict has its own author and no review round behind it —
+      // labelling it "review round N" misread the timeline it sat in.
+      text:
+        verdict.squad === "delivery"
+          ? `delivery verdict: ${verdict.verdict}`
+          : `review round ${verdict.round}: ${verdict.verdict}`,
       childId: null,
       runId: null,
     });
