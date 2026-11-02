@@ -329,6 +329,72 @@ export const baseEnv = (extra = {}) => {
   };
 };
 
+// ── FOC-1164: hermetic env for suites that spawn supervisor scripts ─────────
+//
+// baseEnv() carries the mock/toolchain seams but still inherits everything else
+// from the enclosing process — which, when a suite runs inside a Fenix
+// supervised child, is a full host identity: LA_TASK_ID, LA_SUPERVISOR_RUN,
+// LA_SUPERVISOR_CHILD, LA_TASK_OWNER, FENIX_STAGE,
+// FENIX_SUPERVISOR_SESSION_ID. A spawned status child then reads the HOST's
+// identity as its own: its briefing picked up an ambient LA_TASK_ID and printed
+// a journal line for it (status suite's "no LA_TASK_ID" test went red), and a
+// spawned cleanup refused with the child-seam error instead of the worktree
+// error it was asserting on. hermeticEnv() is the env for spawns that must
+// behave as if no such parent existed:
+//
+//   · the six identity seams are stripped — never inherited. A caller that
+//     deliberately wants one (the suites fake a standing child or a session
+//     id) passes it in `extra`, which wins last, same precedence as baseEnv.
+//   · LA_SUPERVISOR_STATE_HOME is pinned to the fixture home — the same root
+//     runDir()/ensureRunDir() resolve in THIS process — so a spawned child sees
+//     exactly the runs the suite created. Per-suite (one value per process),
+//     not per-call: the fixtures create run dirs across the whole suite and the
+//     children must resolve the same root, so a fresh dir per spawn would
+//     strand every fixture from every child.
+//   · LA_DATA_HOME and LA_STATE_ROOT are pinned to fresh per-suite temp dirs so
+//     a host's briefing/lease or agent-state stores can never leak into an
+//     assertion — and a spawned child can never write the host's. Per-suite and
+//     lazily created: one pair per process, registered with cleanupLater so the
+//     existing drain removes them; deterministic emptiness is the property the
+//     suites assert on, not freshness per call.
+//   · everything else flows through baseEnv() — PATH, HOME, OPENROUTER_API_KEY,
+//     LA_CLAUDE_BIN, the telemetry/codegraph guards: strip the identity seams,
+//     not the toolchain. Composition order: baseEnv() (scrubbedEnv + the mock
+//     seams) → seams deleted → pins applied → `extra` wins.
+
+const HERMETIC_IDENTITY_SEAMS = [
+  "LA_TASK_ID",
+  "LA_SUPERVISOR_RUN",
+  "LA_SUPERVISOR_CHILD",
+  "LA_TASK_OWNER",
+  "FENIX_STAGE",
+  "FENIX_SUPERVISOR_SESSION_ID",
+];
+
+let hermeticDataHome = null;
+let hermeticStateRoot = null;
+
+const hermeticPins = () => {
+  if (!hermeticDataHome) {
+    hermeticDataHome = mkdtempSync(join(tmpdir(), "la-hermetic-data-"));
+    cleanupLater(hermeticDataHome);
+    hermeticStateRoot = mkdtempSync(join(tmpdir(), "la-hermetic-state-root-"));
+    cleanupLater(hermeticStateRoot);
+  }
+  return { LA_DATA_HOME: hermeticDataHome, LA_STATE_ROOT: hermeticStateRoot };
+};
+
+export const hermeticEnv = (extra = {}) => {
+  const env = baseEnv();
+  for (const seam of HERMETIC_IDENTITY_SEAMS) delete env[seam];
+  return {
+    ...env,
+    LA_SUPERVISOR_STATE_HOME: fixtureStateHome(),
+    ...hermeticPins(),
+    ...extra,
+  };
+};
+
 export const runScript = (script, args, env = {}) =>
   spawnSync(process.execPath, [script, ...args], {
     cwd: ROOT,

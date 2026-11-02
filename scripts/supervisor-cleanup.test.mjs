@@ -29,7 +29,7 @@ import { join } from "node:path";
 
 import {
   ROOT,
-  baseEnv,
+  hermeticEnv,
   cleanupLater,
   fixtureRepo,
   fixtureRun,
@@ -63,16 +63,16 @@ const GATE = join(ROOT, "scripts", "supervisor-gate.mjs");
 // child needed `env -u LA_SUPERVISOR_CHILD` to work around the identity guard
 // — and the suite was green only when the ambient env was clean. Explicit is
 // better: set LA_SUPERVISOR_CHILD only when the test says so.
-const cleanup = (args, env = {}) => {
-  const e = baseEnv(env);
-  if (!("LA_SUPERVISOR_CHILD" in env)) delete e.LA_SUPERVISOR_CHILD;
-  return spawnSync(process.execPath, [CLEANUP, ...args], { cwd: ROOT, encoding: "utf8", env: e });
-};
-const gate = (args, env = {}) => {
-  const e = baseEnv(env);
-  if (!("LA_SUPERVISOR_CHILD" in env)) delete e.LA_SUPERVISOR_CHILD;
-  return spawnSync(process.execPath, [GATE, ...args], { cwd: ROOT, encoding: "utf8", env: e });
-};
+//
+// FOC-1164: hermeticEnv() takes over that job and goes further — it strips all
+// six identity seams (LA_SUPERVISOR_CHILD included) unless the caller passes
+// one in `extra`, so a suite running inside a Fenix child can no longer leak
+// the host's run/task identity into a spawned cleanup. Tests that set
+// LA_SUPERVISOR_CHILD on purpose still work: extra wins.
+const cleanup = (args, env = {}) =>
+  spawnSync(process.execPath, [CLEANUP, ...args], { cwd: ROOT, encoding: "utf8", env: hermeticEnv(env) });
+const gate = (args, env = {}) =>
+  spawnSync(process.execPath, [GATE, ...args], { cwd: ROOT, encoding: "utf8", env: hermeticEnv(env) });
 
 // ── issue fixtures: the TEST key, offline ────────────────────────────────────
 // --issue-file is the same seam supervisor-triage.mjs uses. There is no
@@ -436,7 +436,7 @@ test("remove refuses to delete the directory it is standing in", () => {
   const res = spawnSync(
     process.execPath,
     [CLEANUP, "remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done, "--repo", s.repo],
-    { cwd: s.worktree, encoding: "utf8", env: baseEnv() },
+    { cwd: s.worktree, encoding: "utf8", env: hermeticEnv() },
   );
   const out = parse(res, fail);
   assert.equal(out.ok, false);
@@ -627,6 +627,24 @@ test("the supervisor namespace keeps its task keys while another child's worktre
   assert.equal(factStatus(dbPath, supNs, "sup_task"), "active", "supervisor task facts died while dev-2's tree stands");
 });
 
+/**
+ * A recursive snapshot of a directory: relative path -> file bytes. A
+ * "byte-identical" assertion is a deepEqual on two of these — contents (Buffer
+ * values compare by bytes under assert/strict) and the exact set of files, so
+ * both a modified file and a deleted or added one fail the compare. Empty
+ * directories produce no entry, which is fine: the live run's boundary is
+ * about content, and prune never creates or empties run dirs.
+ */
+function dirSnapshot(dir, prefix = "") {
+  const snap = {};
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) Object.assign(snap, dirSnapshot(join(dir, entry.name), rel));
+    else snap[rel] = readFileSync(join(dir, entry.name));
+  }
+  return snap;
+}
+
 test("run retention drops the run's namespaces and reports them in the summary", () => {
   // A temp state home with one ancient run: the prune lane's fixture shape,
   // pinned with utimesSync so the retention window decides, not the clock.
@@ -652,8 +670,23 @@ test("run retention drops the run's namespaces and reports them in the summary",
     { namespace: "child:run-new/dev-1", key: "branch", value: "b2", reason: "r" }, // a live run's namespace
   ]);
 
-  const e = baseEnv({ LA_SUPERVISOR_STATE_HOME: home, LA_AGENT_STATE_DB: dbPath });
-  delete e.LA_SUPERVISOR_CHILD;
+  // The live run the boundary is drawn at: fresh mtime, so retention never
+  // selects it, and working state under child:run-new/dev-1. The prune must not
+  // touch a single byte of it. Snapshot before, verify after, INSIDE this test
+  // body — cleanupLater would remove the whole home at drain, and an assertion
+  // after the suite ran would compare ghosts.
+  const liveId = "run-new";
+  const liveDir = join(home, liveId);
+  mkdirSync(join(liveDir, "children", "dev-1"), { recursive: true });
+  mkdirSync(join(liveDir, "gates"), { recursive: true });
+  writeFileSync(join(liveDir, "children", "dev-1", "state.json"), JSON.stringify({ branch: "b2", status: "exited" }));
+  writeFileSync(
+    join(liveDir, "gates", "standing.json"),
+    JSON.stringify({ gateId: "standing", status: "pending", kind: "question", questions: ["?"] }),
+  );
+  const liveSnapshot = dirSnapshot(liveDir);
+
+  const e = hermeticEnv({ LA_SUPERVISOR_STATE_HOME: home, LA_AGENT_STATE_DB: dbPath });
   const res = spawnSync(process.execPath, [CLEANUP, "prune"], { cwd: ROOT, encoding: "utf8", env: e });
   const out = parse(res, fail);
   assert.equal(out.ok, true, out.error);
@@ -665,6 +698,9 @@ test("run retention drops the run's namespaces and reports them in the summary",
   assert.equal(factStatus(dbPath, `supervisor:${runId}`, "focus"), undefined);
   assert.equal(factStatus(dbPath, `child:${runId}/dev-1`, "branch"), undefined);
   assert.equal(factStatus(dbPath, "child:run-new/dev-1", "branch"), "active", "a live run's namespace was dropped");
+  // the boundary holds on disk too: byte-identical, not merely present
+  assert.ok(existsSync(liveDir), "the live run's directory disappeared");
+  assert.deepEqual(dirSnapshot(liveDir), liveSnapshot, "the live run's working state was modified by the prune");
   assert.equal(
     factStatus(dbPath, `supervisor:${skippedId}`, "focus"),
     "active",
