@@ -1136,6 +1136,47 @@ test("a --recorded-at that Date.parse accepts but ISO does not is refused", () =
   assert.match(out.error, /--recorded-at/);
 });
 
+test("a calendar-overflow --recorded-at is refused, not rolled over to a date the operator never typed", () => {
+  // Round 2: Date.parse("2026-02-30T00:00:00Z") is 2026-03-02 — a backfill
+  // storing that WHEN would reorder the signal inputs by a stamp nobody
+  // typed. Every rollover case refuses; the message names the typed date.
+  for (const stamp of ["2026-02-30T00:00:00Z", "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z"]) {
+    const s = scenario();
+    advance(s, "attempt.txt");
+    const out = deliveryRecord(s, [
+      "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+      "--recorded-at", stamp, "--backfill",
+    ]);
+    assert.equal(out.ok, false, `${stamp} was accepted`);
+    assert.match(out.error, new RegExp(`--recorded-at "${stamp}" is not a real calendar date`));
+  }
+});
+
+test("a --recorded-at offset is bounded to ISO 8601 (±14:00), a real offset still records", () => {
+  // Round 2 nit 1: [+-]\d{2}:\d{2} read +99:99. Bounded to ±14:00 per ISO.
+  const refused = (() => {
+    const s = scenario();
+    advance(s, "attempt.txt");
+    return deliveryRecord(s, [
+      "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+      "--recorded-at", "2026-11-01T10:00:00+99:99", "--backfill",
+    ]);
+  })();
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /--recorded-at "2026-11-01T10:00:00\+99:99" is not an ISO timestamp/);
+
+  // A +14:00 stamp legitimately shifts the UTC instant (23:30+14:00 is
+  // 09:30Z) — the record keeps the parsed instant, not the typed wall clock.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-01T23:30:00+14:00", "--backfill",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.recordedAt, "2026-11-01T09:30:00.000Z");
+});
+
 // ── 6. the two stall conditions stay distinct ────────────────────────────────
 console.log("\ndwa warunki zastoju, osobno raportowane");
 

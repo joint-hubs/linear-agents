@@ -99,7 +99,8 @@ const SEVERITIES = ["issue", "todo", "nit", "question", "praise"];
 
 // Strict ISO 8601 for a backfilled record's `--recorded-at`: calendar date, T,
 // time, optional fraction, Z or an explicit offset. Nothing locale-shaped.
-const RE_ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+// The offset is bounded to ISO 8601's ±14:00 — `+99:99` is not a timezone.
+const RE_ISO_STAMP = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-](?:0\d|1[0-4]):[0-5]\d)$/;
 
 // The closed set a delivery verdict's `--reason` comes from (FOC-1169). The
 // reason IS the label: `ci` feeds ciRedAfterReady, the rest categorize why a
@@ -902,10 +903,23 @@ function cmdRecordDelivery(args) {
     // Strict ISO: Date.parse is a locale-tolerant reader ("11/01/2026" parses),
     // and a backdated record whose when depends on the recorder's locale is not
     // a baseline anyone can reproduce. The shape is ISO 8601 only.
-    if (!RE_ISO_STAMP.test(String(recordedAtArg)) || Number.isNaN(Date.parse(String(recordedAtArg)))) {
+    // And a real calendar check: Date.parse ROLLS OVER an impossible date
+    // (2026-02-30 parses as 2026-03-02), so the record would carry a WHEN the
+    // operator never typed. The typed date components are validated directly
+    // against the calendar — the date as typed, offset-independent: a
+    // +14:00 stamp legitimately shifts the UTC instant (23:30+14:00 is
+    // 09:30Z), so the parsed UTC datetime is NOT the comparison target.
+    const isoMatch = RE_ISO_STAMP.exec(String(recordedAtArg));
+    const ms = isoMatch ? Date.parse(String(recordedAtArg)) : NaN;
+    if (!isoMatch || Number.isNaN(ms)) {
       failJson(`--recorded-at "${recordedAtArg}" is not an ISO timestamp (expected e.g. 2026-11-01T10:00:00.000Z)`);
     }
-    recordedAt = new Date(Date.parse(String(recordedAtArg))).toISOString();
+    const [y, mo, d] = [Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3])];
+    const asUTC = new Date(Date.UTC(y, mo - 1, d));
+    if (asUTC.getUTCFullYear() !== y || asUTC.getUTCMonth() !== mo - 1 || asUTC.getUTCDate() !== d) {
+      failJson(`--recorded-at "${recordedAtArg}" is not a real calendar date (${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")} does not exist)`);
+    }
+    recordedAt = new Date(ms).toISOString();
   }
 
   // reason: required for fail, optional for pass, always from the closed set.
