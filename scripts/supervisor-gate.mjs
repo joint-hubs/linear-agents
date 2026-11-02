@@ -5,7 +5,7 @@
 //                                           [--decision-event <eventId> ...] [--decision-run <runId> ...]
 //                                           [--child <id>] [--run <id>]
 //   node scripts/supervisor-gate.mjs answer --gate <gateId> --text "..." [--note "..."] [--run <id>]
-//   node scripts/supervisor-gate.mjs answer --hold <holdId> --text "..." [--note "..."] [--run <id>]
+//   node scripts/supervisor-gate.mjs answer --hold <holdId> --text "..." [--note "..."] [--optionLabel "<label>"] [--run <id>]
 //   node scripts/supervisor-gate.mjs hold   --origin <who|what> --question "..." --recommendation "..."
 //                                           --option '<json>' [--option ...] [--impact high|medium|low]
 //                                           [--resolution <action>] [--run <id>]
@@ -155,7 +155,8 @@ function parseFacts(raw) {
 // leave the run dir — so the rules are lifted out of the CLI commands into the
 // exported answerGate/answerHold below (answer section) and the CLI calls them
 // instead of the other way round. Errors throw with a `code` ("bad-id" |
-// "not-found" | "already-answered" | "invalid-answer" | "unreadable") and carry
+// "not-found" | "already-answered" | "invalid-answer" | "unreadable" |
+// "store-write") and carry
 // the CLI's failJson extras on `extras`, so a CLI refusal is the same throw
 // rendered through failJson: one set of rules, two renderings, no drift.
 
@@ -371,12 +372,20 @@ function parseOption(raw) {
     // refuses a hold whose options are all UNKNOWN).
     unpricedModel = parsed.model;
   }
-  // FOC-1109: a needsText flag on an --option JSON is silently dropped here —
-  // the CLI-created hold would not carry it and answerHold would not enforce
-  // the bare-label refusal for it. Documented limitation, deliberately not
-  // extended: no CLI-created hold currently needs text; extend this return
-  // shape if one ever does.
-  return { label: parsed.label, model: parsed.model, costUsd, ...(unpricedModel ? { unpricedModel } : {}) };
+  // FOC-1151: a needsText flag is carried when it is exactly true, so a
+  // CLI-created hold "asks for text" just like a server-created one and
+  // answerHold enforces the bare-label refusal for it (FOC-1109 documented
+  // this as a limitation; it is lifted here). Any other value — false,
+  // absent, or a truthy non-boolean like "yes" — is dropped: the flag is
+  // boolean, and a string "false" or "yes" must not smuggle a half-flag past
+  // the answer rules. validateHoldStore ignores the field either way.
+  return {
+    label: parsed.label,
+    model: parsed.model,
+    costUsd,
+    ...(unpricedModel ? { unpricedModel } : {}),
+    ...(parsed.needsText === true ? { needsText: true } : {}),
+  };
 }
 
 // ── hold rendering (FOC-612) ─────────────────────────────────────────────────
@@ -688,6 +697,21 @@ export function answerHold({ runId, holdId, text, note = null, answeredBy = null
       );
     }
 
+    // FOC-1151: an optionLabel, when given, must name one of the hold's OWN
+    // options — the Cockpit sends the label of the option the answer came
+    // from, so a label that matches nothing is a bug on the sending side, not
+    // a value to record. The match scans EVERY option (needsText or not);
+    // null passes untouched (the CLI and older callers send nothing). The
+    // refusal order is unchanged: not-found → already-answered → label
+    // checks (invalid-answer/400).
+    if (optionLabel !== null && !(hold.options ?? []).some((o) => o && o.label === optionLabel)) {
+      throw answerError(
+        "invalid-answer",
+        `optionLabel ${JSON.stringify(optionLabel)} is not one of this hold's options ` +
+          `(${(hold.options ?? []).map((o) => o?.label).filter(Boolean).join(" | ")})`,
+      );
+    }
+
     // FOC-1109: an option marked needsText must never be answered with its own
     // bare label — that is exactly the payload the old one-click submit
     // produced, and applyHoldAnswers silently drops lines without "=", so the
@@ -714,12 +738,17 @@ export function answerHold({ runId, holdId, text, note = null, answeredBy = null
       answeredAt: at,
     };
     // An answer is a new history entry, never an overwrite — the file read back
-    // after this shows created AND answered, in order. (A throw here is the store
-    // validation refusing; surfaced with the CLI's message, never a stack.)
+    // after this shows created AND answered, in order. (A throw here is a
+    // SERVER fault: the record was valid, owned and checked above, so what is
+    // left is the fs write failing — surfaced with the CLI's message, never a
+    // stack.)
     try {
       return patchHold(runId, holdId, { state: "answered", answer }, { event: "answered", at, text });
     } catch (err) {
-      throw answerError("invalid-answer", `hold ${holdId} could not be updated: ${err.message}`);
+      // FOC-1151: a failed store write is not a client mistake — rewrapping it
+      // as "invalid-answer" made the Cockpit report 400 for a 500-shaped
+      // failure. "store-write" maps to 500 (answerErrorStatus).
+      throw answerError("store-write", `hold ${holdId} could not be recorded — the holds store write failed: ${err.message}`);
     }
   }, lockWaitMs);
 }
@@ -745,9 +774,12 @@ function cmdAnswer(args) {
   if (args.hold && args.hold !== true) {
     const text = requireText(args.text, "text");
     const note = args.note && args.note !== true ? String(args.note) : null;
+    // FOC-1151: --optionLabel names the chosen option — the same field the
+    // Cockpit sends; answerHold validates it against the hold's own options.
+    const optionLabel = args.optionLabel && args.optionLabel !== true ? String(args.optionLabel) : null;
     let hold;
     try {
-      hold = answerHold({ runId, holdId: args.hold, text, note });
+      hold = answerHold({ runId, holdId: args.hold, text, note, optionLabel });
     } catch (err) {
       failFromThrow(err);
     }
