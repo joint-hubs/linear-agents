@@ -734,7 +734,18 @@ function checkOutputRef(ref, flag, index, runId, worktree) {
     });
   }
   const roots = [join(runDir(runId), "scratch"), worktree].filter(Boolean).map((r) => resolve(r));
-  const inside = roots.some((root) => found === root || found.startsWith(root + sep));
+  // Containment is a STRING compare, and win32 paths are case-insensitive while
+  // this string is not: a citation typed with a different drive-letter casing
+  // resolved fine on the filesystem and was then refused as outside-run
+  // although the file sat exactly where it should (review round 1, probe P15).
+  // Fold BOTH sides for the containment test only — posix paths are
+  // case-sensitive, so the fold must never run there.
+  const fold = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const inside = roots.some((root) => {
+    const r = fold(root);
+    const f = fold(found);
+    return f === r || f.startsWith(r + sep);
+  });
   if (!inside) {
     failJson(
       `evidence-outputRef-outside-run: ${flag} #${index + 1} outputRef sits outside the run's ` +
@@ -999,6 +1010,15 @@ function cmdRecordDelivery(args) {
   // delivered tree, not the issue's criteria list.
   if (args.ac) {
     failJson("--ac is not used in --delivery mode — an AC-by-AC mapping is a REVIEW approve requirement");
+  }
+  // The evidence flags are REVIEW-pass requirements (FOC-1170); silently
+  // accepting them here would be the exact silent-accept class this tool
+  // exists to kill, one layer over. Refused by name, like --child/--ac above.
+  if (args.ran) {
+    failJson("--ran is not used in --delivery mode — an evidence run is a REVIEW pass requirement");
+  }
+  if (args["red-first"]) {
+    failJson("--red-first is not used in --delivery mode — a red-first claim is a REVIEW pass requirement");
   }
 
   const verdict = args.verdict;

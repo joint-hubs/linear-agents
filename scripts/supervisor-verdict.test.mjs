@@ -386,6 +386,28 @@ test("a --ran given as a path relative to the reviewer's worktree resolves", () 
   assert.equal(out.ran[0].outputRef, join(s.reviewTree, "test-output.txt"));
 });
 
+test("an outputRef whose path casing differs from the root is still contained (win32)", () => {
+  // The containment compare used to be case-sensitive: a citation typed with a
+  // lowercase drive letter (`c:/users/...`) resolved fine on the
+  // case-insensitive win32 filesystem but was refused as outside-run although
+  // the file sat inside the reviewer's worktree (review round 1, probe P15).
+  // Case-folding is a win32 property — posix paths ARE case-sensitive, so on
+  // other platforms this scenario does not exist and the test steps aside.
+  if (process.platform !== "win32") return;
+  const s = scenario();
+  const path = join(s.reviewTree, "cased-output.txt");
+  writeFileSync(path, "same file, typed differently\n", "utf8");
+  const lowered = path.replace(/^([A-Za-z]):/, (m, d) => `${d.toLowerCase()}:`);
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/lint.mjs", exit: 0, outputRef: lowered }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran[0].outputRef, lowered);
+});
+
 test("--red-first with equal exits is refused (red-first-not-red)", () => {
   const s = scenario();
   const out = record(s, [
@@ -1151,6 +1173,25 @@ test("a delivery pass needs no reason and no AC mapping", () => {
   assert.equal(out.reason, null);
   assert.deepEqual(out.acMapping, []);
   assert.deepEqual(out.findings, []);
+  assert.equal(out.ran, undefined, "no ran key without the flag — the delivery record shape stays as it was");
+});
+
+test("--ran is refused in --delivery mode — an evidence run is a REVIEW pass requirement", () => {
+  // FOC-1170 round 1: the evidence flags parsed and VANISHED in delivery mode —
+  // the exact silent-accept class this ticket exists to kill, one layer over.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass", "--ran", ranFlag(s, "delivery-evidence.txt")]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--ran is not used in --delivery mode/);
+});
+
+test("--red-first is refused in --delivery mode", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass", "--red-first", redFirstFlag(s, "delivery-red-first.txt")]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--red-first is not used in --delivery mode/);
 });
 
 test("--recorded-at without --backfill is refused", () => {
