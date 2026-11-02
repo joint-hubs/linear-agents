@@ -2209,6 +2209,72 @@ export function isReparsePoint(st, dirent = null) {
   return process.platform === "win32" && Boolean(dirent?.isSymbolicLink());
 }
 
+// FOC-1156 review r2: path comparison for the stale-reinstall vouch — the same
+// normalization workspace-claims applies internally (forward slashes, no
+// trailing slash, case-folded on win32), repeated here because that helper is
+// private to a module this decision must not grow a hard dependency on.
+// `git worktree list` prints forward slashes on win32 while path.join produces
+// backslashes, so the raw strings never compare equal.
+const normWorktreePath = (p) => {
+  const s = String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? s.toLowerCase() : s;
+};
+
+/**
+ * May the marker-less node_modules in this worktree be removed and reinstalled?
+ *
+ * FOC-1156 review r2: the round-1 `created` gate made the feature dead in
+ * production — a fresh worktree never carries a node_modules (nothing to
+ * reinstall), and the real stale shape is the REUSED tree whose previous
+ * install timed out. The reuse path, however, is found by branch name with no
+ * containment check, so a reused tree's vouch must be earned twice over:
+ *
+ * - containment — the resolved path is strictly inside the workspace worktree
+ *   root (`la-wt/<repo>/`), anchored — as claimWorkspace anchors — on the
+ *   repo's MAIN worktree, because a caller's gitRoot can itself be a linked
+ *   worktree. The main checkout and anything outside the root fail the
+ *   strictly-under test.
+ * - ownership — the tree's workspace claim (the claims registry
+ *   withOwnership/claimWorkspace write) belongs to THIS caller's owner id. An
+ *   unclaimed tree, or one another run still holds, is not ours to delete.
+ *
+ * `why` names the refusal so the skip reason can say out loud which check
+ * kept the tree. Anything unproven keeps the old skip (default deny).
+ */
+function staleReinstallDecision({ worktree, created, gitRoot, ownerId }) {
+  if (created) return { allowed: true, why: "created by this ensure" };
+  if (!gitRoot || !ownerId) {
+    return { allowed: false, why: "no vouching context (gitRoot/ownerId) was provided for this call" };
+  }
+  let root = null;
+  try {
+    // The FIRST `worktree list` entry is the main checkout — the same anchor
+    // claimWorkspace derives, and the only one that survives a caller whose
+    // gitRoot is itself a linked worktree.
+    const mainPath = listWorktrees(gitRoot)[0]?.path;
+    if (mainPath) root = normWorktreePath(resolve(worktreeRoot(mainPath)));
+  } catch {
+    root = null; // unprovable — deny
+  }
+  const wt = normWorktreePath(resolve(worktree));
+  if (!root || wt === root || !wt.startsWith(`${root}/`)) {
+    return { allowed: false, why: "the path is not strictly inside the workspace worktree root" };
+  }
+  let claim = null;
+  try {
+    claim = readWorkspaceClaims({ gitRoot }).claims.find((c) => normWorktreePath(c.worktree) === wt) ?? null;
+  } catch {
+    claim = null; // unreadable registry — deny
+  }
+  if (!claim) {
+    return { allowed: false, why: "the reused tree carries no workspace claim for this caller" };
+  }
+  if (claim.ownerId !== ownerId) {
+    return { allowed: false, why: `the workspace claim belongs to owner "${claim.ownerId}", not this caller` };
+  }
+  return { allowed: true, why: "reused tree contained in the workspace root and claimed by this owner" };
+}
+
 /**
  * One install location (root or ui/). Tolerant by design: a directory without a
  * package.json is skipped, not an error — not every tree a child works in has
@@ -2221,7 +2287,7 @@ export function isReparsePoint(st, dirent = null) {
  * catches the tags lstat resolves away (nit 4) — is unlinked AS A LINK, never
  * its target's content, and the install runs fresh into a real directory.
  */
-async function installDepsAt(dir, location, { created = false } = {}) {
+async function installDepsAt(dir, location, { staleReinstall = null } = {}) {
   const record = { location, path: dir };
   if (!existsSync(join(dir, "package.json"))) {
     return { ...record, skipped: true, reason: "no package.json" };
@@ -2247,21 +2313,24 @@ async function installDepsAt(dir, location, { created = false } = {}) {
     if (existsSync(join(nm, INSTALL_OK_MARKER))) {
       return { ...record, skipped: true, reason: "node_modules present with completion marker" };
     }
-    if (!created) {
-      // FOC-1156 review r1: a marker-less tree at a path this ensure did NOT
-      // create is not ours to delete. The reuse path matches any registered
-      // worktree by branch name with no containment check, so the path can be
-      // the main checkout or a foreign worktree — recursive deletion there was
-      // the FOC-1147/1153 failure family. Old behavior stands: skip.
+    if (!staleReinstall?.allowed) {
+      // FOC-1156 review r2: a marker-less tree on an unvouched path is not
+      // ours to delete — the reuse path matches any registered worktree by
+      // branch name with no containment check, so the path can be the main
+      // checkout or a foreign worktree, and recursive deletion there was the
+      // FOC-1147/1153 failure family. The vouch (created, or a reused tree
+      // contained in the workspace root AND claimed by this owner) is decided
+      // once per worktree; the skip reason names which check refused.
       return {
         ...record,
         skipped: true,
-        reason: "node_modules present without completion marker — kept: the path was not created by this ensure",
+        reason: `node_modules present without completion marker — kept: ${staleReinstall?.why ?? "no vouching context (gitRoot/ownerId) was provided for this call"}`,
       };
     }
-    // FOC-1156: created by this ensure and marker-less — the residue of a
-    // failed or timed-out install, which the old presence check skipped
-    // forever. It falls through: removed below, installed fresh.
+    // FOC-1156: a vouched marker-less tree — created by this ensure, or a
+    // reused one the vouch covers — is the residue of a failed or timed-out
+    // install, which the old presence check skipped forever. It falls
+    // through: removed below, installed fresh.
   }
   if (st) {
     try {
@@ -2406,18 +2475,24 @@ function runBoundedInstall(dir, command, args) {
  *
  * A timed-out or failed install leaves a node_modules behind WITHOUT the
  * completion marker (node_modules/.fenix-install-ok, FOC-1156), so the next
- * ensure no longer skips it as "already present": on a worktree the ensure
- * CREATED the residue is removed and installed fresh. On a REUSED path the
- * old skip stands — see `created` below.
+ * ensure no longer skips it as "already present": the residue is removed and
+ * installed fresh when the caller vouches for the tree — the ensure CREATED
+ * it, or the reused tree is contained in the workspace worktree root AND
+ * claimed by this caller's owner id (FOC-1156 review r2: a `created`-only
+ * gate made the feature dead in production, since a fresh worktree never
+ * carries a node_modules and the stale shape is precisely the reused tree).
+ * Every other path keeps the old skip-on-presence behavior, with a reason
+ * naming the cause — see the options below.
  *
  * @param {string} worktree absolute path to provision
- * @param {{ created?: boolean }} [options] FOC-1156 review r1: the
- *   stale-reinstall recursively DELETES a node_modules, so it runs only when
- *   the caller vouches this is a worktree its ensureWorktree call CREATED.
- *   The reuse path matches any registered worktree by branch name with no
- *   containment check, so an unvouched path (the main checkout on a colliding
- *   branch, a foreign worktree) keeps the old skip-on-presence behavior.
- *   Default false: a caller that cannot vouch gets the safe skip.
+ * @param {{ created?: boolean, gitRoot?: string|null, ownerId?: string|null }} [options]
+ *   FOC-1156 review r2: the stale-reinstall recursively DELETES a
+ *   node_modules, so it runs only on a vouched tree. `created` vouches
+ *   directly; a reused tree is vouched by gitRoot and ownerId TOGETHER —
+ *   containment against the workspace worktree root (anchored on the repo's
+ *   main worktree), ownership against the claims registry. Without both, or
+ *   on any refused check, the tree is kept and the skip reason names why.
+ *   Default deny.
  * @returns {Promise<{ worktree: string, ok: boolean, locations: object[] }>}
  */
 /**
@@ -2441,7 +2516,7 @@ function rootWorkspacesCover(root) {
   return Array.isArray(ws) ? ws.length > 0 : Boolean(ws);
 }
 
-export async function installWorktreeDeps(worktree, { created = false } = {}) {
+export async function installWorktreeDeps(worktree, { created = false, gitRoot = null, ownerId = null } = {}) {
   // r2 N8: the two locations are independent trees, so the installs run
   // concurrently — worst-case spawn block halves. Failure attribution is
   // unchanged: each installDepsAt call owns its record and its own try/catch,
@@ -2453,6 +2528,10 @@ export async function installWorktreeDeps(worktree, { created = false } = {}) {
   // independent — the root one writes ui/node_modules. There the ui/ install
   // is skipped (the root install already covers it) and the record carries the
   // skip with its reason, so the report stays complete.
+  // FOC-1156 review r2: the vouch is decided ONCE for both locations — they
+  // share one worktree path, so containment and ownership cannot differ
+  // between them.
+  const staleReinstall = staleReinstallDecision({ worktree, created, gitRoot, ownerId });
   const uiJob = rootWorkspacesCover(worktree)
     ? Promise.resolve({
         location: "ui",
@@ -2460,8 +2539,8 @@ export async function installWorktreeDeps(worktree, { created = false } = {}) {
         skipped: true,
         reason: "root package.json declares workspaces — the root install covers ui/",
       })
-    : installDepsAt(join(worktree, "ui"), "ui", { created });
-  const locations = await Promise.all([installDepsAt(worktree, "root", { created }), uiJob]);
+    : installDepsAt(join(worktree, "ui"), "ui", { staleReinstall });
+  const locations = await Promise.all([installDepsAt(worktree, "root", { staleReinstall }), uiJob]);
   return {
     worktree,
     ok: locations.every((l) => l.skipped || l.ok),

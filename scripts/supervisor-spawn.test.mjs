@@ -645,27 +645,140 @@ testAsync("a pre-existing node_modules WITHOUT the marker is stale — removed a
   if (dep.status !== 0) fail("fake-dep does not resolve after the reinstall");
 });
 
-// FOC-1156 review r1: the ensure REUSE path matches ANY registered worktree by
+// FOC-1156 review r2: the ensure REUSE path matches ANY registered worktree by
 // branch name with no containment check (ensureWorktreeCore's
 // listWorktrees().find), so the path installWorktreeDeps receives can be the
 // main checkout or a foreign worktree. Stale removal recursively DELETES a
-// real tree, so it is gated on `created`: only a worktree this very ensure
-// created may be stale-reinstalled. A reused path gets the old
-// skip-on-presence behavior — where old code skipped, the new code must skip.
-testAsync("a marker-less node_modules at a REUSED worktree (created:false) is kept, not removed (FOC-1156 review r1)", async () => {
-  const dir = r1Fixture();
-  mkdirSync(join(dir, "node_modules"));
-  writeFileSync(join(dir, "node_modules", "sentinel.txt"), "keep\n");
-  const out = await installWorktreeDeps(dir, { created: false });
+// real tree, so it runs on a VOUCHED tree only: the ensure created it, or the
+// reused path is contained in the workspace worktree root AND claimed by this
+// caller's owner id. In production an uncontained reused path never reaches
+// the install — withOwnership's claimWorkspace refuses to claim it — so these
+// two keep-cases drive installWorktreeDeps directly, the only way to put such
+// a path in front of the decision; the gate is defense in depth for direct
+// callers. This test is the round-1 "reused (created:false) is kept" test,
+// adjusted to the r2 rule: same tree-kept assertions, now with the reason
+// required to name the containment refusal.
+testAsync("a marker-less node_modules at a reused path OUTSIDE the workspace worktree root is kept — the reason names the containment refusal (FOC-1156 review r2)", async () => {
+  const { repo } = fixtureRepo();
+  // The colliding-main-checkout shape: the main checkout stands on the very
+  // branch a spawn would name. Its path sits NEXT TO la-wt/repo, never inside.
+  execFileSync("git", ["checkout", "-b", "collide"], { cwd: repo, stdio: "ignore" });
+  writeFileSync(join(repo, "package.json"), JSON.stringify(DEPS_FIXTURE_PKG));
+  writeFileSync(join(repo, "package-lock.json"), JSON.stringify(DEPS_FIXTURE_LOCK));
+  mkdirSync(join(repo, "node_modules"));
+  writeFileSync(join(repo, "node_modules", "sentinel.txt"), "keep\n");
+
+  const out = await installWorktreeDeps(repo, { created: false, gitRoot: repo, ownerId: "test:r2" });
   const root = (out.locations ?? []).find((l) => l.location === "root");
-  if (!root || root.skipped !== true) fail(`the reused path's tree must not be touched: ${JSON.stringify(root)}`);
+  if (!root || root.skipped !== true) fail(`the uncontained path's tree must not be touched: ${JSON.stringify(root)}`);
+  if (!/kept: the path is not strictly inside the workspace worktree root/.test(root.reason ?? "")) {
+    fail(`the skip reason must name the containment refusal: ${JSON.stringify(root)}`);
+  }
   if (out.ok !== true) fail(`a kept tree must not fail the run: ${JSON.stringify(out)}`);
   if (root.removedStale !== undefined) {
     fail(`a kept tree must not be reported as removed: ${JSON.stringify(root)}`);
   }
-  if (!existsSync(join(dir, "node_modules", "sentinel.txt"))) {
-    fail("the marker-less tree at a reused path was removed — outside the ensure-created gate");
+  if (!existsSync(join(repo, "node_modules", "sentinel.txt"))) {
+    fail("the marker-less tree outside the workspace worktree root was removed");
   }
+});
+
+// The other keep-case: a contained, but FOREIGN-claimed, reused tree. The
+// claim is planted through the real plumbing — ensureWorktree with another
+// run's owner id, which stamps the claim via withOwnership/claimWorkspace —
+// not by hand-writing the claims file.
+testAsync("a marker-less node_modules at a reused worktree claimed by ANOTHER owner is kept — the reason names the foreign claim (FOC-1156 review r2)", async () => {
+  const { repo } = fixtureRepo();
+  writeFileSync(join(repo, "package.json"), JSON.stringify(DEPS_FIXTURE_PKG));
+  writeFileSync(join(repo, "package-lock.json"), JSON.stringify(DEPS_FIXTURE_LOCK));
+  execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "manifests for the offline install fixture"], { cwd: repo, stdio: "ignore" });
+  const theirs = ensureWorktree(repo, "claimed-branch", null, { ownerId: "run-other:child-1" });
+  mkdirSync(join(theirs.worktree, "node_modules"));
+  writeFileSync(join(theirs.worktree, "node_modules", "sentinel.txt"), "keep\n");
+
+  const out = await installWorktreeDeps(theirs.worktree, {
+    created: false,
+    gitRoot: repo,
+    ownerId: "run-mine:child-1",
+  });
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped !== true) fail(`a foreign-claimed tree must not be touched: ${JSON.stringify(root)}`);
+  if (!/kept: the workspace claim belongs to owner "run-other:child-1"/.test(root.reason ?? "")) {
+    fail(`the skip reason must name the foreign claim: ${JSON.stringify(root)}`);
+  }
+  if (out.ok !== true) fail(`a kept tree must not fail the run: ${JSON.stringify(out)}`);
+  if (root.removedStale !== undefined) {
+    fail(`a kept tree must not be reported as removed: ${JSON.stringify(root)}`);
+  }
+  if (!existsSync(join(theirs.worktree, "node_modules", "sentinel.txt"))) {
+    fail("the marker-less tree under a foreign claim was removed");
+  }
+});
+
+// THE REAL PATH (FOC-1156 review r2): a fresh worktree never carries a
+// node_modules, so `created:true` alone made the stale reinstall dead in
+// production. The stale shape is the REUSED tree whose previous install timed
+// out: ensure (create) → install times out via the test seam → second ensure
+// (reuse, created:false) → the marker-less residue is removed and installed
+// fresh. End to end through ensureWorktree, with the spawn call site's exact
+// threading (created + gitRoot + owner id).
+testAsync("a timed-out install on a CREATED worktree, then a REUSED ensure — the stale tree is reinstalled (FOC-1156 review r2)", async () => {
+  const { repo } = fixtureRepo();
+  // Committed so the created worktree checks them out — the install needs
+  // manifests, and the reuse path does not re-copy the working tree. The
+  // committed preinstall HANGS: the first install must die at the seam
+  // timeout, not race it (the healthy fixture installs in under a second).
+  writeFileSync(join(repo, "package.json"), JSON.stringify({
+    ...DEPS_FIXTURE_PKG,
+    scripts: { preinstall: `node -e "setTimeout(function(){},600000)"` },
+  }));
+  writeFileSync(join(repo, "package-lock.json"), JSON.stringify(DEPS_FIXTURE_LOCK));
+  execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "hanging manifest for the offline install fixture"], { cwd: repo, stdio: "ignore" });
+  const first = ensureWorktree(repo, "stale-e2e", null, { ownerId: "run-a:child-1" });
+  if (first.created !== true) fail(`the first ensure must CREATE the worktree: ${JSON.stringify(first)}`);
+
+  const prevTimeout = process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+  process.env.LA_DEPS_INSTALL_TIMEOUT_MS = "8000";
+  try {
+    const botched = await installWorktreeDeps(first.worktree, { created: true });
+    const botchedRoot = (botched.locations ?? []).find((l) => l.location === "root");
+    if (!botchedRoot || botchedRoot.skipped) fail(`the first install did not run: ${JSON.stringify(botchedRoot)}`);
+    if (botchedRoot.timedOut !== true) fail(`the first install did not time out: ${JSON.stringify(botchedRoot)}`);
+    if (existsSync(join(first.worktree, "node_modules", ".fenix-install-ok"))) {
+      fail("the marker must not be written by a timed-out install");
+    }
+    // Deterministic residue: some timed-out runs die before npm materializes
+    // node_modules at all (the killed run's shape is nondeterministic).
+    if (!existsSync(join(first.worktree, "node_modules"))) {
+      mkdirSync(join(first.worktree, "node_modules", "fake-dep"), { recursive: true });
+      writeFileSync(join(first.worktree, "node_modules", "fake-dep", "index.js"), "module.exports=1;");
+    }
+  } finally {
+    if (prevTimeout === undefined) delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+    else process.env.LA_DEPS_INSTALL_TIMEOUT_MS = prevTimeout;
+  }
+  // The hung preinstall's manifest is replaced with the healthy fixture — the
+  // residue, not the manifest, is what this test chases.
+  writeFileSync(join(first.worktree, "package.json"), JSON.stringify(DEPS_FIXTURE_PKG));
+
+  const second = ensureWorktree(repo, "stale-e2e", null, { ownerId: "run-a:child-1" });
+  if (second.created !== false) fail(`the second ensure must REUSE the tree: ${JSON.stringify(second)}`);
+  const out = await installWorktreeDeps(second.worktree, {
+    created: second.created,
+    gitRoot: repo,
+    ownerId: second.owner,
+  });
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped) fail(`the stale tree was skipped as already present on the reused path: ${JSON.stringify(root)}`);
+  if (root.removedStale !== true) fail(`the stale removal was not reported: ${JSON.stringify(root)}`);
+  if (root.ok !== true) fail(`the reinstall over the stale tree failed: ${JSON.stringify(root)}`);
+  if (!existsSync(join(second.worktree, "node_modules", ".fenix-install-ok"))) {
+    fail("the successful reinstall did not stamp the completion marker");
+  }
+  const dep = spawnSync(process.execPath, ["-e", "process.exit(require('fake-dep') === 42 ? 0 : 1)"], { cwd: second.worktree });
+  if (dep.status !== 0) fail("fake-dep does not resolve after the reinstall");
 });
 
 testAsync("a timed-out install leaves no marker — the next ensure reinstalls the stale tree (FOC-1156)", async () => {
