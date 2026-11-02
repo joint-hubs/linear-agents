@@ -121,6 +121,15 @@ writeFileSync(promptFile, "kickoff", "utf8");
 
 const runId = "test-watch-grandchild-reap";
 const EXIT_KEY = `exit:dev-1:0`;
+// The teardown mark, carried the way production carries it (FOC-808, slice B):
+// the SAME value as `LA_CHILD_MARK` on the watcher env and `mark` on the
+// registry entry — supervisor-spawn.mjs sets both from childTeardownIdentity.
+// The mark rides the spawn chain into the grandchild's environ (watcher →
+// claude → detached grandchild), so the FOC-808 env-mark sweep owns it on
+// POSIX; on win32 the FOC-1162 descendant reap owns it. Without the mark the
+// sweep gate sees `mark: null` and silently skips — production never produces
+// that shape.
+const CHILD_MARK = `${runId}/dev-1/dev-1:turn:0`;
 
 ensureRunDir(runId);
 writeRegistry(runId, {
@@ -131,6 +140,7 @@ writeRegistry(runId, {
       squad: "dev",
       taskId: "FOC-1162",
       status: "starting",
+      mark: CHILD_MARK,
       sessionId: null,
       costUsd: 0,
       turns: [],
@@ -155,6 +165,7 @@ const spawnWatcher = () =>
         FENIX_CHILD_ISOLATION: "",
         LA_SUPERVISOR_STATE_HOME: stateHome,
         LA_SQUAD_HOME: squadHome,
+        LA_CHILD_MARK: CHILD_MARK,
         CLAUDE_CONFIG_DIR: configDir,
         LA_SUPERVISOR_NO_TELEMETRY: "1",
         LA_SUPERVISOR_NO_CODEGRAPH: "1",
