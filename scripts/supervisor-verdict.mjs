@@ -99,8 +99,10 @@ const SEVERITIES = ["issue", "todo", "nit", "question", "praise"];
 
 // Strict ISO 8601 for a backfilled record's `--recorded-at`: calendar date, T,
 // time, optional fraction, Z or an explicit offset. Nothing locale-shaped.
-// The offset is bounded to ISO 8601's ±14:00 — `+99:99` is not a timezone.
-const RE_ISO_STAMP = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-](?:0\d|1[0-4]):[0-5]\d)$/;
+// The offset is bounded to ISO 8601's max magnitude, ±14:00 EXACTLY — hour 14
+// admits only :00, so neither `+99:99` (not a timezone) nor `+14:01`
+// (beyond the standard) is read as one.
+const RE_ISO_STAMP = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-](?:(?:0\d|1[0-3]):[0-5]\d|14:00))$/;
 
 // The closed set a delivery verdict's `--reason` comes from (FOC-1169). The
 // reason IS the label: `ci` feeds ciRedAfterReady, the rest categorize why a
@@ -906,16 +908,22 @@ function cmdRecordDelivery(args) {
     // And a real calendar check: Date.parse ROLLS OVER an impossible date
     // (2026-02-30 parses as 2026-03-02), so the record would carry a WHEN the
     // operator never typed. The typed date components are validated directly
-    // against the calendar — the date as typed, offset-independent: a
-    // +14:00 stamp legitimately shifts the UTC instant (23:30+14:00 is
-    // 09:30Z), so the parsed UTC datetime is NOT the comparison target.
+    // against the calendar — the date as typed, offset-independent: a typed
+    // local time earlier than the offset magnitude shifts the UTC DATE too
+    // (09:30+14:00 records 2026-10-31, a date that was never typed), so the
+    // parsed UTC datetime is NOT the comparison target.
     const isoMatch = RE_ISO_STAMP.exec(String(recordedAtArg));
     const ms = isoMatch ? Date.parse(String(recordedAtArg)) : NaN;
     if (!isoMatch || Number.isNaN(ms)) {
       failJson(`--recorded-at "${recordedAtArg}" is not an ISO timestamp (expected e.g. 2026-11-01T10:00:00.000Z)`);
     }
     const [y, mo, d] = [Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3])];
-    const asUTC = new Date(Date.UTC(y, mo - 1, d));
+    // Date.UTC maps years 0-99 onto 1900-1999 (Date.UTC(26, 2, 1) is
+    // 1926-03-01), so the anchor year 2000 keeps the mapping away from the
+    // typed year; setUTCFullYear then lands on it exactly, and the round-trip
+    // below holds for every year the shape allows.
+    const asUTC = new Date(Date.UTC(2000, mo - 1, d));
+    asUTC.setUTCFullYear(y);
     if (asUTC.getUTCFullYear() !== y || asUTC.getUTCMonth() !== mo - 1 || asUTC.getUTCDate() !== d) {
       failJson(`--recorded-at "${recordedAtArg}" is not a real calendar date (${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")} does not exist)`);
     }

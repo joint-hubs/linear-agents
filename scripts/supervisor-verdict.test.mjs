@@ -1152,18 +1152,29 @@ test("a calendar-overflow --recorded-at is refused, not rolled over to a date th
   }
 });
 
-test("a --recorded-at offset is bounded to ISO 8601 (±14:00), a real offset still records", () => {
+test("a --recorded-at offset is bounded to ISO 8601 (±14:00 exactly), a real offset still records", () => {
   // Round 2 nit 1: [+-]\d{2}:\d{2} read +99:99. Bounded to ±14:00 per ISO.
-  const refused = (() => {
+  // Round 3: the first bound was ±14:59 — (?:0\d|1[0-4]):[0-5]\d admits
+  // +14:01..+14:59 and Date.parse does not NaN them, so the gate accepted
+  // them end-to-end while every comment claimed ±14:00. Hour 14 admits only
+  // :00 now, and the boundary pins below can actually go red.
+  for (const stamp of [
+    "2026-11-01T10:00:00+99:99",
+    "2026-11-01T10:00:00+14:01",
+    "2026-11-01T10:00:00+14:59",
+  ]) {
     const s = scenario();
     advance(s, "attempt.txt");
-    return deliveryRecord(s, [
+    const refused = deliveryRecord(s, [
       "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
-      "--recorded-at", "2026-11-01T10:00:00+99:99", "--backfill",
+      "--recorded-at", stamp, "--backfill",
     ]);
-  })();
-  assert.equal(refused.ok, false);
-  assert.match(refused.error, /--recorded-at "2026-11-01T10:00:00\+99:99" is not an ISO timestamp/);
+    assert.equal(refused.ok, false, `${stamp} was accepted`);
+    assert.ok(
+      refused.error.includes(`--recorded-at "${stamp}" is not an ISO timestamp`),
+      refused.error,
+    );
+  }
 
   // A +14:00 stamp legitimately shifts the UTC instant (23:30+14:00 is
   // 09:30Z) — the record keeps the parsed instant, not the typed wall clock.
