@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 177 test files before you start; a red file invalidates the walk,
+node scripts/test-all.mjs                       # 215 test files before you start; a red file invalidates the walk,
                                                 # except security-scan.test.mjs — load-sensitive, seen red (13 probe
                                                 # misses) at base e3dea40 too, so its red alone is not a regression signal
 git diff --stat -- agents/orchestrator          # AC-10, see below
