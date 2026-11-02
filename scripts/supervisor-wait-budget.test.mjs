@@ -32,7 +32,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import { pollBaseMs } from "./supervisor-lib.mjs";
+import {
+  DEPS_INSTALL_TIMEOUT_MS,
+  INSTALL_KILL_GRACE_MS,
+  pollBaseMs,
+} from "./supervisor-lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SUPERVISOR_AGENTS_DIR = join(ROOT, "agents", "supervisor");
@@ -60,13 +64,15 @@ function filesUnder(dir, extensions, out = []) {
 // reason. The scan scope and the 120 000 ms bound are untouched.
 //
 // FOC-1156 record correction: the deps install IS awaited — the Supervisor's
-// Bash call waits for it, bounded at 300 s + 10 s, and Claude Code moves an
-// over-time call to the background rather than killing it. The block on the
-// child launch stays; only the old "not an in-turn wait" wording was wrong.
+// Bash call waits for it, bounded at the DEPS_INSTALL_TIMEOUT_MS + kill-grace
+// constants (derived below, not hardcoded), and Claude Code moves an over-time
+// call to the background rather than killing it. The block on the child launch
+// stays; only the old "not an in-turn wait" wording was wrong.
+const DEPS_INSTALL_BOUND = `${DEPS_INSTALL_TIMEOUT_MS / 1000} s + ${INSTALL_KILL_GRACE_MS / 1000} s`;
 const NON_WAIT_TIMEOUTS = new Map([
   [
     "DEPS_INSTALL_TIMEOUT_MS",
-    "subprocess kill-timeout for worktree deps install (FOC-1153); the Supervisor's Bash call waits for it, bounded at 300 s + 10 s kill grace, and Claude Code moves an over-time call to the background rather than killing it (FOC-1156)",
+    `subprocess kill-timeout for worktree deps install (FOC-1153); the Supervisor's Bash call waits for it, bounded at ${DEPS_INSTALL_BOUND} kill grace, and Claude Code moves an over-time call to the background rather than killing it (FOC-1156)`,
   ],
 ]);
 
@@ -150,7 +156,11 @@ describe("FOC-608 AC2 — the >120 s constant allowlist stays minimal (TEST-r1)"
     // it. The reason must say plainly that the wait happens, what bounds it,
     // and why nothing is lost when it runs long.
     const reason = NON_WAIT_TIMEOUTS.get("DEPS_INSTALL_TIMEOUT_MS") ?? "";
-    assert.match(reason, /300 s \+ 10 s/, "the reason must state the install's bound");
+    assert.match(
+      reason,
+      new RegExp(`${DEPS_INSTALL_TIMEOUT_MS / 1000} s \\+ ${INSTALL_KILL_GRACE_MS / 1000} s`),
+      "the reason must state the install's bound (derived from the lib constants)",
+    );
     assert.match(reason, /background/, "the reason must state Claude Code's over-time background-move");
     assert.doesNotMatch(reason, /not an in-turn wait/, "the corrected record must not repeat the inaccurate claim");
   });

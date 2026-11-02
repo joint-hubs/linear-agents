@@ -608,7 +608,9 @@ testAsync("skips the install when a real node_modules is already present WITH th
   const out = await installWorktreeDeps(dir);
   const root = (out.locations ?? []).find((l) => l.location === "root");
   if (!root || root.skipped !== true) fail(`the root install did not skip: ${JSON.stringify(root)}`);
-  if (root.reason !== "node_modules already present") fail(`the skip reason is wrong: ${JSON.stringify(root)}`);
+  if (root.reason !== "node_modules present with completion marker") {
+    fail(`the skip reason is wrong: ${JSON.stringify(root)}`);
+  }
   if (root.replacedObstruction !== undefined) {
     fail(`a real directory must not be reported as a replaced obstruction: ${JSON.stringify(root)}`);
   }
@@ -627,7 +629,8 @@ testAsync("a pre-existing node_modules WITHOUT the marker is stale — removed a
   const dir = r1Fixture();
   mkdirSync(join(dir, "node_modules"));
   writeFileSync(join(dir, "node_modules", "sentinel.txt"), "stale\n");
-  const out = await installWorktreeDeps(dir);
+  // The owned path: this test models the ensure-created worktree shape.
+  const out = await installWorktreeDeps(dir, { created: true });
   const root = (out.locations ?? []).find((l) => l.location === "root");
   if (!root || root.skipped) fail(`the marker-less tree was skipped as already present: ${JSON.stringify(root)}`);
   if (root.removedStale !== true) fail(`the stale removal was not reported: ${JSON.stringify(root)}`);
@@ -642,6 +645,29 @@ testAsync("a pre-existing node_modules WITHOUT the marker is stale — removed a
   if (dep.status !== 0) fail("fake-dep does not resolve after the reinstall");
 });
 
+// FOC-1156 review r1: the ensure REUSE path matches ANY registered worktree by
+// branch name with no containment check (ensureWorktreeCore's
+// listWorktrees().find), so the path installWorktreeDeps receives can be the
+// main checkout or a foreign worktree. Stale removal recursively DELETES a
+// real tree, so it is gated on `created`: only a worktree this very ensure
+// created may be stale-reinstalled. A reused path gets the old
+// skip-on-presence behavior — where old code skipped, the new code must skip.
+testAsync("a marker-less node_modules at a REUSED worktree (created:false) is kept, not removed (FOC-1156 review r1)", async () => {
+  const dir = r1Fixture();
+  mkdirSync(join(dir, "node_modules"));
+  writeFileSync(join(dir, "node_modules", "sentinel.txt"), "keep\n");
+  const out = await installWorktreeDeps(dir, { created: false });
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped !== true) fail(`the reused path's tree must not be touched: ${JSON.stringify(root)}`);
+  if (out.ok !== true) fail(`a kept tree must not fail the run: ${JSON.stringify(out)}`);
+  if (root.removedStale !== undefined) {
+    fail(`a kept tree must not be reported as removed: ${JSON.stringify(root)}`);
+  }
+  if (!existsSync(join(dir, "node_modules", "sentinel.txt"))) {
+    fail("the marker-less tree at a reused path was removed — outside the ensure-created gate");
+  }
+});
+
 testAsync("a timed-out install leaves no marker — the next ensure reinstalls the stale tree (FOC-1156)", async () => {
   // First install: the preinstall hangs, the test-seam timeout fires, and the
   // run must leave node_modules WITHOUT the completion marker — the stale
@@ -649,9 +675,12 @@ testAsync("a timed-out install leaves no marker — the next ensure reinstalls t
   const dir = r1Fixture({
     preinstall: `node -e "setTimeout(function(){},600000)"`,
   });
+  // Nit (review r1): save/restore the seam so a future parallel runner that
+  // set it deliberately is not clobbered by this test.
+  const prevTimeout = process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
   process.env.LA_DEPS_INSTALL_TIMEOUT_MS = "8000";
   try {
-    const first = await installWorktreeDeps(dir);
+    const first = await installWorktreeDeps(dir, { created: true });
     const firstRoot = (first.locations ?? []).find((l) => l.location === "root");
     if (!firstRoot || firstRoot.skipped) fail(`the first install did not run: ${JSON.stringify(firstRoot)}`);
     if (firstRoot.timedOut !== true) fail(`the first install did not time out: ${JSON.stringify(firstRoot)}`);
@@ -667,10 +696,12 @@ testAsync("a timed-out install leaves no marker — the next ensure reinstalls t
     }
     // Second ensure: a healthy install (the fixture's normal offline
     // preinstall) — the marker-less residue must NOT be skipped as "already
-    // present"; it is removed and installed fresh.
-    delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+    // present"; it is removed and installed fresh. Both calls pass
+    // created:true: the owned path this stale-reinstall feature exists for.
+    if (prevTimeout === undefined) delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+    else process.env.LA_DEPS_INSTALL_TIMEOUT_MS = prevTimeout;
     writeFileSync(join(dir, "package.json"), JSON.stringify(DEPS_FIXTURE_PKG));
-    const second = await installWorktreeDeps(dir);
+    const second = await installWorktreeDeps(dir, { created: true });
     const root = (second.locations ?? []).find((l) => l.location === "root");
     if (!root || root.skipped) fail(`the stale tree was skipped as already present: ${JSON.stringify(root)}`);
     if (root.removedStale !== true) fail(`the stale removal was not reported: ${JSON.stringify(root)}`);
@@ -681,7 +712,8 @@ testAsync("a timed-out install leaves no marker — the next ensure reinstalls t
     const dep = spawnSync(process.execPath, ["-e", "process.exit(require('fake-dep') === 42 ? 0 : 1)"], { cwd: dir });
     if (dep.status !== 0) fail("fake-dep does not resolve after the reinstall");
   } finally {
-    delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+    if (prevTimeout === undefined) delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+    else process.env.LA_DEPS_INSTALL_TIMEOUT_MS = prevTimeout;
   }
 });
 

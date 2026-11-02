@@ -2163,7 +2163,10 @@ function withOwnership(gitRoot, result, ownerId) {
 // and Claude Code moves an over-time call to the background rather than
 // killing it, so nothing is lost when the bound is hit. The block on the
 // child launch stays; only the old "not an in-turn wait" wording was wrong.
-const DEPS_INSTALL_TIMEOUT_MS = 300_000;
+// Exported for the wait-budget pin test, which derives the "300 s + 10 s"
+// bound it asserts from these constants instead of hardcoding it (FOC-1156
+// review r1 nit).
+export const DEPS_INSTALL_TIMEOUT_MS = 300_000;
 
 /** Test seam for the production budget above — the r1 orphan test needs a
  * timeout a test can afford. Ignored when unset or not a positive number. */
@@ -2182,7 +2185,8 @@ const INSTALL_OUTPUT_KEEP_BYTES = 1024 * 1024;
 // the shell gets to exit on its own before the install result is resolved
 // anyway. `taskkill /F` lands in milliseconds when it lands at all, so in the
 // normal case `close` wins this race long before the timer fires.
-const INSTALL_KILL_GRACE_MS = 10_000;
+// Exported for the wait-budget pin test — see DEPS_INSTALL_TIMEOUT_MS.
+export const INSTALL_KILL_GRACE_MS = 10_000;
 
 // FOC-1156: stamped inside node_modules only by a COMPLETED install. A partial
 // tree left behind by a failed or timed-out install carries no marker, so the
@@ -2217,7 +2221,7 @@ export function isReparsePoint(st, dirent = null) {
  * catches the tags lstat resolves away (nit 4) — is unlinked AS A LINK, never
  * its target's content, and the install runs fresh into a real directory.
  */
-async function installDepsAt(dir, location) {
+async function installDepsAt(dir, location, { created = false } = {}) {
   const record = { location, path: dir };
   if (!existsSync(join(dir, "package.json"))) {
     return { ...record, skipped: true, reason: "no package.json" };
@@ -2241,11 +2245,23 @@ async function installDepsAt(dir, location) {
   }
   if (st && !isReparsePoint(st, dirent) && st.isDirectory()) {
     if (existsSync(join(nm, INSTALL_OK_MARKER))) {
-      return { ...record, skipped: true, reason: "node_modules already present" };
+      return { ...record, skipped: true, reason: "node_modules present with completion marker" };
     }
-    // FOC-1156: node_modules WITHOUT the completion marker is the residue of a
-    // failed or timed-out install — the old presence check skipped such a
-    // partial tree forever. It falls through: removed below, installed fresh.
+    if (!created) {
+      // FOC-1156 review r1: a marker-less tree at a path this ensure did NOT
+      // create is not ours to delete. The reuse path matches any registered
+      // worktree by branch name with no containment check, so the path can be
+      // the main checkout or a foreign worktree — recursive deletion there was
+      // the FOC-1147/1153 failure family. Old behavior stands: skip.
+      return {
+        ...record,
+        skipped: true,
+        reason: "node_modules present without completion marker — kept: the path was not created by this ensure",
+      };
+    }
+    // FOC-1156: created by this ensure and marker-less — the residue of a
+    // failed or timed-out install, which the old presence check skipped
+    // forever. It falls through: removed below, installed fresh.
   }
   if (st) {
     try {
@@ -2388,11 +2404,20 @@ function runBoundedInstall(dir, command, args) {
  * whose task names only the root still needs the ui tree buildable, and the
  * cost of an extra skip-or-install is seconds.
  *
- * A timed-out or failed install leaves a node_modules behind that a later
- * ensure would SKIP as "already present" — the same accepted trade the merge
- * tool makes (it skips on existsSync). Freshness is re-established by the
- * child's own build, and the failure is in the record, never silent.
+ * A timed-out or failed install leaves a node_modules behind WITHOUT the
+ * completion marker (node_modules/.fenix-install-ok, FOC-1156), so the next
+ * ensure no longer skips it as "already present": on a worktree the ensure
+ * CREATED the residue is removed and installed fresh. On a REUSED path the
+ * old skip stands — see `created` below.
  *
+ * @param {string} worktree absolute path to provision
+ * @param {{ created?: boolean }} [options] FOC-1156 review r1: the
+ *   stale-reinstall recursively DELETES a node_modules, so it runs only when
+ *   the caller vouches this is a worktree its ensureWorktree call CREATED.
+ *   The reuse path matches any registered worktree by branch name with no
+ *   containment check, so an unvouched path (the main checkout on a colliding
+ *   branch, a foreign worktree) keeps the old skip-on-presence behavior.
+ *   Default false: a caller that cannot vouch gets the safe skip.
  * @returns {Promise<{ worktree: string, ok: boolean, locations: object[] }>}
  */
 /**
@@ -2416,7 +2441,7 @@ function rootWorkspacesCover(root) {
   return Array.isArray(ws) ? ws.length > 0 : Boolean(ws);
 }
 
-export async function installWorktreeDeps(worktree) {
+export async function installWorktreeDeps(worktree, { created = false } = {}) {
   // r2 N8: the two locations are independent trees, so the installs run
   // concurrently — worst-case spawn block halves. Failure attribution is
   // unchanged: each installDepsAt call owns its record and its own try/catch,
@@ -2435,8 +2460,8 @@ export async function installWorktreeDeps(worktree) {
         skipped: true,
         reason: "root package.json declares workspaces — the root install covers ui/",
       })
-    : installDepsAt(join(worktree, "ui"), "ui");
-  const locations = await Promise.all([installDepsAt(worktree, "root"), uiJob]);
+    : installDepsAt(join(worktree, "ui"), "ui", { created });
+  const locations = await Promise.all([installDepsAt(worktree, "root", { created }), uiJob]);
   return {
     worktree,
     ok: locations.every((l) => l.skipped || l.ok),

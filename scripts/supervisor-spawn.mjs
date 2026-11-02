@@ -655,7 +655,12 @@ if (referencedFiles.length) {
 // install is recorded and said out loud, but a child that can still work
 // without fresh deps is worth more than no child at all. Runs after every free
 // refusal above, so a refused spawn never pays for an install.
-const depsInstall = await installWorktreeDeps(worktree.worktree);
+// FOC-1156 review r1: the stale-reinstall (a marker-less node_modules is
+// recursively deleted and installed fresh) runs only on a worktree this very
+// ensure CREATED — the reuse path matches any registered worktree by branch
+// name with no containment check, so an unvouched path keeps the old
+// skip-on-presence behavior.
+const depsInstall = await installWorktreeDeps(worktree.worktree, { created: worktree.created });
 if (depsInstall.ok) {
   const installed = depsInstall.locations.filter((l) => !l.skipped);
   if (installed.length) {
