@@ -130,6 +130,8 @@ Capture `{round, status}` from JSON output.
 ### 5. Verdict
 **Every verdict — findings or clean — records the lint row**: `Lint: <command> → exit <code> (<scope covered>)` for the lint run DEV's hand-off was required to carry (`node scripts/lint.mjs` run from the task worktree when the candidate tree carries that tool, else the repo's own lint gate named in the brief — a DEV completion condition; the row must be about the candidate tree, never the main repo). Hand-off carries no lint evidence, or REVIEW could not re-verify it → record `Lint: not verified` with the reason; never an assumed clean — on a findings round the row is recorded the same way when sending back to DEV, so a failing lint is part of the record, not silently dropped.
 
+**Evidence as code (FOC-1170).** When the DEV journal cites a script, a test or a command as evidence, run it yourself in the candidate tree and cite it on the verdict: `supervisor-verdict.mjs record --ran '{"cmd":"...","exit":0,"outputRef":"<path under the run's scratch dir or this worktree>"}'` — at least one `--ran` is REQUIRED for a pass, and the tool refuses a pass without one (`review-pass-without-evidence-run`) plus any `--ran`/`--red-first` whose `outputRef` does not exist, is empty, or sits outside those two roots. A red-first claim is recorded as `--red-first '{"cmd":"...","baseExit":1,"candidateExit":0,"outputRef":"..."}'` (equal exits refused, `red-first-not-red`). A result that could not have come out differently is not evidence — if you did not run it, it is not your evidence.
+
 **Findings require changes (any non-praise `issue:`):**
 1. `node $LA_ROOT/scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
 2. If any high-severity finding: `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add risk:high`
@@ -170,6 +172,7 @@ WHY — unbounded dev↔review loops burn cost on disagreements only a human can
 - Security always by tools (models catch 60–80%) — never a model-only security verdict. The provisioned scanners run through `node scripts/security-scan.mjs` (FOC-285, offline; `docs/tools/security-scan.md`) and the verdict records their row (`Scanner: secretlint+semgrep → exit <code>, <n> findings` or `Scanner: not scanned — <reason>`) next to the lint row on every verdict. A security finding list with no scanner row is a model-only verdict.
 WHY — a false "secure" ships vulnerabilities; tools are the floor, models the filter. F-09: scanners promised but never called are structurally identical to no scanners.
 - Zero "LGTM without reading" — cost guardrail.
+- A pass cites what you RAN (`--ran` on `supervisor-verdict.mjs record`), never only what you read — the tool refuses `review-pass-without-evidence-run` (§5 Verdict). A result that could not have come out differently is not evidence.
 - NEVER `git push` without consent.
 - NEVER attach tokens, API keys, passwords, secrets, or login data to Linear comments — comments are visible across the workspace and may be indexed.
 - Never describe or quote the content of a file you have not read yourself or received as a subagent summary — report `unknown / not read` instead.

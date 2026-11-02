@@ -677,6 +677,30 @@ test("każdy skład z routingu jest na osi czasu", () => {
   if (missing.length) fail(`skład bez wpisu w Timeline.jsx: ${missing.join(", ")}`);
 });
 
+// ── FOC-1170: REVIEW evidence as code ────────────────────────────────────────
+console.log("\nrecenzja dowodzi uruchomieniem, nie czytaniem");
+
+test("instrukcje REVIEW trzymają regułę --ran/--red-first", () => {
+  // Trzy false passy 2026-11-01/02 zaakceptowały dowód, który nie mógł wyjść
+  // inaczej (dry-run "0 targets", ręcznie ustawione created:true, martwy probe
+  // bez PowerShell). Reguła mieszka w narzędziu (supervisor-verdict odmawia
+  // review-pass-without-evidence-run), ale instrukcje muszą ją nadal mówić —
+  // bez tego pinu edycja CLAUDE.md po cichu zdejmuje wymóg, tak jak FOC-1166
+  // pilnowało swojej reguły deny.
+  const lead = read("agents/review/CLAUDE.md");
+  const firstPass = read("agents/review/agents/first-pass.md");
+  for (const token of ["--ran", "--red-first", "review-pass-without-evidence-run", "red-first-not-red"]) {
+    if (!lead.includes(token)) fail(`agents/review/CLAUDE.md straciło regułę dowodu: brak ${token}`);
+  }
+  if (!/could not have come out differently/i.test(lead)) {
+    fail("agents/review/CLAUDE.md straciło uzasadnienie reguły (why-line o dowodzie)");
+  }
+  if (!firstPass.includes("--ran")) fail("agents/review/agents/first-pass.md nie mówi o --ran");
+  if (!/could not have come out differently/i.test(firstPass)) {
+    fail("agents/review/agents/first-pass.md straciło zdanie o dowodzie, który nie mógł wyjść inaczej");
+  }
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 console.log("");
 if (failures.length) {

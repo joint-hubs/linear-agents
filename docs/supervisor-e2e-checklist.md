@@ -213,6 +213,29 @@ refused.
 
 ---
 
+## Review evidence as code (FOC-1170) — a pass cites what the reviewer ran
+
+A REVIEW pass recorded through `supervisor-verdict.mjs record` must cite at least one command the
+reviewer executed itself:
+
+```bash
+node scripts/supervisor-verdict.mjs record --run <runId> --child <reviewChildId> --verdict pass \
+  ... --ran '{"cmd":"node scripts/lint.mjs","exit":0,"outputRef":"<path>"}' \
+  [--red-first '{"cmd":"node scripts/x.test.mjs","baseExit":1,"candidateExit":0,"outputRef":"<path>"}' ...]
+```
+
+The tool refuses a pass with no `--ran` (`review-pass-without-evidence-run`), refuses any
+`--ran`/`--red-first` whose `outputRef` does not exist, is empty (`evidence-outputRef-empty`), or
+sits outside the run's scratch dir and the reviewer's worktree
+(`evidence-outputRef-outside-run`), and refuses a red-first claim with
+`baseExit === candidateExit` (`red-first-not-red`). `outputRef` is stored resolved to an absolute
+path; `--ran`/`--red-first` are repeatable. A fail verdict does not need an evidence run, but any
+`--ran` it carries is still shape- and existence-checked. The instruction side of the rule lives
+in `agents/review/CLAUDE.md` §5 Verdict and `agents/review/agents/first-pass.md`, pinned by
+`scripts/config-drift.test.mjs`.
+
+---
+
 ## What to do with a failed box
 
 Do not fix it inside the walk. Note the box, the command, and what actually happened, then finish

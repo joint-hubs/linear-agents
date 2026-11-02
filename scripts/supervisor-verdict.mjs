@@ -4,7 +4,10 @@
 //   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail [--work-child <id>]
 //        [--finding '<json>' ...] [--ac '<json>' ...] [--failing-test <id> ...]
 //        [--no-failing-tests '<reason>'] [--decision-event <eventId> ...]
-//        [--decision-run <runId> ...] [--dry-run]
+//        [--decision-run <runId> ...]
+//        [--ran '{"cmd":"...","exit":0,"outputRef":"<path>"}' ...]          (FOC-1170)
+//        [--red-first '{"cmd":"...","baseExit":1,"candidateExit":0,"outputRef":"..."}' ...]
+//        [--dry-run]
 //   node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n
 //        --verdict pass|fail --reason <design|evidence|test-gap|ci|scope|other>
 //        [--finding '<json>' ...] [--work-child <id>] [--round N]
@@ -73,8 +76,8 @@
 // declaredAcs via linear-query — while this record still claimed a real run.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve, sep } from "node:path";
 
 import {
   ROOT,
@@ -86,6 +89,7 @@ import {
   producerOf,
   progressFingerprint,
   readRegistry,
+  runDir,
   updateChild,
   verdictPath,
   verdictsDir,
@@ -114,7 +118,7 @@ const DELIVERY_REASONS = ["design", "evidence", "test-gap", "ci", "scope", "othe
 // after trimming and lowercasing.
 const NON_EVIDENCE = ["", "-", "--", "n/a", "na", "none", "todo", "tbd", "?", "see above", "obvious"];
 
-const REPEATABLE = new Set(["finding", "ac", "failing-test", "decision-event", "decision-run"]);
+const REPEATABLE = new Set(["finding", "ac", "failing-test", "decision-event", "decision-run", "ran", "red-first"]);
 
 const isEvidence = (v) => {
   const s = String(v ?? "").trim();
@@ -640,6 +644,107 @@ function declaredFailingTests(args, verdict, taskId, warnings) {
   return { failingTests, declaredNone };
 }
 
+// ── the pass cites a command the reviewer ran itself (FOC-1170) ──────────────
+//
+// Three REVIEW passes in the 2026-11-01/02 session accepted evidence that could
+// not have come out differently: a dry-run that skipped every input and printed
+// "0 targets", a test whose `created: true` was set by hand, a liveness probe
+// that returned "dead" because PowerShell was missing. In each case the reviewer
+// read the output and not the script. A kickoff rule saying otherwise did not
+// hold — so the rule lives in the tool: a review PASS has to cite at least one
+// command the reviewer ran ITSELF (`--ran`), with the output saved where the run
+// can audit it. A result that could not have come out differently is not
+// evidence, and a citation of a file that does not exist is not a citation.
+
+/**
+ * Parse and shape-validate `--ran` / `--red-first` (FOC-1170). Shape errors are
+ * refused for ANY verdict — evidence that does not parse is not evidence on a
+ * fail either. The outputRef existence/containment check runs later, in
+ * checkOutputRef, so every entry carries a resolved, auditable path by the time
+ * it reaches the record.
+ */
+function evidenceRuns(args) {
+  const ran = asArray(args.ran).map((raw, i) => parseJsonFlag(raw, "ran", i));
+  const redFirst = asArray(args["red-first"]).map((raw, i) => parseJsonFlag(raw, "red-first", i));
+
+  const problems = [];
+  ran.forEach((r, i) => {
+    if (!isEvidence(r.cmd)) problems.push(`--ran #${i + 1} names no command`);
+    if (!Number.isInteger(r.exit)) problems.push(`--ran #${i + 1} has no integer exit`);
+    if (!isEvidence(r.outputRef)) problems.push(`--ran #${i + 1} names no outputRef`);
+  });
+  redFirst.forEach((r, i) => {
+    if (!isEvidence(r.cmd)) problems.push(`--red-first #${i + 1} names no command`);
+    if (!Number.isInteger(r.baseExit) || !Number.isInteger(r.candidateExit)) {
+      problems.push(`--red-first #${i + 1} needs integer baseExit and candidateExit`);
+    }
+    if (!isEvidence(r.outputRef)) problems.push(`--red-first #${i + 1} names no outputRef`);
+  });
+  if (problems.length) {
+    failJson(`the evidence flags are malformed`, {
+      problems,
+      hint: `--ran '{"cmd":"node scripts/x.test.mjs","exit":0,"outputRef":"<path under the run's scratch or the reviewer worktree>"}'`,
+    });
+  }
+
+  // The one semantic check the flag's name promises: a red-first claim whose
+  // base and candidate exited identically describes no change — the cheapest
+  // way to claim "it was red before" without ever running it red.
+  for (const [i, r] of redFirst.entries()) {
+    if (r.baseExit === r.candidateExit) {
+      failJson(
+        `red-first-not-red: --red-first #${i + 1} has baseExit ${r.baseExit} === candidateExit — ` +
+          `a red-first claim needs a base that failed and a candidate that exited differently`,
+        {
+          hint: `--red-first '{"cmd":"node scripts/x.test.mjs","baseExit":1,"candidateExit":0,"outputRef":"..."}'`,
+        },
+      );
+    }
+  }
+  return { ran, redFirst };
+}
+
+/**
+ * `outputRef` must exist, hold at least a byte, and sit under the run's scratch
+ * dir or the reviewer's own worktree (FOC-1170) — the two places whose content
+ * the run can audit after the fact. A relative ref is resolved against the
+ * REVIEWER's worktree first (that is the cwd the reviewer ran the command in),
+ * then the tool's cwd, then the run dir; the first that exists wins. The
+ * resolved ABSOLUTE path is what lands on the record — the citation has to be
+ * readable from wherever the record is read, not from where it was typed.
+ */
+function checkOutputRef(ref, flag, index, runId, worktree) {
+  const raw = String(ref);
+  const candidates = isAbsolute(raw)
+    ? [raw]
+    : [...(worktree ? [resolve(worktree, raw)] : []), resolve(process.cwd(), raw), resolve(runDir(runId), raw)];
+  const found = candidates.map((c) => resolve(c)).find((c) => existsSync(c));
+  if (!found) {
+    failJson(`evidence-outputRef-missing: ${flag} #${index + 1} outputRef does not exist: ${raw}`, {
+      outputRef: raw,
+      hint: "the output the citation points at has to be on disk — a missing file is not evidence",
+    });
+  }
+  const st = statSync(found);
+  const empty = st.isFile() ? st.size === 0 : readdirSync(found).length === 0;
+  if (empty) {
+    failJson(`evidence-outputRef-empty: ${flag} #${index + 1} outputRef holds nothing: ${found}`, {
+      outputRef: found,
+      hint: "a zero-byte file is a citation of nothing — the same cheat as a dash",
+    });
+  }
+  const roots = [join(runDir(runId), "scratch"), worktree].filter(Boolean).map((r) => resolve(r));
+  const inside = roots.some((root) => found === root || found.startsWith(root + sep));
+  if (!inside) {
+    failJson(
+      `evidence-outputRef-outside-run: ${flag} #${index + 1} outputRef sits outside the run's ` +
+        `scratch dir and the reviewer's worktree: ${found}`,
+      { outputRef: found, roots },
+    );
+  }
+  return found;
+}
+
 // A verdict is about a Linear issue, and EVERYTHING in cmdRecord derives from
 // the id: the verdict file name (a `../`-bearing id would climb out of the
 // verdicts dir), the linear-ops invocations, and the enforcement gate's
@@ -740,6 +845,27 @@ function cmdRecord(args) {
   // ── the failing-test axis is a declaration, not a default ──────────────────
   const { failingTests, declaredNone } = declaredFailingTests(args, verdict, taskId, warnings);
 
+  // ── FOC-1170: the pass cites a command the reviewer ran itself ─────────────
+  // Shape + outputRef checks for any verdict that cites them; the ≥1 requirement
+  // is a review-pass gate only — a fail does not need an evidence run.
+  const { ran, redFirst } = evidenceRuns(args);
+  const ranChecked = ran.map((r, i) => ({ ...r, outputRef: checkOutputRef(r.outputRef, "--ran", i, runId, entry.worktree) }));
+  const redFirstChecked = redFirst.map((r, i) => ({
+    ...r,
+    outputRef: checkOutputRef(r.outputRef, "--red-first", i, runId, entry.worktree),
+  }));
+  if (verdict === "pass" && entry.squad === "review" && !ranChecked.length) {
+    failJson(
+      `review-pass-without-evidence-run: a review pass must cite at least one command the reviewer ` +
+        `ran itself (--ran '{"cmd":"...","exit":0,"outputRef":"<path under the run's scratch or the reviewer worktree>"}')`,
+      {
+        hint:
+          "a result that could not have come out differently is not evidence — run the cited script " +
+          "yourself and keep its output where the run can read it",
+      },
+    );
+  }
+
   // ── FOC-449: explicit decision provenance ───────────────────────────────────
   // The decision events this verdict labels with its outcome (the verdict
   // value itself, by:"agent", via:"verdict"). Same plumbing as the gate emit:
@@ -783,6 +909,11 @@ function cmdRecord(args) {
     verdict,
     findings,
     acMapping,
+    // FOC-1170: the commands the reviewer ran itself (and its red-first claims),
+    // with outputRef resolved to the auditable absolute path. Keys only when the
+    // flags were passed — a dev/test record without them stays byte-identical.
+    ...(ranChecked.length ? { ran: ranChecked } : {}),
+    ...(redFirstChecked.length ? { redFirst: redFirstChecked } : {}),
     declaredAcs: declared,
     fingerprint,
     // FOC-220: present only when the fail DECLARED an empty test axis, carrying
