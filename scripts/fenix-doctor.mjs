@@ -731,6 +731,28 @@ export function checkSecretsReadable(env, fsImpl, secretsDir = DEFAULT_SECRETS_D
   return { name: 'secrets readable', status: 'ok', detail: `${names.length} file(s) readable under ${secretsDir}` };
 }
 
+// FOC-1148: the optional pisi Linear key rides the same Compose-secret path as
+// the required keys, but it is OPTIONAL — the empty placeholder `fenix up`
+// creates means the second-workspace integration is off, which is the healthy
+// default. Presence only, like every key check here: the value and its length
+// never enter the report. Container-only (the secret exists at /run/secrets
+// only inside the stack); secretsDir is injectable like checkSecretsReadable's.
+export function checkPisiSecret(env, fsImpl, secretsDir = DEFAULT_SECRETS_DIR) {
+  const name = 'pisi secret';
+  const file = path.join(secretsDir, 'linear_api_key_pisi');
+  let st;
+  try {
+    st = fsImpl.statSync(file);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { name, status: 'warn', detail: `${file} absent — the pisi secret is not mounted`, fix: 'fenix up' };
+    }
+    return { name, status: 'warn', detail: `${file} unreadable (${String(err?.message || err).split('\n')[0]})`, fix: UID_FIX };
+  }
+  if (st.size > 0) return { name, status: 'ok', detail: `${file} present` };
+  return { name, status: 'ok', detail: `${file} empty — the pisi (second Linear workspace) integration is off` };
+}
+
 /** LA_PROJECTS_FILE's directory exists but must also be writable. */
 export function checkProjectsDir(env, fsImpl, projectsFile) {
   const file = projectsFile || env.LA_PROJECTS_FILE || '/fenix-config/projects.json';
@@ -831,7 +853,9 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     // FOC-988 first: the two uid checks stay the last two lines of the container
     // block (a test pins their position).
     if (code) checks.push(code);
-    checks.push(checkSecretsReadable(env, fsImpl, secretsDir), checkProjectsDir(env, fsImpl, projectsFile));
+    // FOC-1148: the pisi-secret line sits with the other secret-file checks,
+    // ahead of the config-writable line (a test pins this order).
+    checks.push(checkSecretsReadable(env, fsImpl, secretsDir), checkPisiSecret(env, fsImpl, secretsDir), checkProjectsDir(env, fsImpl, projectsFile));
   }
   if (withApi) checks.push(await checkApi(fetchImpl, env));
   return checks;

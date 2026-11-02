@@ -24,6 +24,7 @@ import {
   ghBelowFloor,
   checkFenixCode,
   checkPermissionMode,
+  checkPisiSecret,
   checkProjectsDir,
   checkRunOwners,
   checkSecretsReadable,
@@ -238,6 +239,7 @@ test("without FENIX_IN_CONTAINER the uid checks are absent", async () => {
   });
   assert.equal(checks.some((c) => c.name === "secrets readable"), false);
   assert.equal(checks.some((c) => c.name === "config writable"), false);
+  assert.equal(checks.some((c) => c.name === "pisi secret"), false);
 });
 
 test("with FENIX_IN_CONTAINER=1 both uid checks run, with injected paths", async () => {
@@ -253,15 +255,21 @@ test("with FENIX_IN_CONTAINER=1 both uid checks run, with injected paths", async
     });
     const secrets = checks.find((c) => c.name === "secrets readable");
     const config = checks.find((c) => c.name === "config writable");
+    const pisi = checks.find((c) => c.name === "pisi secret");
     assert.ok(secrets, "secrets readable check missing");
     assert.ok(config, "config writable check missing");
+    assert.ok(pisi, "pisi secret check missing");
     assert.equal(secrets.status, "ok");
+    // The temp secrets dir has no linear_api_key_pisi — absent warns, never fails.
+    assert.equal(pisi.status, "warn");
+    assert.match(pisi.detail, /absent/);
     assert.equal(config.status, "ok");
     // After the existing checks, before anything else.
-    assert.equal(checks[checks.length - 2].name, "secrets readable");
+    assert.equal(checks[checks.length - 2].name, "pisi secret");
     assert.equal(checks[checks.length - 1].name, "config writable");
+    assert.equal(checks[checks.length - 3].name, "secrets readable");
     // FOC-988: the drift check runs in the container too, just ahead of them.
-    assert.equal(checks[checks.length - 3].name, "fenix code");
+    assert.equal(checks[checks.length - 4].name, "fenix code");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1323,6 +1331,56 @@ test("workspace claims: an unreadable registry warns instead of crashing the doc
   assert.equal(c.status, "warn");
   assert.match(c.detail, /unreadable/);
   assert.match(c.detail, /not readable JSON/);
+});
+
+console.log("\nfenix-doctor: pisi secret (FOC-1148)");
+
+// The check must never read the key's content, so the tests fake only
+// statSync against a fixed path — no temp-dir randomness can then leak a digit
+// that collides with the fixture length, and the leak assertions below stay
+// deterministic.
+function fsWithPisiStat(size, statError) {
+  // path.join so the comparison matches the check's own path building on every
+  // platform (win32 joins with backslashes).
+  const pisiPath = path.join("/run/secrets", "linear_api_key_pisi");
+  return {
+    statSync: (p) => {
+      if (p === pisiPath) {
+        if (statError) throw statError;
+        return { size };
+      }
+      return fs.statSync(p);
+    },
+  };
+}
+
+test("pisi secret: a present, non-empty file is ok and never leaks the value or its length", () => {
+  const VALUE = "lin_api_fixture_0123456789"; // synthetic — never a real key
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(VALUE.length), "/run/secrets");
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /present/);
+  const dump = JSON.stringify(c);
+  assert.ok(!dump.includes(VALUE), "the key value must never enter the check output");
+  assert.ok(!dump.includes(String(VALUE.length)), "the key length must never enter the check output");
+});
+
+test("pisi secret: the empty placeholder is ok — the integration is off, not a failure", () => {
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(0), "/run/secrets");
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /empty/);
+  assert.match(c.detail, /off/);
+});
+
+test("pisi secret: an absent file warns — the secret is not mounted, exit code unchanged", () => {
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(undefined, Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" })), "/run/secrets");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /absent/);
+});
+
+test("pisi secret: a stat failure that is not ENOENT warns without a fake 'absent'", () => {
+  const c = checkPisiSecret(IN_CONTAINER, fsWithPisiStat(undefined, Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })), "/run/secrets");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /EACCES/);
 });
 
 console.log(`\nfenix-doctor: ${passed} passed, ${skipped} skipped, ${failures.length} failed`);

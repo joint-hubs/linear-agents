@@ -221,7 +221,10 @@ The Settings area in the left navigation covers what used to require a
   default** — a stock install has none of them. Turn one on with
   `fenix integrations enable <name>` (`atlas` | `pisi` | `memory`) or the
   overlay key `integrations`; plain `fenix integrations` shows what is on
-  and what each enabled one still needs. Nebul is not a flag — it is chosen
+  and what each enabled one still needs. The pisi integration needs its key
+  in `.fenix/secrets/linear_api_key_pisi` (FOC-1148) — `fenix up` creates an
+  empty placeholder for it like for the other keys; an empty file keeps the
+  integration off. Nebul is not a flag — it is chosen
   through the provider (see **Provider & routing** above).
 - **Squads & prompts** is the v1 Prompts screen as a tab (`/prompts`): role
   edits land on the `/data/agents` volume and take effect at the next spawn.
@@ -324,7 +327,9 @@ tickets is off by default (`taskSessions.autoPickup` — see
 
 ## Where things live
 
-- Keys: `.fenix/secrets/{openrouter_api_key,provider_api_key,linear_api_key,github_token}` —
+- Keys: `.fenix/secrets/{openrouter_api_key,provider_api_key,linear_api_key,github_token}`
+  plus the optional `linear_api_key_pisi` (the second, pisi Linear workspace —
+  an empty placeholder means the integration is off) —
   gitignored, owner-only, never baked into the image, never printed; mounted
   as Compose secrets under `/run/secrets/` (read-only for the supervisor) and
   read-write into `fenix-api` at `/fenix-secrets` (dashboard key rotation).
