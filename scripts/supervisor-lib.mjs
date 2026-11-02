@@ -3022,21 +3022,42 @@ export function comparableProgress(a, b) {
  * Same rule the registry and the gate paths already follow.
  */
 export function roundsFor(runId, taskId) {
-  const dir = verdictsDir(runId);
-  if (!existsSync(dir)) return [];
   const prefix = `${String(taskId).toLowerCase()}-round`;
-  return readdirSync(dir)
-    .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
-    .map((f) => {
+  // FOC-1155: a launcher restart mid-task splits one task's verdict chain
+  // across run dirs — the pre-restart rounds sit in the old run's verdicts dir,
+  // the post-restart ones in the new run's. Records written after the restart
+  // carry the work child's run as `workRun` provenance; following it
+  // (transitively, each run read once) is what lets this chain view — and
+  // through it the FOC-1146 progress guard in supervisor-followup — see a
+  // repeated round that sits on the other side of the split. Without
+  // provenance nothing is followed: single-run behaviour is identical to
+  // before. Records are keyed by "<runId>/<file>" so a record can never be
+  // counted twice when two views of the chain are merged.
+  const merged = new Map();
+  const queue = [runId];
+  const seen = new Set(queue);
+  while (queue.length) {
+    const rid = queue.shift();
+    const dir = verdictsDir(rid);
+    if (!existsSync(dir)) continue;
+    const known = new Set(merged.keys());
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
       try {
-        return JSON.parse(readFileSync(join(dir, f), "utf8"));
+        merged.set(`${rid}/${f}`, JSON.parse(readFileSync(join(dir, f), "utf8")));
       } catch {
         // Unreadable is not absent. A verdict nobody can parse must not make the
         // round before it look like the latest one.
-        return { round: Number(f.slice(prefix.length, -5)) || 0, unreadable: true };
+        merged.set(`${rid}/${f}`, { round: Number(f.slice(prefix.length, -5)) || 0, unreadable: true });
       }
-    })
-    .sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
+    }
+    for (const [key, rec] of merged) {
+      if (known.has(key) || !rec?.workRun || seen.has(rec.workRun)) continue;
+      seen.add(rec.workRun);
+      queue.push(rec.workRun);
+    }
+  }
+  return [...merged.values()].sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
 }
 
 export function latestVerdict(runId, taskId) {

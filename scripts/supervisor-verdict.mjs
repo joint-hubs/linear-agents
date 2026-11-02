@@ -2,9 +2,9 @@
 // scripts/supervisor-verdict.mjs — a REVIEW verdict has to cite something.
 //
 //   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail [--work-child <id>]
-//        [--finding '<json>' ...] [--ac '<json>' ...] [--failing-test <id> ...]
-//        [--no-failing-tests '<reason>'] [--decision-event <eventId> ...]
-//        [--decision-run <runId> ...] [--dry-run]
+//        [--work-run <runId>] [--finding '<json>' ...] [--ac '<json>' ...]
+//        [--failing-test <id> ...] [--no-failing-tests '<reason>']
+//        [--decision-event <eventId> ...] [--decision-run <runId> ...] [--dry-run]
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
 //
@@ -82,6 +82,8 @@ import {
   producerOf,
   progressFingerprint,
   readRegistry,
+  registryPath,
+  roundsFor,
   updateChild,
   verdictPath,
   verdictsDir,
@@ -167,20 +169,36 @@ function acCount(taskId, args) {
  * `--work-child <id>` when you want to say it; otherwise the child of this
  * node's PRODUCER (config/graph.json) carrying the same taskId.
  *
+ * `workRunId` (FOC-1155): when `--work-run` names another run, the registry
+ * searched here is THAT run's and the refusals name it — a missing run is
+ * refused before this is called, a missing child and a different task here.
+ *
  * Fail-closed on ambiguity. Guessing here is how a verdict ends up fingerprinting
  * a tree nobody was reviewing, which is exactly the bug this function exists to
  * have fixed — and a wrong fingerprint is silent: it reads as "no progress" and
  * stops the loop.
  */
-function resolveWorkChild(registry, entry, taskId, args) {
+function resolveWorkChild(registry, entry, taskId, args, workRunId = null) {
   const children = Object.values(registry.children ?? {});
+  const where = workRunId ? `run "${workRunId}"` : "the registry";
 
   if (args["work-child"] && args["work-child"] !== true) {
     const named = children.find((c) => c.childId === args["work-child"]);
     if (!named) {
-      failJson(`--work-child "${args["work-child"]}" is not in the registry`, {
-        known: children.map((c) => c.childId),
-      });
+      failJson(
+        workRunId
+          ? `missing child "${args["work-child"]}" in run "${workRunId}"`
+          : `--work-child "${args["work-child"]}" is not in the registry`,
+        { known: children.map((c) => c.childId) },
+      );
+    }
+    // FOC-1155, fail-closed on the task too — cross-run the child was found by
+    // id alone, so a same-id-different-task child would otherwise fingerprint
+    // an unrelated tree silently. Without --work-run the old behaviour stands.
+    if (workRunId && String(named.taskId ?? "").toLowerCase() !== String(taskId).toLowerCase()) {
+      failJson(
+        `child "${named.childId}" in run "${workRunId}" has task ${named.taskId ?? "none"} but the verdict is for task ${taskId}`,
+      );
     }
     return named;
   }
@@ -197,16 +215,19 @@ function resolveWorkChild(registry, entry, taskId, args) {
 
   if (matches.length === 0) {
     failJson(
-      `no ${producer} child for ${taskId} in this run, so there is no tree holding the work ${entry.squad} is reviewing`,
+      `no ${producer} child for ${taskId} in ${workRunId ? `run "${workRunId}"` : "this run"}, ` +
+        `so there is no tree holding the work ${entry.squad} is reviewing`,
       {
-        hint: `name it: --work-child <id>. Fingerprinting ${entry.childId}'s own tree would measure the reviewer, not the work.`,
+        hint: workRunId
+          ? `name it: --work-child <id> (with --work-run). Fingerprinting ${entry.childId}'s own tree would measure the reviewer, not the work.`
+          : `name it: --work-child <id>. Fingerprinting ${entry.childId}'s own tree would measure the reviewer, not the work.`,
         candidates: children.map((c) => ({ childId: c.childId, squad: c.squad, taskId: c.taskId })),
       },
     );
   }
 
   failJson(`${matches.length} ${producer} children carry ${taskId} — which one is under review?`, {
-    hint: "--work-child <id>",
+    hint: workRunId ? "--work-child <id> --work-run <runId>" : "--work-child <id>",
     candidates: matches.map((c) => c.childId),
   });
 }
@@ -220,26 +241,26 @@ function loadGraphOrNull() {
 }
 
 // ── rounds ───────────────────────────────────────────────────────────────────
+// roundsFor / latestVerdict live in supervisor-lib.mjs (supervisor-followup
+// reads the same chain); the byte-identical copies that used to sit here are
+// gone — the lib one now also follows workRun provenance across a run split.
 
-function roundsFor(runId, taskId) {
-  const dir = verdictsDir(runId);
-  if (!existsSync(dir)) return [];
-  const prefix = `${String(taskId).toLowerCase()}-round`;
-  return readdirSync(dir)
-    .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
-    .map((f) => {
-      try {
-        return JSON.parse(readFileSync(join(dir, f), "utf8"));
-      } catch {
-        return { round: Number(f.slice(prefix.length, -5)) || 0, unreadable: true };
-      }
-    })
-    .sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
-}
-
-export function latestVerdict(runId, taskId) {
-  const all = roundsFor(runId, taskId);
-  return all.length ? all[all.length - 1] : null;
+/**
+ * This task's verdict chain for round numbering: this run's verdicts plus,
+ * when `--work-run` names another run, that run's. The lib roundsFor already
+ * follows `workRun` provenance — but the FIRST cross-run record has not been
+ * written yet when it is read, so the work run is consulted explicitly and
+ * records seen in both chains dedupe on round+recordedAt.
+ */
+function taskRounds(runId, workRunId, taskId) {
+  const chain = roundsFor(runId, taskId);
+  if (!workRunId || workRunId === runId) return chain;
+  const seen = new Set(chain.map((r) => `${r.round ?? "?"}@${r.recordedAt ?? ""}`));
+  for (const r of roundsFor(workRunId, taskId)) {
+    const key = `${r.round ?? "?"}@${r.recordedAt ?? ""}`;
+    if (!seen.has(key)) chain.push(r);
+  }
+  return chain.sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
 }
 
 // The consulted allowlist for the fail-transition emitter — NOT documentation.
@@ -714,7 +735,29 @@ function cmdRecord(args) {
   // the review loop refused at round 2 however much DEV had fixed. That is
   // worse than the counter it replaced, which at least allowed two rounds.
   // Caught by writing the scenario out and running it, not by reading the code.
-  const workChild = resolveWorkChild(registry, entry, taskId, args);
+  //
+  // FOC-1155: a launcher restart mid-task starts a NEW run, so the DEV child
+  // whose tree is under review can still be registered in the OLD run's
+  // children.json while this verdict's own registry is the new run's (seen
+  // 2026-11-01, FOC-1110 — worked around by hand-copying the entry).
+  // `--work-run <runId>` says WHICH run holds the work child; resolution
+  // happens there, fail-closed, and the record carries the provenance
+  // (`workRun`). Without the flag nothing changes: the single-registry
+  // binding stays.
+  const workRunId = (() => {
+    if (args["work-run"] === undefined) return null;
+    if (args["work-run"] === true) failJson("--work-run needs a run id: --work-run <supervisorRunId>");
+    const id = String(args["work-run"]);
+    if (!existsSync(registryPath(id))) {
+      failJson(`missing run ${id} — no registry at ${registryPath(id)}`);
+    }
+    return id;
+  })();
+  const workRegistry = workRunId ? readRegistry(workRunId) : registry;
+  const workChild = resolveWorkChild(workRegistry, entry, taskId, args, workRunId);
+  // Where the work child's OWN registry entry lives — updateChild below must
+  // write to that run, not to the verdict's.
+  const workChildRunId = workRunId && workChild !== entry ? workRunId : runId;
   const fingerprint = progressFingerprint({
     worktree: workChild.worktree,
     baseRevision: workChild.baseRevision,
@@ -725,12 +768,18 @@ function cmdRecord(args) {
     warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under review`);
   }
 
-  const prior = latestVerdict(runId, taskId);
+  // Round numbering continues across the split (taskRounds reads the work
+  // run's chain when --work-run was given) — a restart mid-task must not make
+  // round 3 of a loop think it is round 1.
+  const prior = taskRounds(runId, workRunId, taskId).slice(-1)[0] ?? null;
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);
 
   const record = {
     taskId,
     runId,
+    // FOC-1155: only when the work child was resolved in another run — a
+    // verdict without it stays byte-identical to before.
+    ...(workRunId ? { workRun: workRunId } : {}),
     childId,
     squad: entry.squad ?? null,
     round,
@@ -771,7 +820,21 @@ function cmdRecord(args) {
   mkdirSync(verdictsDir(runId), { recursive: true });
   atomicWriteJSON(path, record);
   if (verdict === 'fail' && ['review','test'].includes(entry.squad) && workChild.squad === 'dev' && entry.attemptId) {
-    try { updateChild(runId,workChild.childId,{pendingRuntimeReturn:{sourceAttemptId:entry.attemptId,source:entry.squad,reason:'rejected',evidenceRef:runId+':verdict:'+taskId+':'+round,evidenceKind:'direct'}}); }
+    try {
+      // FOC-1155: the touched entry lives in the work child's own run, and —
+      // when that is another run — carries the provenance so the patch is
+      // traceable back to the cross-run record that caused it.
+      updateChild(workChildRunId, workChild.childId, {
+        pendingRuntimeReturn: {
+          sourceAttemptId: entry.attemptId,
+          source: entry.squad,
+          reason: 'rejected',
+          evidenceRef: runId + ':verdict:' + taskId + ':' + round,
+          evidenceKind: 'direct',
+          ...(workChildRunId !== runId ? { workRun: workRunId } : {}),
+        },
+      });
+    }
     catch { warnings.push('runtime return evidence could not be staged'); }
   }
 

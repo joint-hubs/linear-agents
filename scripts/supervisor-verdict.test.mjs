@@ -26,7 +26,16 @@ import {
   parse,
   runScript,
 } from "./supervisor-test-fixtures.mjs";
-import { gatesDir, progressFingerprint, readRegistry, verdictPath, verdictsDir, writeRegistry } from "./supervisor-lib.mjs";
+import {
+  comparableProgress,
+  gatesDir,
+  progressFingerprint,
+  readRegistry,
+  roundsFor,
+  verdictPath,
+  verdictsDir,
+  writeRegistry,
+} from "./supervisor-lib.mjs";
 import { returnGateQuestion } from "./supervisor-verdict.mjs";
 
 const { test, fail, summary } = harness();
@@ -364,8 +373,174 @@ test("an unreadable tree is UNKNOWN, not empty", () => {
   assert.ok(fp.error);
 });
 
-// ── 4. the failing-test axis is declared (FOC-220) ──────────────────────────
-console.log("\nbrak failing-test to deklaracja, nie domyślenie");
+// ── 3b. a launcher restart split the registry: --work-run (FOC-1155) ─────────
+console.log("\nrestart launchera rozerwał rejestr: --work-run");
+
+/** Split-run fixture: runA holds the work children, runB the recording child. */
+function splitRunScenario(squad = "test") {
+  const { base, repo } = fixtureRepo();
+  const wts = {
+    "dev-1": fixtureWorktree(repo, "foc-1155-dev"),
+    "review-1": fixtureWorktree(repo, "foc-1155-review"),
+    "recorder-1": fixtureWorktree(repo, "foc-1155-recorder"),
+  };
+  const child = (cid, sq) => ({
+    childId: cid,
+    squad: sq,
+    taskId: "FOC-123",
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    status: "exited",
+    turns: [{ pid: 1 }],
+    permissionMode: "bypassPermissions",
+    attemptId: "attempt-1",
+    worktree: wts[cid].worktree,
+    branch: wts[cid].branch,
+    baseRevision: wts[cid].baseRevision,
+  });
+
+  const runA = fixtureRun({
+    children: { "dev-1": child("dev-1", "dev"), "review-1": child("review-1", "review") },
+  });
+  const runB = fixtureRun({ children: { "recorder-1": child("recorder-1", squad) } });
+  return { base, repo, runA, runB, ...wts["dev-1"], reviewTree: wts["review-1"].worktree };
+}
+
+// Records against runB — the run the restart created.
+const recordIn = (s, extra = []) => parse(verdict(["record", "--run", s.runB, ...extra]), fail);
+
+test("a TEST child in run B records the DEV work child registered in run A, via --work-run", () => {
+  const s = splitRunScenario();
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  // Provenance travels with the record: an operator reading the JSON later can
+  // tell the work child lived in another run's registry.
+  assert.equal(out.workRun, s.runA);
+  // And it says whose tree it fingerprinted.
+  assert.ok(out.warnings.some((w) => /dev-1/.test(w)), JSON.stringify(out.warnings));
+
+  // The fingerprint measures the WORK tree across the split: advancing dev-1's
+  // tree (run A's registry entry) moves it, the recorder's own tree never does.
+  const before = out.fingerprint.combined;
+  advance(s, "cross-run-work.txt");
+  const next = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(next.ok, true, next.error);
+  assert.notEqual(
+    next.fingerprint.combined, before,
+    "the work tree in run A moved and the fingerprint did not — it measured the wrong tree",
+  );
+});
+
+test("--work-run alone resolves the producer's work child in that run (no --work-child)", () => {
+  // A resumed REVIEW child: its producer (config/graph.json) is dev, so the
+  // auto path must find dev-1 in the work run's registry. A TEST child's
+  // producer is review — the explicit --work-child path covers that shape.
+  const s = splitRunScenario("review");
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA,
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.workRun, s.runA);
+  assert.ok(out.warnings.some((w) => /dev-1/.test(w)), JSON.stringify(out.warnings));
+});
+
+test("--work-run pointing at a child of a DIFFERENT task is refused, naming the child, run and both tasks", () => {
+  const s = splitRunScenario();
+  const reg = readRegistry(s.runA);
+  reg.children["dev-1"].taskId = "FOC-999";
+  writeRegistry(s.runA, reg);
+
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.ok(out.error.includes("FOC-999"), out.error);
+  assert.ok(out.error.includes("FOC-123"), out.error);
+  assert.ok(out.error.includes(s.runA), out.error);
+});
+
+test("a missing work run is refused, naming the run", () => {
+  const s = splitRunScenario();
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", "test-no-such-run", "--work-child", "dev-1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /missing run/);
+  assert.ok(out.error.includes("test-no-such-run"), out.error);
+});
+
+test("a missing work child in an existing run is refused, naming the child and the run", () => {
+  const s = splitRunScenario();
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "review-9",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /missing child/);
+  assert.ok(out.error.includes("review-9"), out.error);
+  assert.ok(out.error.includes(s.runA), out.error);
+});
+
+test("the verdict chain continues across the split — and the progress guard can see both rounds", () => {
+  const s = splitRunScenario();
+  const first = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(first.ok, true, first.error);
+  assert.equal(first.round, 1);
+
+  advance(s, "moved-on.txt");
+  const second = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(second.ok, true, second.error);
+  assert.equal(second.round, 2, "round numbering restarted at the run split");
+
+  // The chain view the FOC-1146 progress guard reads (supervisor-followup →
+  // lib roundsFor) sees BOTH runs' rounds, so a repeat across the boundary is
+  // visible instead of a blind spot.
+  const chain = roundsFor(s.runB, "FOC-123");
+  assert.deepEqual(chain.map((r) => r.round), [1, 2]);
+  assert.equal(comparableProgress(second.fingerprint, first.fingerprint), false);
+});
+
+test("a cross-run fail stamps the work child's registry entry (in run A) with workRun provenance", () => {
+  const s = splitRunScenario();
+  const out = recordIn(s, [
+    "--child", "recorder-1", "--verdict", "fail",
+    "--finding", CITED, "--failing-test", "suite/a",
+    "--work-run", s.runA, "--work-child", "dev-1",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  const after = readRegistry(s.runA).children["dev-1"];
+  assert.equal(after.pendingRuntimeReturn?.source, "test", JSON.stringify(after.pendingRuntimeReturn ?? null));
+  assert.equal(after.pendingRuntimeReturn?.workRun, s.runA);
+});
+
+test("without --work-run the record carries no workRun and the old single-registry binding holds", () => {
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal("workRun" in out, false);
+});
 
 // A fail that is not test-backed — a design failure — is a real category, so
 // the gate is escapable; but the escape is an explicit declaration with a
