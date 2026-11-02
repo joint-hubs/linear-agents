@@ -29,6 +29,9 @@ x-fenix: &fenix
   secrets:
     - openrouter_api_key
     - linear_api_key
+    # FOC-1148: optional — an empty file (the placeholder `fenix up` creates)
+    # just means the second (pisi) Linear workspace integration is off.
+    - linear_api_key_pisi
     - github_token
     - provider_api_key
   environment:
@@ -118,6 +121,9 @@ secrets:
     file: ./.fenix/secrets/openrouter_api_key
   linear_api_key:
     file: ./.fenix/secrets/linear_api_key
+  # FOC-1148: optional — an empty file just means the pisi integration is off.
+  linear_api_key_pisi:
+    file: ./.fenix/secrets/linear_api_key_pisi
   github_token:
     file: ./.fenix/secrets/github_token
   provider_api_key:

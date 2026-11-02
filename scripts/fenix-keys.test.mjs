@@ -638,6 +638,37 @@ test("FOC-780: `fenix up` skips the retention question when stdin is not a TTY",
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("FOC-1148: `fenix up` creates the optional linear_api_key_pisi placeholder next to the three required secrets", () => {
+  const { dir, bin } = makeHome("up-pisi-placeholder");
+  try {
+    // Keys present, so the key wizard does not run and cannot muddy the flow.
+    const secretsDir = join(dir, ".fenix", "secrets");
+    mkdirSync(secretsDir, { recursive: true });
+    for (const f of ["openrouter_api_key", "linear_api_key", "github_token"]) {
+      writeFileSync(join(secretsDir, f), "fixture\n", "utf8");
+    }
+    const res = runFenix({
+      home: dir,
+      bin,
+      settingsPath: writeSettingsFile(dir, {}),
+      args: ["up"],
+      input: "", // piped stdin: non-interactive, keep-all stays the default
+    });
+    // The fake docker refuses `compose up`, so cmd_up aborts right after the
+    // secret-file step — the same shape the FOC-780 test pins above.
+    assert.equal(res.status, 1, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stderr, /refusing to start the stack/);
+    // The pisi placeholder exists now, empty, and the pre-existing files were
+    // not touched.
+    const pisi = join(secretsDir, "linear_api_key_pisi");
+    assert.equal(existsSync(pisi), true, "linear_api_key_pisi placeholder was not created");
+    assert.equal(readFileSync(pisi, "utf8"), "", "the placeholder must be empty");
+    for (const f of ["openrouter_api_key", "linear_api_key", "github_token"]) {
+      assert.equal(readFileSync(join(secretsDir, f), "utf8"), "fixture\n", `${f} must stay untouched`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // --- fenix settings / fenix restart (FOC-1107 + FOC-1065) --------------------
 
 test("FOC-1107: usage() lists the new commands", () => {

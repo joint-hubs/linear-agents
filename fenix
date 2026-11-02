@@ -804,8 +804,9 @@ keys_ok() {
 
 # Every Compose secret file must exist or `docker compose up` fails on the
 # missing file mount (FOC-786). Create missing ones empty, owner-only —
-# provider_api_key is optional (an empty file just means unauthenticated), and
-# keys_ok above keeps requiring only the three required keys.
+# provider_api_key and linear_api_key_pisi (FOC-1148) are optional (an empty
+# file just means unauthenticated / the pisi integration off), and keys_ok
+# above keeps requiring only the three required keys.
 # FOC-808: the cache volume must be writable by node. Docker gives a NEW named
 # volume the image directory's ownership (node:fenix since this image), but a
 # volume created by an earlier image is root-owned and the entrypoint (uid
@@ -827,7 +828,7 @@ ensure_secret_files() {
   mkdir -p "$SECRET_DIR"
   chmod 700 "$SECRET_DIR" 2>/dev/null || true
   umask 077
-  for f in openrouter_api_key linear_api_key github_token provider_api_key; do
+  for f in openrouter_api_key linear_api_key linear_api_key_pisi github_token provider_api_key; do
     if [ ! -e "$SECRET_DIR/$f" ]; then
       : > "$SECRET_DIR/$f"
       chmod 600 "$SECRET_DIR/$f" 2>/dev/null || true
@@ -1047,8 +1048,9 @@ case "$cmd" in
     printf 'image before: %s %s\n' "$old_ref" "${before:-none}"
     printf 'image after:  %s %s\n' "$new_ref" "$(image_digest "$new_ref")"
     # A newer compose file may mount a secret file this install never had
-    # (FOC-786's optional provider_api_key) — `docker compose up` fails on the
-    # missing bind source. Same guarantee `up` gives, before the recreate.
+    # (FOC-786's optional provider_api_key, FOC-1148's linear_api_key_pisi) —
+    # `docker compose up` fails on the missing bind source. Same guarantee `up`
+    # gives, before the recreate.
     ensure_secret_files
     ensure_cache_volume
     exec docker compose up -d
