@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { runDir, teeAbsPath, writeRegistry } from "./supervisor-lib.mjs";
 import { createTaskSessionStore } from "./task-sessions.mjs";
-import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
+import { hermeticEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -67,10 +67,16 @@ function fixtureRepo() {
   return repo;
 }
 
+// FOC-1164: hermeticEnv, not `...process.env`. When the suite runs inside a
+// Fenix supervised child the ambient env carries a full host identity, and the
+// status child read the host's LA_TASK_ID as its own — printing a journal line
+// for a run that has none. hermeticEnv strips the identity seams, pins the
+// state roots to the fixture home, and lets a test's deliberate seam (`extra`)
+// win — which is how the journal tests set LA_TASK_ID on purpose.
 const status = (runId, extra = [], env = {}) =>
   spawnSync(process.execPath, [STATUS, "--run", runId, ...extra], {
     encoding: "utf8",
-    env: { ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key", ...env },
+    env: hermeticEnv(env),
   });
 
 const parse = (r) => {
@@ -381,13 +387,16 @@ test("returns reason=exit when a live child finishes during the wait", () => {
       [SPAWN, "--run", runId, "--squad", "dev", "--task", "FOC-123", "--prompt", "k", "--repo", repo],
       {
         encoding: "utf8",
-        env: { ...scrubbedEnv(), OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", MOCK_CLAUDE_HANG_MS: "1500" },
+        // FOC-1164: hermeticEnv carries the same mock/toolchain seams the
+        // hand-rolled spread used to set, plus the identity-seam strip; the
+        // 1500 ms hang is the only deliberate override.
+        env: hermeticEnv({ MOCK_CLAUDE_HANG_MS: "1500" }),
       },
     ),
   );
   const out = parse(status(runId, ["--wait", "--timeout-ms", "15000"]));
   if (out.reason !== "exit") fail(`reason was ${out.reason} (child status ${out.children[0].status})`);
-  spawnSync(process.execPath, [STOP, "--run", runId, "--child", child.childId], { encoding: "utf8" });
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", child.childId], { encoding: "utf8", env: hermeticEnv() });
 });
 
 test("returns reason=gate when a pending gate appears mid-wait", () => {
