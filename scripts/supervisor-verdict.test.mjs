@@ -474,6 +474,45 @@ test("a round that reproduced the previous one is refused, showing both", () => 
   assert.match(out.hint, /change strategy/);
 });
 
+test("a pass followed by a fail on the same tree is a new opinion, not a reproduced round", () => {
+  // FOC-1146: two verdicts on one tree hash identically — the fingerprint
+  // measures the WORK, never the judgment about it. A pass the operator
+  // re-records as a fail (same tree, no failing tests either way) carries a
+  // new opinion, and the round must open for the rework the fail asks for.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+  ]);
+  record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", NO_TESTS_REASON]);
+
+  const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
+  assert.equal(out.ok, true, out.error);
+  // `repeated` stays the raw fingerprint comparison: the tree really did not move.
+  assert.equal(out.progress.repeated, true);
+  assert.equal(out.progress.rounds, 2);
+});
+
+test("a repeat with a NEW finding is allowed — the finding is something to act on", () => {
+  // Same verdict, same tree, same failing tests — but the reviewer looked
+  // harder and found one more thing. Refusing that would refuse the fix.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  record(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--finding", JSON.stringify({ text: "the retry path drops the lock", evidence: "scripts/ledger.mjs:91 retry" }),
+    "--failing-test", "suite/a",
+  ]);
+
+  const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.progress.repeated, true);
+});
+
 test("a third DIFFERING round is allowed — the old cap of 2 is gone", () => {
   // The case a counter always got wrong: a run that is converging, cut off at
   // the same number as one going in circles.

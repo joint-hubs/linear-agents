@@ -1228,6 +1228,34 @@ test("the dashboard write routes are denied from a child shell (FOC-788 follow-u
   }
 });
 
+test("FOC-1166: a worktree-isolated subagent delegation is refused for every child", () => {
+  // Three incidents (FOC-1161, the FOC-1151 fix round, FOC-1162) had the same
+  // shape: a child delegated an Agent call with isolation: "worktree", the
+  // harness created a .claude/worktrees/agent-<id> tree under the MAIN
+  // checkout — outside the run's registry — and the child fast-forwarded onto
+  // the stray branch it found there. The refusal lives in the block
+  // buildChildSettings appends itself, so no squad file or --settings extra
+  // can end up without it. `Agent(isolation:worktree)` is the documented
+  // input-parameter rule form for the Agent tool; a subagent call that omits
+  // the parameter is never matched, so plain Agent calls stay allowed.
+  // `EnterWorktree` is the dedicated tool for the same move, which the Agent
+  // rule alone does not cover.
+  const rules = ["Agent(isolation:worktree)", "EnterWorktree"];
+  for (const rule of rules) {
+    if (!SUPERVISOR_DENY.includes(rule)) fail(`SUPERVISOR_DENY is missing ${rule}`);
+    if (!buildChildSettings({}).permissions.deny.includes(rule)) {
+      fail(`${rule} never reaches the generated child settings`);
+    }
+  }
+  // And they stay the Supervisor's own single entries: a squad file (or
+  // --settings extra) carrying them too is deduped to one copy, as everywhere
+  // else on the list.
+  const deny = buildChildSettings({ permissions: { deny: [...rules] } }).permissions.deny;
+  for (const rule of rules) {
+    if (deny.filter((r) => r === rule).length !== 1) fail(`not deduped: ${JSON.stringify(deny)}`);
+  }
+});
+
 test("the generated file carries the deny list and exactly the working-state SessionStart hook", () => {
   // `claude --settings` loads ADDITIONAL settings. An allow entry here could only
   // grant, never remove; the squad's own hooks block is NOT copied (double

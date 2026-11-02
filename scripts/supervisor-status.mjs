@@ -40,6 +40,7 @@
 // SessionStart hook fires before the first spawn too, and a hook that exits 1
 // would inject an error into the session context instead of a briefing.
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -292,6 +293,19 @@ function noteModelDrift(children) {
   }
 }
 
+// FOC-1166: the human counterpart of the snapshot's `strayWorktrees` — same
+// channel as the notes above, because stdout is the JSON the Supervisor
+// parses and a note it cannot read is a note it cannot act on. Cleanup goes
+// through supervisor-cleanup.mjs; this line only owes the lead attention.
+function noteStrayWorktrees(snap) {
+  for (const w of snap.strayWorktrees ?? []) {
+    console.error(
+      `stray worktree: ${w.path} (branch ${w.branch ?? "unknown"}, ` +
+        `${w.dirtyFiles ?? "?"} dirty file(s)) — see scripts/supervisor-cleanup.mjs`,
+    );
+  }
+}
+
 function snapshot(runId, { childFilter, tail }) {
   const registry = readRegistry(runId);
   const now = Date.now();
@@ -389,6 +403,10 @@ function snapshot(runId, { childFilter, tail }) {
       .filter(([, p]) => p?.repeated === true)
       .map(([taskId, p]) => ({ taskId, rounds: p.rounds, fingerprint: p.latest })),
     stallSilenceMs: STALL_SILENCE_MS,
+    // FOC-1166: the stray agent worktrees the scan found under the main
+    // checkout (empty on a clean tree). Named in the snapshot because nothing
+    // else in it can see a tree the registry never recorded.
+    strayWorktrees: scanStrayWorktrees(),
   };
 }
 
@@ -397,6 +415,83 @@ function snapshot(runId, { childFilter, tail }) {
 // Read-only here: entries are written by state-journal.mjs, never by status.
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+// ── stray agent worktrees (FOC-1166) ─────────────────────────────────────────
+// Three incidents (FOC-1161, the FOC-1151 fix round, FOC-1162) had the same
+// shape: a DEV child delegated a worktree-isolated subagent (Agent tool,
+// isolation: "worktree"), the harness created
+// <main-checkout>/.claude/worktrees/agent-<id> OUTSIDE the run's registry, and
+// the child fast-forwarded onto the stray branch it found there. The generated
+// child settings now refuse the call (SUPERVISOR_DENY, FOC-1166); this scan is
+// the detector for the trees that predate it: any agent-* directory under
+// .claude/worktrees in the repo the supervisor runs over — LA_ROOT when set
+// (the same resolution readTaskJournal below uses), else the checkout this
+// script lives in.
+//
+// Read-only and fail-soft by design, same discipline as briefingHolds: a
+// missing directory, an unreadable tree or an unusable git is an entry with
+// null facts (or nothing at all), never a crash of the snapshot. What to DO
+// with a stray stays with supervisor-cleanup.mjs (list | propose | remove);
+// this scan only surfaces it — it feeds that flow, it does not bypass it.
+
+// Tests point this seam at a fixture repo; LA_ROOT is the deployment's
+// main-checkout seam, REPO_ROOT the fallback when neither is set.
+function strayScanRoot(env = process.env) {
+  if (env.LA_SUPERVISOR_STRAY_SCAN_ROOT) return resolve(env.LA_SUPERVISOR_STRAY_SCAN_ROOT);
+  if (env.LA_ROOT) return resolve(env.LA_ROOT);
+  return REPO_ROOT;
+}
+
+// One scan per process and root: the wait loop re-reads the snapshot every
+// 500 ms, and a stray neither appears nor vanishes fast enough to be worth a
+// git spawn per poll.
+const strayScanCache = new Map();
+
+export function scanStrayWorktrees(root = strayScanRoot()) {
+  const key = resolve(root);
+  if (strayScanCache.has(key)) return strayScanCache.get(key);
+  const strays = (() => {
+    const dir = join(key, ".claude", "worktrees");
+    if (!existsSync(dir)) return [];
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const name of names.filter((n) => n.startsWith("agent-")).sort()) {
+      const path = join(dir, name);
+      try {
+        if (!statSync(path).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      out.push({ path, ...worktreeFacts(path) });
+    }
+    return out;
+  })();
+  strayScanCache.set(key, strays);
+  return strays;
+}
+
+// Branch and dirty-file count, best effort: git may be missing (spawnSync
+// reports an error instead of throwing), the directory may not be a git tree
+// at all — the harness can have made the folder and failed later — and
+// neither case may crash the scan. nulls say "unknown", the entry still flags
+// the directory it should not exist in.
+function worktreeFacts(path) {
+  const git = (...args) => {
+    const r = spawnSync("git", args, { cwd: path, encoding: "utf8", timeout: 10_000, windowsHide: true });
+    return r.status === 0 && typeof r.stdout === "string" ? r.stdout.trim() : null;
+  };
+  const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+  const porcelain = git("status", "--porcelain");
+  return {
+    branch,
+    dirtyFiles: porcelain === null ? null : porcelain.split("\n").filter((l) => l.trim()).length,
+  };
+}
 
 function readTaskJournal(taskId) {
   if (!taskId) return null;
@@ -597,6 +692,7 @@ if (!args.wait) {
   noteUnverifiedCost(snap);
   noteIsolation(snap);
   noteModelDrift(snap.children);
+  noteStrayWorktrees(snap);
   console.log(JSON.stringify(snap, null, 2));
   process.exit(0);
 }
@@ -686,6 +782,7 @@ const final = snapshot(runId, { childFilter, tail });
 noteUnverifiedCost(final);
 noteIsolation(final);
 noteModelDrift(final.children);
+noteStrayWorktrees(final);
 
 console.log(
   JSON.stringify(

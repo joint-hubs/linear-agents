@@ -1767,6 +1767,22 @@ export const SUPERVISOR_DENY = [
   "PowerShell(*/api/settings/*)",
   "PowerShell(*/api/gates/*)",
   "PowerShell(*/api/holds/*)",
+  // FOC-1166 (2026-11-02): a worktree-isolated subagent is not a child's move.
+  // Three incidents had the same shape — a child delegated an Agent call with
+  // isolation: "worktree", the harness created a
+  // <main-checkout>/.claude/worktrees/agent-<id> tree OUTSIDE the run's
+  // registry, and the child fast-forwarded onto the stray branch it found
+  // there. `Agent(isolation:worktree)` is the documented rule form for an
+  // input parameter (deny rules match top-level input params as
+  // Tool(param:value)); a subagent call that omits the parameter is never
+  // matched, so plain Agent delegation stays allowed. `EnterWorktree` is the
+  // dedicated tool for the same move and needs its own entry. Deny rules, not
+  // a PreToolUse hook: the hook form would fire on every Agent call to decide
+  // what a static rule already decides. Not a sandbox, like every rule here —
+  // but the accidental path is closed, and supervisor-status.mjs scans for
+  // the trees that predate it.
+  "Agent(isolation:worktree)",
+  "EnterWorktree",
 ];
 
 export const childSettingsPath = (runId, childId) =>

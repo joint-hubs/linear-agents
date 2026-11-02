@@ -829,6 +829,82 @@ test("a corrupt holds store surfaces holdsError instead of crashing the briefing
   if (out.holdsCount !== 0) fail(`holdsCount was ${out.holdsCount}`);
 });
 
+// ── stray agent worktrees (FOC-1166) ─────────────────────────────────────────
+// A child that delegated a worktree-isolated subagent left a
+// .claude/worktrees/agent-<id> tree under the MAIN checkout — outside the run
+// registry, invisible to every other snapshot field. The snapshot names it.
+
+test("flags a stray agent worktree under the scan root", () => {
+  const runId = fixtureRun();
+  const repo = fixtureRepo();
+  const stray = join(repo, ".claude", "worktrees", "agent-test");
+  execFileSync("git", ["worktree", "add", "-b", "worktree-agent-foc1166", stray, "HEAD"], {
+    cwd: repo, stdio: "ignore",
+  });
+  // Dirty content, so the count is a real measurement: one untracked file.
+  writeFileSync(join(stray, "scratch.txt"), "left behind\n");
+
+  const out = parse(status(runId, [], { LA_SUPERVISOR_STRAY_SCAN_ROOT: repo }));
+  const strays = out.strayWorktrees;
+  if (!Array.isArray(strays) || strays.length !== 1) fail(`strayWorktrees was ${JSON.stringify(strays)}`);
+  if (strays[0].path !== stray) fail(`path was ${strays[0].path}`);
+  if (strays[0].branch !== "worktree-agent-foc1166") fail(`branch was ${strays[0].branch}`);
+  if (strays[0].dirtyFiles !== 1) fail(`dirtyFiles was ${strays[0].dirtyFiles}`);
+  // The human channel names it too — stdout stays the parsed JSON.
+  const ran = status(runId, [], { LA_SUPERVISOR_STRAY_SCAN_ROOT: repo });
+  if (!/stray worktree/.test(ran.stderr)) fail(`stderr said nothing about strays: ${ran.stderr}`);
+});
+
+test("a clean scan root reports an empty strayWorktrees and no stderr note", () => {
+  const runId = fixtureRun();
+  const repo = fixtureRepo();
+  const out = parse(status(runId, [], { LA_SUPERVISOR_STRAY_SCAN_ROOT: repo }));
+  if (JSON.stringify(out.strayWorktrees) !== "[]") fail(`strayWorktrees was ${JSON.stringify(out.strayWorktrees)}`);
+  const ran = status(runId, [], { LA_SUPERVISOR_STRAY_SCAN_ROOT: repo });
+  if (/stray worktree/.test(ran.stderr)) fail(`stderr invented a stray: ${ran.stderr}`);
+});
+
+test("a directory that is not a worktree is still flagged, with unknown facts; git going missing cannot crash it", () => {
+  const runId = fixtureRun();
+  const repo = fixtureRepo();
+  const stray = join(repo, ".claude", "worktrees", "agent-notagit");
+  mkdirSync(stray, { recursive: true });
+  // The harness can have made the folder and failed before the worktree was
+  // usable: a .git pointer file that names a gitdir that does not exist. Git
+  // refuses the tree — the scan reports unknown facts, not a crash.
+  writeFileSync(join(stray, ".git"), "gitdir: ../nowhere/agent-notagit.git\n");
+
+  const out = parse(status(runId, [], { LA_SUPERVISOR_STRAY_SCAN_ROOT: repo }));
+  const strays = out.strayWorktrees;
+  if (!Array.isArray(strays) || strays.length !== 1) fail(`strayWorktrees was ${JSON.stringify(strays)}`);
+  if (strays[0].branch !== null) fail(`branch was ${strays[0].branch}`);
+  if (strays[0].dirtyFiles !== null) fail(`dirtyFiles was ${strays[0].dirtyFiles}`);
+
+  // git unfindable (empty PATH): the scan degrades to nulls, the snapshot survives.
+  const noGit = parse(status(runId, [], { LA_SUPERVISOR_STRAY_SCAN_ROOT: repo, PATH: "" }));
+  if (!Array.isArray(noGit.strayWorktrees) || noGit.strayWorktrees.length !== 1) {
+    fail(`strayWorktrees without git was ${JSON.stringify(noGit.strayWorktrees)}`);
+  }
+  if (noGit.strayWorktrees[0].branch !== null || noGit.strayWorktrees[0].dirtyFiles !== null) {
+    fail(`expected unknown facts, got ${JSON.stringify(noGit.strayWorktrees[0])}`);
+  }
+});
+
+test("trees outside .claude/worktrees are not flagged; non-agent names are ignored", () => {
+  const runId = fixtureRun();
+  const repo = fixtureRepo();
+  // A real worktree of the fixture repo at the sibling location children use —
+  // registered territory, not a stray.
+  execFileSync("git", ["worktree", "add", "-b", "dev-side", join(repo, "..", "la-wt-side"), "HEAD"], {
+    cwd: repo, stdio: "ignore",
+  });
+  // An entry under .claude/worktrees that the harness did not create.
+  mkdirSync(join(repo, ".claude", "worktrees", "not-an-agent"), { recursive: true });
+
+  const out = parse(status(runId, [], { LA_SUPERVISOR_STRAY_SCAN_ROOT: repo }));
+  if (JSON.stringify(out.strayWorktrees) !== "[]") fail(`strayWorktrees was ${JSON.stringify(out.strayWorktrees)}`);
+});
+
 // ── summary ──────────────────────────────────────────────────────────────────
 for (const dir of cleanup) {
   try {

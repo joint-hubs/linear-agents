@@ -247,7 +247,18 @@ if (args["review-loop"]) {
 
   const repeated = comparableProgress(last?.fingerprint, prev?.fingerprint);
 
-  if (repeated === true) {
+  // A shared fingerprint says the TREE did not move, not that the round said
+  // nothing: a verdict that flipped (a pass re-recorded as a fail is operator
+  // judgment arriving) or a finding the previous round did not carry is new
+  // information, and the round it asks for must open. Only a repeat of BOTH
+  // the verdict and the findings buys the same result again.
+  const findingTexts = (record) =>
+    new Set((record?.findings ?? []).map((f) => String(f?.text ?? "").trim()).filter(Boolean));
+  const repeatedFindings =
+    repeated === true && [...findingTexts(last)].every((t) => findingTexts(prev).has(t));
+  const sameVerdict = repeated === true && last?.verdict === prev?.verdict;
+
+  if (repeated === true && repeatedFindings && sameVerdict) {
     failJson(
       `round ${last.round} of ${entry.taskId} reproduced round ${prev.round}: same diff, same failing tests — ` +
         `another identical round is budget, not progress`,
