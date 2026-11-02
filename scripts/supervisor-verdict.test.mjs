@@ -28,6 +28,11 @@ import {
 } from "./supervisor-test-fixtures.mjs";
 import { gatesDir, progressFingerprint, readRegistry, runDir, verdictPath, verdictsDir, writeRegistry } from "./supervisor-lib.mjs";
 import { returnGateQuestion } from "./supervisor-verdict.mjs";
+// Namespace (not named) import on purpose: the DOCKER_PROBE pin below has to
+// fail ON ITS OWN while the export does not exist yet — a named import of a
+// missing export is a link error that would kill the whole file, and red-first
+// honesty needs the named failure.
+import * as supervisorVerdict from "./supervisor-verdict.mjs";
 
 const { test, fail, summary } = harness();
 const VERDICT = join(ROOT, "scripts", "supervisor-verdict.mjs");
@@ -556,7 +561,9 @@ test("a test pass with a cited container run is recorded, keys in shape order", 
   assert.equal(out.ok, true, out.error);
   assert.equal(out.containerRun.cmd, "sh /src/docker/test-in-container.sh");
   assert.equal(out.containerRun.exit, 0);
-  assert.ok(existsSync(out.containerRun.outputRef));
+  // The citation points at the OUTPUT, not just at a path that happens to
+  // exist — read it back, content and all.
+  assert.equal(readFileSync(out.containerRun.outputRef, "utf8"), "74 passed, 0 failed\n");
   // The key sits with the other conditional evidence keys, before declaredAcs.
   const rec = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
   assert.equal(
@@ -593,6 +600,32 @@ test("--container-run and --container-unavailable together are refused (containe
   ], { LA_DOCKER_AVAILABLE: "1" });
   assert.equal(out.ok, false);
   assert.match(out.error, /container-run-contradiction/);
+});
+
+test("a --container-unavailable is refused when the probe says docker IS up (container-run-unavailable-while-docker-up)", () => {
+  // "unavailable" while the daemon answers is a lie IN the record — the same
+  // false-evidence class the pass gate refuses. The why flag is an escape
+  // hatch for a host that truly cannot run the container, not a skip button:
+  // REVIEW round 1 proved (probe P3b) that seam=1 + a reason recorded
+  // ok:true with containerRun: "unavailable: docker present but i did not
+  // run it" — exactly the omission-shaped record this refusal kills.
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-unavailable", "docker daemon not installed on this runner",
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /container-run-unavailable-while-docker-up/);
+});
+
+test("the docker probe is the template-free exit-code probe — docker info, no --format", () => {
+  // The round-1 probe ran `docker info --format {{.Server.Version}}`: docker
+  // info's Go-template field names drift between CLI versions, and CLI 28.4.0
+  // refuses that template outright ("can't evaluate field Server in type
+  // system.dockerInfo", exit 1) — so the probe reported a HEALTHY daemon as
+  // absent. The fix is the command itself: no template, exit code only, so
+  // the answer cannot depend on the CLI's output schema.
+  assert.deepEqual(supervisorVerdict.DOCKER_PROBE, { cmd: "docker", args: ["info"] });
 });
 
 test("a test fail needs no container run — the gate is a pass gate", () => {

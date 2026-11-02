@@ -772,6 +772,16 @@ function checkOutputRef(ref, flag, index, runId, worktree) {
 // need it (the same asymmetry the `--ran` gate has).
 
 /**
+ * The probe command itself, exported so the suite can hold it: plain
+ * `docker info` with NO --format. Its Go-template field names drift between
+ * Docker CLI versions — CLI 28.4.0 refuses `{{.Server.Version}}` outright
+ * ("can't evaluate field Server in type system.dockerInfo", exit 1), so a
+ * templated probe reports a HEALTHY daemon as absent. The availability answer
+ * is the exit code only, which no CLI version can reinterpret.
+ */
+export const DOCKER_PROBE = { cmd: "docker", args: ["info"] };
+
+/**
  * Is docker usable on this host? The env override is the TEST seam first
  * (`LA_DOCKER_AVAILABLE=1|0` — the suites set it so both gate branches are
  * pinnable offline and no suite depends on the host having a daemon); without
@@ -784,12 +794,11 @@ export function dockerAvailability(env = process.env) {
   if (override === "1") return { available: true, detail: "seam: LA_DOCKER_AVAILABLE=1" };
   if (override === "0") return { available: false, detail: "seam: LA_DOCKER_AVAILABLE=0" };
   try {
-    const out = execFileSync("docker", ["info", "--format", "{{.Server.Version}}"], {
+    execFileSync(DOCKER_PROBE.cmd, DOCKER_PROBE.args, {
       timeout: 20_000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "ignore", "ignore"],
     });
-    return { available: true, detail: `docker server ${String(out).trim()}` };
+    return { available: true, detail: "docker daemon reachable (docker info exit 0)" };
   } catch (err) {
     const why = String(err?.message ?? err).split("\n").map((l) => l.trim()).filter(Boolean)[0];
     return { available: false, detail: why || "docker probe failed" };
@@ -967,6 +976,22 @@ function cmdRecord(args) {
   // is a test-pass gate only — a fail does not need a container run, and other
   // squads are not asked for one.
   const { run: containerRun, unavailableWhy } = containerRunEvidence(args);
+  if (unavailableWhy) {
+    // "Unavailable" while the daemon answers is a lie IN the record — the
+    // why flag is the escape hatch for a host that cannot run the container,
+    // not a skip button (REVIEW r1 probe P3b: seam=1 + a reason recorded
+    // ok:true with containerRun: "unavailable: …"). Claim-level, so it
+    // protects a fail verdict citing it just the same.
+    const docker = dockerAvailability();
+    if (docker.available) {
+      failJson(
+        `container-run-unavailable-while-docker-up: the record says the container could not run, ` +
+          `but the docker probe answers (${docker.detail}) — run the Fenix container and cite it, ` +
+          `or fix the record`,
+        { dockerAvailable: true, hint: "delivery has to be able to see whether the container ran" },
+      );
+    }
+  }
   let containerRunField;
   if (containerRun) {
     containerRunField = {

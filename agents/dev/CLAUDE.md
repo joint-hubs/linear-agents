@@ -48,11 +48,17 @@ Model routing is **not** specified here — it changes often. Sole source of tru
 | role | use it for | `routing.dev` key |
 |------|------------|-------------------|
 | recon | context packet — files, patterns, risks | `recon` |
+| worker | bounded read-only lookups; verbose command runs ("run X, return ≤10 lines") | `worker` |
+| flash | read-only: mechanical extraction, formatting, checklists | `flash` |
+
+RETIRED from the flow (FOC-1179, the note below — do NOT act on these rows; `routing.dev` keys
+remain in `config/models.json` until the cost pass):
+
+| role | was | `routing.dev` key |
+|------|-----|-------------------|
 | implementer | standard code: whole edit→build→test→commit phase | `implement` |
 | refactorer | multi-file / cross-cutting change | `multifile` |
 | debugger | hard: multi-layer bug, architecture decision | `hard` |
-| worker | simple: single-file change, boilerplate, verbose commands | `worker` |
-| flash | mechanical: extraction, formatting, checklists | `flash` |
 
 **FOC-1179 — one context for one change: subagents are for reading (recon) only.** In the
 supervised DEV flow `recon`, `worker` and `flash` do read-only lookups; `implementer`,

@@ -784,6 +784,21 @@ test("kickoffy niosą wskaźnik FOC-1179 i nie obiecują trzech przebiegów", ()
   if (/równolegle/.test(templates)) fail("scripts/launch.mjs DEFAULT_KICKOFF_TEMPLATES.review nadal obiecuje przebiegi równolegle");
 });
 
+test("dry-run kickoff TEST prowadzi przepływ FOC-1179, nie wycofany przepływ deployu", () => {
+  // REVIEW r1 (blokujący 3): linia testowa w dry-run-kickoffs.json wciąż
+  // kierowała wycofanym przepływem deploy/health-check/scenario-gen
+  // (docs/agents/agent-4-test.md) — surface kickoffowy sprzeczny z zestawem
+  // ról. Ma nieść przepływ CI-parity (agents/test/CLAUDE.md, przebieg
+  // kontenerowy) i nie wskrzeszać wycofanych kroków.
+  const line = readJson("config/dry-run-kickoffs.json").test || "";
+  for (const token of ["agents/test/CLAUDE.md", "docker/test-in-container.sh", "FOC-1179"]) {
+    if (!line.includes(token)) fail(`config/dry-run-kickoffs.json (test) nie niesie przepływu FOC-1179: brak ${token}`);
+  }
+  for (const retired of ["agent-4-test.md", "health-check", "deploy (mocked)"]) {
+    if (line.includes(retired)) fail(`config/dry-run-kickoffs.json (test) nadal kieruje wycofanym przepływem deployu: ${retired}`);
+  }
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 console.log("");
 if (failures.length) {

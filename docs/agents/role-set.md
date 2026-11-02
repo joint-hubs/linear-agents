@@ -6,6 +6,12 @@
 > (the single source of truth per each file's precedence header); this table is the cross-squad
 > summary. Model slugs themselves live in `config/models.json` / the settings overlay — never here.
 
+## Supervisor — the operator's agent, above the squads
+
+| role | model source | must produce | must not do |
+|------|--------------|--------------|-------------|
+| lead (you) | settings overlay `routing.supervisor.lead` (set on this host; FOC-1171 mechanism); routing table fallback per `child-model.mjs` | the relay to Mateusz (gate records, status blocks), the verdicts and delivery records delivery reads, child resumes through `supervisor-followup.mjs`, the review-loop round control (max 2 dev↔review cycles; delivery verdicts count as rounds) | must not write product code — the implementation is the DEV lead's own (FOC-1179); must not push, open a PR or merge without an answered gate; must not let a child reach Linear or the human directly |
+
 ## REVIEW — one strong pass
 
 | role | model source | must produce | must not do |
