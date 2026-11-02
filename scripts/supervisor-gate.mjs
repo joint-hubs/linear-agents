@@ -743,6 +743,22 @@ export function answerHold({ runId, holdId, text, note = null, answeredBy = null
     // left is the fs write failing — surfaced with the CLI's message, never a
     // stack.)
     try {
+      // FOC-1165 #22 test seam: the store-write fault must fail on every
+      // platform and uid — a chmod-based fault is a Windows accident (Linux
+      // allows a rename over a read-only file, and root bypasses file modes
+      // entirely), so it never fires in the Linux-as-root CI image. Arming
+      // LA_SUPERVISOR_STORE_WRITE_FAULT makes the write path throw an
+      // fs-shaped EPERM before the store is touched, deterministically on
+      // every platform and uid; the catch below maps it to "store-write"
+      // exactly like a real rename failure. Production never sets the env,
+      // so this branch is unreachable there.
+      if (process.env.LA_SUPERVISOR_STORE_WRITE_FAULT === "1") {
+        const seamErr = new Error(
+          "EPERM: operation not permitted, rename '<holds.json>' -> '<holds.json.tmp>'",
+        );
+        seamErr.code = "EPERM";
+        throw seamErr;
+      }
       return patchHold(runId, holdId, { state: "answered", answer }, { event: "answered", at, text });
     } catch (err) {
       // FOC-1151: a failed store write is not a client mistake — rewrapping it

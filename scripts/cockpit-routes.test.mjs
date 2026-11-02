@@ -57,7 +57,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import net from "node:net";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -683,9 +683,11 @@ try {
     // FOC-1151: a failing holds-store write inside answerHold is a SERVER
     // fault, not a client mistake — the record was valid, owned and checked;
     // only the fs write failed. The route must say 500, not the old
-    // invalid-answer 400. Real-file seam: a read-only holds.json reads fine
-    // but the atomic rename underneath writeHolds fails (Windows read-only
-    // destination → EPERM).
+    // invalid-answer 400. Deterministic seam (FOC-1165 #22): a dedicated
+    // server armed with LA_SUPERVISOR_STORE_WRITE_FAULT throws an fs-shaped
+    // EPERM in the store-write path — on every platform and uid, unlike the
+    // old read-only-file trick that Linux-as-root ignored. The main server
+    // (no seam) serves the follow-up checks and the cleanup answer.
     const holdsFault = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8"));
     holdsFault.holds.push({
       id: "hold-7", origin: "test", question: "a hold the store refuses to record?",
@@ -695,17 +697,20 @@ try {
       answer: null, history: [{ event: "created", at: NOW }], blocks: null, resolution: null,
     });
     writeFileSync(join(supState, "run-1", "holds.json"), JSON.stringify(holdsFault), "utf8");
-    chmodSync(join(supState, "run-1", "holds.json"), 0o444);
-    const storeFault = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-7", text: "values here" } });
-    check("hold answer with a failing store write -> 500 store-write (server fault, not a 400)",
-      storeFault.status === 500 && storeFault.body?.error === "store-write",
-      JSON.stringify(storeFault));
-    chmodSync(join(supState, "run-1", "holds.json"), 0o644);
+    const faultSpawned = await spawnCockpitServer({ ...baseEnv, LA_SUPERVISOR_STORE_WRITE_FAULT: "1" });
+    try {
+      const storeFault = await call(faultSpawned.port, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-7", text: "values here" } });
+      check("hold answer with a failing store write -> 500 store-write (server fault, not a 400)",
+        storeFault.status === 500 && storeFault.body?.error === "store-write",
+        JSON.stringify(storeFault));
+    } finally {
+      await faultSpawned.stop();
+    }
     check("the failed store write left the hold open (nothing recorded)",
       JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8")).holds.find((h) => h.id === "hold-7")?.state === "open",
       "hold-7 state after the 500");
     // Restore the baseline for the later needsYou-count assertions: with the
-    // store writable again, hold-7 answers normally.
+    // seam not armed (main server), hold-7 answers normally.
     const cleanup = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-7", text: "values here" } });
     check("hold-7 answers normally once the store is writable again -> 200",
       cleanup.status === 200 && cleanup.body?.recorded === true, JSON.stringify(cleanup).slice(0, 300));
