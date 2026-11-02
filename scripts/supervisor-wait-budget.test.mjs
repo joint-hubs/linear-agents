@@ -19,6 +19,11 @@
 // the spawn blocks on. The default posture is unchanged — any *TIMEOUT_MS
 // constant above 120 000 that is not on the allowlist still fails.
 //
+// FOC-1156: the *_KILL_MS suffix is the standing kill-timeout naming
+// convention — a constant so named is exempt by its name (it is a subprocess
+// kill-timeout by construction), so the next kill-timeout constant needs no
+// allowlist edit. An unlisted *TIMEOUT_MS above the bound still fails.
+//
 // Run: node scripts/supervisor-wait-budget.test.mjs
 
 import assert from "node:assert/strict";
@@ -27,7 +32,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import { pollBaseMs } from "./supervisor-lib.mjs";
+import {
+  DEPS_INSTALL_TIMEOUT_MS,
+  INSTALL_KILL_GRACE_MS,
+  pollBaseMs,
+} from "./supervisor-lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SUPERVISOR_AGENTS_DIR = join(ROOT, "agents", "supervisor");
@@ -51,12 +60,19 @@ function filesUnder(dir, extensions, out = []) {
 // NOT in-turn waits and are excluded by name.
 //
 // Constants named in NON_WAIT_TIMEOUTS are exempt: each is a kill-timeout on
-// a subprocess, not a wait the spawn blocks on, and each entry carries the
+// a subprocess, not a re-issued poll/wait loop, and each entry carries the
 // reason. The scan scope and the 120 000 ms bound are untouched.
+//
+// FOC-1156 record correction: the deps install IS awaited — the Supervisor's
+// Bash call waits for it, bounded at the DEPS_INSTALL_TIMEOUT_MS + kill-grace
+// constants (derived below, not hardcoded), and Claude Code moves an over-time
+// call to the background rather than killing it. The block on the child launch
+// stays; only the old "not an in-turn wait" wording was wrong.
+const DEPS_INSTALL_BOUND = `${DEPS_INSTALL_TIMEOUT_MS / 1000} s + ${INSTALL_KILL_GRACE_MS / 1000} s`;
 const NON_WAIT_TIMEOUTS = new Map([
   [
     "DEPS_INSTALL_TIMEOUT_MS",
-    "subprocess kill-timeout for worktree deps install (FOC-1153); not an in-turn wait",
+    `subprocess kill-timeout for worktree deps install (FOC-1153); the Supervisor's Bash call waits for it, bounded at ${DEPS_INSTALL_BOUND} kill grace, and Claude Code moves an over-time call to the background rather than killing it (FOC-1156)`,
   ],
 ]);
 
@@ -68,8 +84,13 @@ function inTurnWaitViolations(src) {
   for (const m of src.matchAll(/--wait[^0-9\n]{0,60}([0-9]{4,}[0-9_]*)/gi)) {
     if (Number(m[1].replace(/_/g, "")) > MAX_IN_TURN_WAIT_MS) violations.push(m[0].trim());
   }
-  for (const m of src.matchAll(/\b([A-Z_]*(?:TIMEOUT_MS|POLL_MS|WAIT_MS)[A-Z_]*)\s*=\s*([0-9][0-9_]*)/g)) {
+  for (const m of src.matchAll(/\b([A-Z_]*(?:TIMEOUT_MS|POLL_MS|WAIT_MS|KILL_MS)[A-Z_]*)\s*=\s*([0-9][0-9_]*)/g)) {
     if (Number(m[2].replace(/_/g, "")) <= MAX_IN_TURN_WAIT_MS) continue;
+    // FOC-1156: the *_KILL_MS suffix is the standing kill-timeout naming
+    // convention — a constant so named is a subprocess kill-timeout by
+    // construction, not a wait, so the name itself is the allowance and the
+    // next kill-timeout constant needs no allowlist edit.
+    if (m[1].endsWith("_KILL_MS")) continue;
     if (NON_WAIT_TIMEOUTS.has(m[1])) continue; // documented carve-out, reasons above
     violations.push(m[0].trim());
   }
@@ -127,6 +148,32 @@ describe("FOC-608 AC2 — the >120 s constant allowlist stays minimal (TEST-r1)"
     for (const [name, reason] of NON_WAIT_TIMEOUTS) {
       assert.ok(reason.trim().length > 0, `allowlist entry ${name} needs a reason`);
     }
+  });
+
+  it("the deps-install carve-out reason names the wait bound and the background-move behavior (FOC-1156)", () => {
+    // FOC-1156 record correction: the old reason said the install is "not an
+    // in-turn wait", which is wrong — the Supervisor's Bash call DOES wait for
+    // it. The reason must say plainly that the wait happens, what bounds it,
+    // and why nothing is lost when it runs long.
+    const reason = NON_WAIT_TIMEOUTS.get("DEPS_INSTALL_TIMEOUT_MS") ?? "";
+    assert.match(
+      reason,
+      new RegExp(`${DEPS_INSTALL_TIMEOUT_MS / 1000} s \\+ ${INSTALL_KILL_GRACE_MS / 1000} s`),
+      "the reason must state the install's bound (derived from the lib constants)",
+    );
+    assert.match(reason, /background/, "the reason must state Claude Code's over-time background-move");
+    assert.doesNotMatch(reason, /not an in-turn wait/, "the corrected record must not repeat the inaccurate claim");
+  });
+
+  it("a *_KILL_MS kill-timeout constant needs no allowlist entry (FOC-1156 naming convention)", () => {
+    // Name assembled so this file's own scan does not trip on it, as above.
+    const name = ["NEXT_THING", "KILL_MS"].join("_");
+    const src = `const ${name} = 300_000;`;
+    assert.deepEqual(
+      inTurnWaitViolations(src),
+      [],
+      "the *_KILL_MS suffix is the standing kill-timeout allowance — no allowlist edit needed",
+    );
   });
 });
 

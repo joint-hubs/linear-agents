@@ -655,7 +655,17 @@ if (referencedFiles.length) {
 // install is recorded and said out loud, but a child that can still work
 // without fresh deps is worth more than no child at all. Runs after every free
 // refusal above, so a refused spawn never pays for an install.
-const depsInstall = await installWorktreeDeps(worktree.worktree);
+// FOC-1156 review r2: the stale-reinstall (a marker-less node_modules is
+// recursively deleted and installed fresh) runs on a VOUCHED tree only — the
+// worktree this ensure CREATED, or a reused one contained in the workspace
+// worktree root and claimed by this run's owner id (the same owner string
+// ensureWorktree was given, stamped back on its result). Anything unproven
+// keeps the old skip-on-presence behavior; the default deny lives in the lib.
+const depsInstall = await installWorktreeDeps(worktree.worktree, {
+  created: worktree.created,
+  gitRoot,
+  ownerId: worktree.owner,
+});
 if (depsInstall.ok) {
   const installed = depsInstall.locations.filter((l) => !l.skipped);
   if (installed.length) {
