@@ -552,6 +552,25 @@ test("the task sessions detail reports the enabled pickup's pollSeconds and stat
   }
 });
 
+test("the task sessions detail reports the pickup's project scope when taskSessions.autoPickup.projects is set (FOC-1147)", () => {
+  const dir = tempDir();
+  const settings = path.join(dir, "settings.json");
+  fs.writeFileSync(
+    settings,
+    JSON.stringify({
+      taskSessions: { autoPickup: { enabled: true, pollSeconds: 120, states: ["Todo"], projects: ["Alpha", "Beta"] } },
+    }),
+    "utf8",
+  );
+  try {
+    const c = checkTaskSessions({ env: { LA_DATA_HOME: dir, LA_SETTINGS_FILE: settings }, fsImpl: fs });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /auto-pickup: on \(every 120s, states Todo, projects Alpha,Beta\)$/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runChecks includes the task sessions check", async () => {
   const dir = tempDir();
   try {

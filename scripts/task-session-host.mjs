@@ -125,9 +125,9 @@ const redactOperatorText = async (text) => {
 
 // FOC-902 §D: when the task-ownership helper exists (branch
 // fenix-task-ownership), its checkOwnership decides the pickup owner scope;
-// until it lands, the projects.json rule in createTaskSessionHost applies.
-// One try import, resolved once at module load — a missing module is the
-// normal case here, never an error.
+// until it lands, the by-project scope rule in createTaskSessionHost applies
+// (FOC-1147 round 3). One try import, resolved once at module load — a
+// missing module is the normal case here, never an error.
 let taskOwnership = null;
 try {
   taskOwnership = await import("./task-ownership.mjs");
@@ -201,65 +201,70 @@ function projectEntries(env) {
 }
 
 /**
- * The Linear project the auto-pickup owner scope resolves to for `workspace`
- * (FOC-1147): the projects.json entries whose OWN `workspace` field names it,
- * yielding exactly one distinct `linearProject`. The map is local and
- * synchronous — no Linear call in the pickup tick; each entry's workspace
- * field is the Linear workspace whose tickets the mapped repository serves.
+ * The auto-pickup owner scope as a set of Linear project names (FOC-1147
+ * round 3, the delivery-owner redesign). The scope is BY PROJECT, never by
+ * workspace — the workspace-name comparison is dead here, no survivors:
  *
- * Matching the task-key workspace against a repo NAME (repoRefName of
- * entry.repo) was the FOC-1088 round-2 bug in a second seat: the workspace
- * half of a task key is the Linear workspace name ("jointhubs"),
- * repoRefName yields the repo directory basename — the two can never be
- * equal, so the scope always came up empty. That comparison mode is gone
- * here; the FOC-1088 session-repo lane keeps its own issue-driven resolution
- * (resolveGitRootFor) and is untouched by this rule.
+ * 1. `taskSessions.autoPickup.projects` (an array of Linear project names),
+ *    when set, IS the owner scope — the projects map is not consulted at all.
+ * 2. Without the setting, the scope is the set of DISTINCT `linearProject`
+ *    values across the projects map (each issue flows to its Linear project
+ *    via `issue.project.name`, the FOC-1088 direction). The task-key
+ *    workspace ("jointhubs") NEVER filters entries: matching
+ *    `entry.workspace` against it was the rounds-1-2 rule and it only ever
+ *    matched its own test fixtures — the real map carries workspace
+ *    'joi'/'pisi' (`fenix-projects add` defaults `--workspace joi`), so the
+ *    committed rule failed every real tick closed. By-project is also the
+ *    safe direction: candidates only come from the host's OWN Linear key, so
+ *    a foreign workspace's projects (pisi) never appear in the candidate
+ *    list to begin with.
  *
- * Fail closed WITH the operator remedy on every gap — a missing/unreadable
- * map, no entry for the workspace, no linearProject on the matches, more
- * than one distinct project (ambiguous). The throw lands in
- * pickup.lastError through the tick's catch.
+ * Fail closed WITH the operator remedy when there is no setting AND the map
+ * is missing/unreadable or names no linearProject at all. The remedy names
+ * BOTH ways out — the taskSessions.autoPickup.projects setting and
+ * `fenix-projects add --linear-project …` — and never suggests rewriting
+ * entries to a particular workspace. The throw lands in pickup.lastError
+ * through the tick's catch. The map is local and synchronous — no Linear
+ * call in the pickup tick.
  *
  * @param {NodeJS.ProcessEnv} env
- * @param {string} workspace the task-key workspace (the pickup's scope)
- * @returns {string} the one distinct Linear project
+ * @param {string[]|null|undefined} projectsSetting the normalized
+ *   taskSessions.autoPickup.projects (null/undefined = unset)
+ * @returns {Set<string>} the Linear project names in scope
  * @throws {Error} when the scope cannot be proven
  */
-export function ownerProjectForWorkspace(env, workspace) {
+export function ownerProjectsFor(env, projectsSetting) {
+  if (Array.isArray(projectsSetting) && projectsSetting.length > 0) {
+    return new Set(projectsSetting);
+  }
+  const settingRemedy =
+    `set taskSessions.autoPickup.projects to the Linear project names this host picks ` +
+    `(fenix settings set taskSessions.autoPickup.projects '["<Linear project>"]')`;
+  const mapRemedy = `or map the repositories: node scripts/fenix-projects.mjs add --linear-project <name> --repo <repo template>`;
   const entries = projectEntries(env);
   if (entries === null) {
     throw new Error(
-      `no owner scope for workspace '${workspace}': the projects map (${projectsConfigPath(env)}) is missing or unreadable — ` +
-        `point LA_PROJECTS_FILE at a readable map, or turn the pickup off (fenix settings set taskSessions.autoPickup.enabled false + fenix restart supervisor)`,
-    );
-  }
-  const matched = entries.filter((entry) => typeof entry?.workspace === "string" && entry.workspace.trim() === workspace);
-  if (matched.length === 0) {
-    throw new Error(
-      `no owner scope for workspace '${workspace}': no projects.json entry carries workspace '${workspace}' — ` +
-        `map it: node scripts/fenix-projects.mjs add --linear-project <name> --repo <repo template> --workspace ${workspace}, ` +
-        `or set taskSessions.autoPickup.workspace to a workspace the map defines`,
+      `no owner scope for auto-pickup: the projects map (${projectsConfigPath(env)}) is missing or unreadable — ` +
+        `${settingRemedy}, ${mapRemedy}, or turn the pickup off ` +
+        `(fenix settings set taskSessions.autoPickup.enabled false + fenix restart supervisor)`,
     );
   }
   const projects = new Set();
-  for (const entry of matched) {
+  for (const entry of entries) {
     if (typeof entry?.linearProject === "string" && entry.linearProject.trim()) projects.add(entry.linearProject.trim());
   }
   if (projects.size === 0) {
+    const shape =
+      entries.length === 0
+        ? "is empty"
+        : `carries ${entries.length} entr${entries.length === 1 ? "y" : "ies"} but none names a linearProject`;
     throw new Error(
-      `no owner scope for workspace '${workspace}': ${matched.length} projects.json entr${matched.length === 1 ? "y carries" : "ies carry"} ` +
-        `workspace '${workspace}' but none of them names a linearProject — set the entry's linearProject field to the ` +
+      `no owner scope for auto-pickup: the projects map (${projectsConfigPath(env)}) ${shape} — ` +
+        `${settingRemedy}, ${mapRemedy}, or set each entry's linearProject field to the ` +
         `Linear project whose tickets this host picks`,
     );
   }
-  if (projects.size > 1) {
-    throw new Error(
-      `no owner scope for workspace '${workspace}': the projects map maps workspace '${workspace}' to ` +
-        `${projects.size} distinct Linear projects (${[...projects].join(", ")}) — ambiguous; ` +
-        `keep exactly one distinct linearProject for the workspace`,
-    );
-  }
-  return [...projects][0];
+  return projects;
 }
 
 /**
@@ -794,11 +799,13 @@ export function createTaskSessionHost(deps = {}) {
   // share the `<workspace>:` prefix.
   const pickupWorkspace = () => autoPickup.workspace || workspaceNameFor(baseEnv);
 
-  // FOC-1147: the owner-scope rule behind the fallback (below) — the projects
-  // map's workspace field → one distinct linearProject, failing closed with
-  // the remedy. Exported as ownerProjectForWorkspace; tests drive it directly
-  // and through a real tick via the deps.taskOwnership seam.
-  const linearProjectForWorkspace = (workspace) => ownerProjectForWorkspace(baseEnv, workspace);
+  // FOC-1147 round 3: the owner-scope rule behind the fallback (below) — the
+  // taskSessions.autoPickup.projects setting when set, otherwise the projects
+  // map's distinct linearProjects; never a workspace comparison. Exported as
+  // ownerProjectsFor; tests drive it directly and through a real tick via the
+  // deps.taskOwnership seam. Resolved per tick, so an operator fix (a set
+  // key, a repaired map) takes effect without a host restart.
+  const ownerScope = () => ownerProjectsFor(baseEnv, autoPickup.projects);
 
   // listCandidates: one `node linear-query.mjs issues --status <state>
   // [--label <l>] --json` per configured state (the offline env rules —
@@ -806,9 +813,9 @@ export function createTaskSessionHost(deps = {}) {
   // filtered to the owner scope. One failed state fails the whole tick: a
   // partial candidate list could silently skip tickets living in the state
   // that failed. When task-ownership's checkOwnership exists it replaces the
-  // projects.json rule, one call per candidate (deps.taskOwnership replaces
+  // by-project scope rule, one call per candidate (deps.taskOwnership replaces
   // the module for tests — undefined keeps the real module; null exercises
-  // the projects-map fallback through a real tick).
+  // the setting/map fallback through a real tick).
   const listCandidates = deps.listCandidates ?? (async () => {
     const script = join(HERE, "linear-query.mjs");
     const runOne = (state) =>
@@ -859,11 +866,13 @@ export function createTaskSessionHost(deps = {}) {
       }
       return kept;
     }
-    // FOC-1147: the fallback scope resolves through the projects map (the
-    // entries' workspace field) and fails closed WITH the remedy — the throw
-    // lands in pickup.lastError through the tick's catch.
-    const ownerProject = linearProjectForWorkspace(pickupWorkspace());
-    return issues.filter((issue) => issue?.project?.name === ownerProject);
+    // FOC-1147 round 3: the fallback scope is the setting's project list when
+    // set, otherwise the projects map's distinct linearProjects — by project,
+    // never by workspace (the old entry.workspace === pickup-workspace rule
+    // only ever matched its own fixtures). Fails closed WITH the remedy —
+    // the throw lands in pickup.lastError through the tick's catch.
+    const scope = ownerScope();
+    return issues.filter((issue) => scope.has(issue?.project?.name));
   });
 
   const pickupTick = async () => {
