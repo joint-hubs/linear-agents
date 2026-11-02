@@ -647,6 +647,74 @@ try {
     check("legacy hold (no needsText) answered with its option label as text -> 200",
       legacyLabel.status === 200 && legacyLabel.body?.recorded === true, JSON.stringify(legacyLabel).slice(0, 300));
 
+    // FOC-1151: optionLabel must name one of the hold's OWN options — the
+    // Cockpit sends the label of the option the answer came from, so a label
+    // that matches nothing is a bug on the sending side (400), while the
+    // hold's own label passes and is recorded.
+    const holdsForeign = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8"));
+    holdsForeign.holds.push({
+      id: "hold-6", origin: "test", question: "which option?",
+      recommendation: "Provide the values",
+      options: [
+        { label: "wait", model: "m1", costUsd: 0 },
+        { label: "Provide the values", model: "user", costUsd: 0, needsText: true },
+      ],
+      impact: "low", state: "open", createdAt: NOW, presentedAt: null, until: null,
+      answer: null, history: [{ event: "created", at: NOW }], blocks: null, resolution: null,
+    });
+    writeFileSync(join(supState, "run-1", "holds.json"), JSON.stringify(holdsForeign), "utf8");
+    const foreignLabel = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-6", text: "epic=E1", optionLabel: "Not an option of this hold" } });
+    check("foreign optionLabel (matches no option of the hold) -> 400 invalid-answer",
+      foreignLabel.status === 400 && foreignLabel.body?.error === "invalid-answer"
+        && typeof foreignLabel.body?.reason === "string"
+        && /not one of this hold's options/.test(foreignLabel.body.reason),
+      JSON.stringify(foreignLabel));
+    check("foreign optionLabel refused wrote nothing (hold still open)",
+      JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8")).holds.find((h) => h.id === "hold-6")?.state === "open",
+      "hold-6 state after the 400");
+    const ownLabel = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-6", text: "epic=E1", optionLabel: "Provide the values" } });
+    check("the hold's own optionLabel passes -> 200 recorded",
+      ownLabel.status === 200 && ownLabel.body?.recorded === true, JSON.stringify(ownLabel).slice(0, 300));
+    const holdOwn = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8")).holds.find((h) => h.id === "hold-6");
+    check("own-optionLabel answer record carries optionLabel and the values",
+      holdOwn?.state === "answered" && holdOwn?.answer?.optionLabel === "Provide the values" && holdOwn?.answer?.text === "epic=E1",
+      JSON.stringify(holdOwn?.answer));
+
+    // FOC-1151: a failing holds-store write inside answerHold is a SERVER
+    // fault, not a client mistake — the record was valid, owned and checked;
+    // only the fs write failed. The route must say 500, not the old
+    // invalid-answer 400. Deterministic seam (FOC-1165 #22): a dedicated
+    // server armed with LA_SUPERVISOR_STORE_WRITE_FAULT throws an fs-shaped
+    // EPERM in the store-write path — on every platform and uid, unlike the
+    // old read-only-file trick that Linux-as-root ignored. The main server
+    // (no seam) serves the follow-up checks and the cleanup answer.
+    const holdsFault = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8"));
+    holdsFault.holds.push({
+      id: "hold-7", origin: "test", question: "a hold the store refuses to record?",
+      recommendation: "wait",
+      options: [{ label: "wait", model: "m1", costUsd: 0 }],
+      impact: "low", state: "open", createdAt: NOW, presentedAt: null, until: null,
+      answer: null, history: [{ event: "created", at: NOW }], blocks: null, resolution: null,
+    });
+    writeFileSync(join(supState, "run-1", "holds.json"), JSON.stringify(holdsFault), "utf8");
+    const faultSpawned = await spawnCockpitServer({ ...baseEnv, LA_SUPERVISOR_STORE_WRITE_FAULT: "1" });
+    try {
+      const storeFault = await call(faultSpawned.port, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-7", text: "values here" } });
+      check("hold answer with a failing store write -> 500 store-write (server fault, not a 400)",
+        storeFault.status === 500 && storeFault.body?.error === "store-write",
+        JSON.stringify(storeFault));
+    } finally {
+      await faultSpawned.stop();
+    }
+    check("the failed store write left the hold open (nothing recorded)",
+      JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8")).holds.find((h) => h.id === "hold-7")?.state === "open",
+      "hold-7 state after the 500");
+    // Restore the baseline for the later needsYou-count assertions: with the
+    // seam not armed (main server), hold-7 answers normally.
+    const cleanup = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-7", text: "values here" } });
+    check("hold-7 answers normally once the store is writable again -> 200",
+      cleanup.status === 200 && cleanup.body?.recorded === true, JSON.stringify(cleanup).slice(0, 300));
+
     // POST /api/gates/notify with holdId — the "Tell the Supervisor" fallback
     // after a hold answer whose notice failed. An OPEN hold has no answer to
     // deliver (409); the answered one is re-notified with /api/holds/answer's

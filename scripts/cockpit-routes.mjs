@@ -437,6 +437,9 @@ function answerErrorStatus(code) {
   if (code === "not-found") return 404;
   if (code === "already-answered") return 409;
   if (code === "invalid-answer" || code === "bad-id") return 400;
+  // FOC-1151: a failed holds-store write inside answerHold is a server fault,
+  // named explicitly so a client mistake never reads like one and vice versa.
+  if (code === "store-write") return 500;
   return 500;
 }
 

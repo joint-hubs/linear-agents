@@ -280,8 +280,10 @@ test("hold note and answeredBy behave like the gate's", () => {
 test("hold optionLabel: stored when given, absent when not, garbage refused", () => {
   const runId = freshRun();
   seedHold(runId);
-  const labelled = answerHold({ runId, holdId: "hold-1", text: "milestone=M1", optionLabel: "Provide the values", now: NOW });
-  assert.deepEqual(labelled.answer, { text: "milestone=M1", optionLabel: "Provide the values", answeredAt: NOW_ISO });
+  // FOC-1151: optionLabel must name one of the hold's OWN options — the
+  // seeded hold's only option is "wznów", so that is the label stored here.
+  const labelled = answerHold({ runId, holdId: "hold-1", text: "milestone=M1", optionLabel: "wznów", now: NOW });
+  assert.deepEqual(labelled.answer, { text: "milestone=M1", optionLabel: "wznów", answeredAt: NOW_ISO });
 
   const bare = freshRun();
   seedHold(bare);
@@ -362,6 +364,72 @@ test("CLI answer --hold hits the same needsText refusal through answerHold (FOC-
   assert.equal(err.ok, false);
   assert.match(err.error, /needs the values as text/);
   assert.equal(readHolds(runId).holds[0].state, "open", "the CLI refusal wrote nothing");
+});
+
+// FOC-1151: the CLI gets the same optionLabel field the Cockpit sends — naming
+// the chosen option alongside the values, validated by answerHold against the
+// hold's own options.
+test("CLI answer --hold takes --optionLabel and records it on the answer (FOC-1151)", () => {
+  const runId = freshRun();
+  seedHold(runId, {
+    options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+  });
+  const r = cli(["answer", "--run", runId, "--hold", "hold-1", "--text", "epic=E1", "--optionLabel", "Provide the values"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const hold = readHolds(runId).holds[0];
+  assert.equal(hold.state, "answered");
+  assert.equal(hold.answer.text, "epic=E1");
+  assert.equal(hold.answer.optionLabel, "Provide the values", "the CLI-carried optionLabel is recorded");
+});
+
+// FOC-1151: parseOption used to silently DROP a needsText flag from --option
+// JSON (FOC-1109's documented limitation), so a CLI-created hold never "asked
+// for text" and the bare-label refusal never fired for it. Carried when exactly
+// true; any other value is dropped — a truthy non-boolean ("yes") must not
+// smuggle a half-flag past the answer rules.
+test("CLI hold --option carries needsText: the created hold enforces the bare-label refusal (FOC-1151)", () => {
+  const runId = freshRun();
+  const create = cli([
+    "hold", "--run", runId,
+    "--origin", "test",
+    "--question", "provide the working-state values?",
+    "--recommendation", "Provide the values",
+    // The wait option carries the priced cost (CLI rule: at least one costed
+    // option); the needsText option rides UNKNOWN on model "user", like the
+    // live producer's hold in agent-state-resolve.mjs.
+    "--option", JSON.stringify({ label: "wait", model: "z-ai/glm-5.3-flash", costUsd: 0 }),
+    "--option", JSON.stringify({ label: "Provide the values", model: "user", needsText: true }),
+  ]);
+  assert.equal(create.status, 0, create.stdout + create.stderr);
+  const hold = readHolds(runId).holds[0];
+  assert.equal(hold.options.find((o) => o.label === "Provide the values")?.needsText, true,
+    "the CLI-created hold carries needsText on the option that asked for it");
+  assert.equal("needsText" in hold.options.find((o) => o.label === "wait"), false,
+    "the plain option carries no needsText");
+
+  // End to end: the CLI-created needsText hold now refuses its bare label
+  // through answerHold, exactly like a server-created one.
+  const answer = cli(["answer", "--run", runId, "--hold", hold.id, "--text", "Provide the values"]);
+  assert.equal(answer.status, 1, answer.stdout);
+  const err = JSON.parse(answer.stdout);
+  assert.equal(err.ok, false);
+  assert.match(err.error, /needs the values as text/);
+  assert.equal(readHolds(runId).holds.find((h) => h.id === hold.id).state, "open", "the refusal wrote nothing");
+});
+
+test("CLI hold --option: a non-boolean needsText value is dropped, not carried (FOC-1151)", () => {
+  const runId = freshRun();
+  const create = cli([
+    "hold", "--run", runId,
+    "--origin", "test",
+    "--question", "garbage needsText?",
+    "--recommendation", "wait",
+    "--option", JSON.stringify({ label: "wait", model: "z-ai/glm-5.3-flash", costUsd: 0, needsText: "yes" }),
+  ]);
+  assert.equal(create.status, 0, create.stdout + create.stderr);
+  const option = readHolds(runId).holds[0].options[0];
+  assert.equal("needsText" in option, false,
+    `a truthy non-boolean must not become a needsText flag (got ${JSON.stringify(option)})`);
 });
 
 test("hold errors: not-found, already-answered, invalid-answer, unreadable, bad-id", () => {
