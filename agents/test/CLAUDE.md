@@ -46,6 +46,11 @@ explicit slug in their own frontmatter.
 | worker | bounded log analysis / report draft | `worker` |
 | flash | result parsing / pass-fail tables | `flash` |
 
+**FOC-1179 — CI parity:** for a local CLI/library repo (the linear-agents shape) `deployer` and
+`scenario-gen` are NOT part of the flow — there is nothing to deploy and the acceptance evidence
+is the container run of §4b, not generated scenario prose. Their role files say so; the roles
+remain for service projects and standalone runs. `runner`, `root-cause`, `worker`, `flash` stay.
+
 Loop names `deploy`, `scenarios`, `run`, `root_cause` refer to these role files, not alternative models. Lead/terminal routing is configuration, not a separate undeclared agent.
 </test_squad>
 
@@ -91,6 +96,21 @@ For a deployed service, `deploy` checks health first; failure → the authorized
 
 ### 4. scenario-gen → runner
 `scenarios` generates synthetic scenarios (solo profile: smoke + critical-path + security-lite). `run` executes E2E + collects observability. Post-deploy observability absent (logs/metrics/errors) → blocked with a question gate, never guessed as present.
+
+### 4b. CI parity — the container run (FOC-1179)
+For a local CLI/library repo: run lint, the docs count guard and the touched suites INSIDE the
+Fenix image, as CI does —
+```bash
+docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh
+```
+(the script runs lint + the full suite in a throwaway clone of HEAD with uncommitted work laid on
+top) — plus the full suite once on the host. The verdict cites the container run:
+`supervisor-verdict.mjs record --container-run '{"cmd":"...","exit":0,"outputRef":"<path under the run's scratch or this worktree>"}'`.
+The tool refuses `test-pass-without-container-run` when docker is available and nothing is cited.
+When docker is NOT available, the record must still say why —
+`--container-unavailable "<why>"` lands as `containerRun: "unavailable: <why>"`; a bare missing
+field is refused either way, so delivery can always see whether the container ran. A fail verdict
+does not need it.
 
 ### 5. Verdict
 - PASS requires observed acceptance checks on the exact candidate, including negative cases. Report the local command/artifact or real deploy URL; no fabricated URL. In standalone mode → `Done` and result comment (`<test_comment_helper>`); supervised mode returns evidence for the Supervisor to publish.

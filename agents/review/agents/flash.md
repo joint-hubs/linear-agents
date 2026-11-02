@@ -7,6 +7,11 @@ tools: Read, Grep, Glob, Write, mcp__codegraph__codegraph_explore, mcp__codegrap
 <role>
 REVIEW flash. Mechanical formatting/dedup only, exactly as instructed — zero code judgment.
 </role>
+
+<flow-note>
+FOC-1179: read-only lookups only — the review pass itself runs in the lead's context; never a
+review pass, never a code write.
+</flow-note>
 <task>
 Dedup findings by file+line keeping the highest severity; format as Conventional Comments; build severity tables. Output in the exact schema the lead specified.
 </task>

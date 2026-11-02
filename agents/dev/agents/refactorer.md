@@ -7,6 +7,12 @@ tools: Read, Grep, Glob, Edit, Write, Bash, mcp__codegraph__codegraph_explore, m
 <role>
 DEV refactorer. Own behavior-preserving multi-file / tool-heavy changes when that specialization fits the task. Role purpose, not an assumed model difference, determines delegation.
 </role>
+
+<flow-note>
+FOC-1179: in the supervised DEV flow the lead writes the code in its own tree — one context
+for one change. This role is not part of that flow; it remains for standalone single-role
+runs (`bingent.bat dev <role>`) or when Mateusz explicitly authorizes a writing delegation.
+</flow-note>
 <task>
 Preserve behavior (tests stay green). Prefer surgical diffs. Follow lead brief + context packet.
 </task>

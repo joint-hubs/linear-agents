@@ -701,6 +701,89 @@ test("instrukcje REVIEW trzymają regułę --ran/--red-first", () => {
   }
 });
 
+// ── FOC-1179: the role set for quality ───────────────────────────────────────
+console.log("\nzbiór ról dla jakości — jeden kontekst, jeden przebieg, parzystość z CI");
+
+test("instrukcje DEV trzymają regułę jednego kontekstu (FOC-1179)", () => {
+  // Fan-out DEV w implementera/debuggera rozdzielił jedną zmianę na konteksty i
+  // wywołał wypadki FOC-1166. Nowa reguła: subagenci tylko czytają (recon);
+  // implementację, testy red-first i dziennik pisze lead w swoim drzewie.
+  // Pin pilnuje też ZNIKNIECIA starej reguły — inaczej dwie sprzeczne
+  // instrukcje współistniałyby w jednym pliku.
+  const dev = read("agents/dev/CLAUDE.md");
+  for (const token of ["Subagents are for reading (recon) only", "one context for one change", "FOC-1179"]) {
+    if (!dev.includes(token)) fail(`agents/dev/CLAUDE.md straciło regułę jednego kontekstu: brak "${token}"`);
+  }
+  if (/the WHOLE phase as ONE delegation/.test(dev)) {
+    fail("agents/dev/CLAUDE.md nadal każe delegować implementację w całości (stara reguła sprzeczna z FOC-1179)");
+  }
+  if (/Code is edited only by `implementer`/.test(dev)) {
+    fail("agents/dev/CLAUDE.md nadal twierdzi, że kod edytują subagenci (stara reguła sprzeczna z FOC-1179)");
+  }
+});
+
+test("instrukcje REVIEW trzymają jeden mocny przebieg i deterministyczny krok security (FOC-1179)", () => {
+  // Trzy równoległe przebiegi dały trzykrotnie jedną płytką opinię. Jeden mocny
+  // przebieg prowadzącego, a security jako krok deterministyczny (skaner +
+  // security-scan.test.mjs + egress screen), nie rola LLM.
+  const lead = read("agents/review/CLAUDE.md");
+  for (const token of ["one strong pass", "security-scan.test.mjs", "egress-screen"]) {
+    if (!lead.includes(token)) fail(`agents/review/CLAUDE.md straciło regułę jednego przebiegu: brak ${token}`);
+  }
+  if (/Three passes run concurrently/.test(lead)) {
+    fail("agents/review/CLAUDE.md nadal każe uruchamiać trzy przebiegi równolegle (stara reguła sprzeczna z FOC-1179)");
+  }
+  const graph = read("config/graph.json");
+  if (!graph.includes("One strong pass by the review lead")) {
+    fail("config/graph.json: opis węzła review nie mówi o jednym mocnym przebiegu prowadzącego");
+  }
+  if (graph.includes("Three passes run concurrently")) {
+    fail("config/graph.json: opis węzła review nadal obiecuje trzy równoległe przebiegi");
+  }
+  for (const role of ["agents/review/agents/first-pass.md", "agents/review/agents/security.md", "agents/review/agents/deep.md"]) {
+    if (!read(role).includes("FOC-1179")) fail(`${role} nie mówi, że jego rola weszła w jeden przebieg prowadzącego (FOC-1179)`);
+  }
+});
+
+test("instrukcje TEST trzymają parzystość z CI — przebieg w kontenerze Fenix (FOC-1179)", () => {
+  // TEST przeliczał sprawdzenia REVIEW tylko na win32; obie czerwone linuksowe
+  // czerwoności CI sesji były dla niego niewidoczne. Pass TEST musi cytować
+  // przebieg w obrazie Fenix (docker/test-in-container.sh, jak w CI) albo
+  // nazwać powód jego braku — narzędzie odmawia test-pass-without-container-run.
+  const testLead = read("agents/test/CLAUDE.md");
+  for (const token of ["docker/test-in-container.sh", "--container-run", "--container-unavailable", "test-pass-without-container-run"]) {
+    if (!testLead.includes(token)) fail(`agents/test/CLAUDE.md straciło regułę parzystości z CI: brak ${token}`);
+  }
+  for (const role of ["agents/test/agents/deployer.md", "agents/test/agents/scenario-gen.md"]) {
+    if (!read(role).includes("FOC-1179")) fail(`${role} nie mówi, że nie jest częścią przepływu TEST (FOC-1179)`);
+  }
+});
+
+test("graph trzyma limit rund i liczenie werdyktów delivery (FOC-1179)", () => {
+  // Limit dwóch cykli dev↔review zostaje; werdykty delivery (FOC-1169) liczą
+  // się jako rundy — to musi być prawdą w tekście, który rządzi, nie tylko w
+  // prozie.
+  const failure = readJson("config/graph.json").nodes.review.failure;
+  if (!/Max 2 dev↔review cycles/.test(failure)) fail("config/graph.json review.failure straciło limit dwóch cykli dev↔review");
+  if (!/Delivery verdicts \(FOC-1169\) count as rounds/.test(failure)) {
+    fail("config/graph.json review.failure nie mówi, że werdykty delivery liczą się jako rundy");
+  }
+});
+
+test("kickoffy niosą wskaźnik FOC-1179 i nie obiecują trzech przebiegów", () => {
+  // Wskaźnik jednolinijkowy (jak FOC-1170), nie druga definicja pętli.
+  const kickoff = readJson("config/prompts.json").kickoff || {};
+  for (const squad of ["dev", "review", "test"]) {
+    const lines = kickoff[squad] ?? [];
+    if (!lines.some((l) => l.includes("FOC-1179"))) fail(`config/prompts.json kickoff.${squad} nie niesie wskaźnika FOC-1179`);
+  }
+  const reviewText = (kickoff.review ?? []).join(" ");
+  if (/równolegle/.test(reviewText)) fail("config/prompts.json kickoff.review nadal obiecuje przebiegi równolegle");
+  const src = read("scripts/launch.mjs");
+  const templates = src.slice(src.indexOf("DEFAULT_KICKOFF_TEMPLATES"), src.indexOf("_loadKickoffFromFile"));
+  if (/równolegle/.test(templates)) fail("scripts/launch.mjs DEFAULT_KICKOFF_TEMPLATES.review nadal obiecuje przebiegi równolegle");
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 console.log("");
 if (failures.length) {

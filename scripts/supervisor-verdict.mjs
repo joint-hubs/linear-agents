@@ -7,6 +7,8 @@
 //        [--decision-run <runId> ...]
 //        [--ran '{"cmd":"...","exit":0,"outputRef":"<path>"}' ...]          (FOC-1170)
 //        [--red-first '{"cmd":"...","baseExit":1,"candidateExit":0,"outputRef":"..."}' ...]
+//        [--container-run '{"cmd":"...","exit":0,"outputRef":"..."}']       (FOC-1179, TEST pass)
+//        [--container-unavailable '<why>']                                  (FOC-1179, when docker is not)
 //        [--dry-run]
 //   node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n
 //        --verdict pass|fail --reason <design|evidence|test-gap|ci|scope|other>
@@ -118,7 +120,7 @@ const DELIVERY_REASONS = ["design", "evidence", "test-gap", "ci", "scope", "othe
 // after trimming and lowercasing.
 const NON_EVIDENCE = ["", "-", "--", "n/a", "na", "none", "todo", "tbd", "?", "see above", "obvious"];
 
-const REPEATABLE = new Set(["finding", "ac", "failing-test", "decision-event", "decision-run", "ran", "red-first"]);
+const REPEATABLE = new Set(["finding", "ac", "failing-test", "decision-event", "decision-run", "ran", "red-first", "container-run", "container-unavailable"]);
 
 const isEvidence = (v) => {
   const s = String(v ?? "").trim();
@@ -756,6 +758,89 @@ function checkOutputRef(ref, flag, index, runId, worktree) {
   return found;
 }
 
+// ── a TEST pass ran the suite the way CI runs it (FOC-1179) ──────────────────
+//
+// TEST re-ran REVIEW's checks on win32 only; both Linux-only CI reds of the
+// 2026-11-01/02 session (FOC-1151, FOC-1162) were invisible to it. A TEST pass
+// therefore has to cite the run CI would run — lint, the count guard and the
+// touched suites inside the Fenix image (`docker/test-in-container.sh`) — via
+// `--container-run`, with the output saved where the run can audit it (the
+// same roots `--ran` uses). When docker is NOT available the record must still
+// SAY why: `--container-unavailable "<why>"` lands as
+// `containerRun: "unavailable: <why>"`. Either way the field exists on a TEST
+// pass — delivery can always see whether the container ran. A fail does not
+// need it (the same asymmetry the `--ran` gate has).
+
+/**
+ * Is docker usable on this host? The env override is the TEST seam first
+ * (`LA_DOCKER_AVAILABLE=1|0` — the suites set it so both gate branches are
+ * pinnable offline and no suite depends on the host having a daemon); without
+ * it the daemon itself is probed: `docker info` answers "could this host run
+ * the Fenix container", which `docker --version` (CLI present, daemon dead)
+ * does not.
+ */
+export function dockerAvailability(env = process.env) {
+  const override = env.LA_DOCKER_AVAILABLE;
+  if (override === "1") return { available: true, detail: "seam: LA_DOCKER_AVAILABLE=1" };
+  if (override === "0") return { available: false, detail: "seam: LA_DOCKER_AVAILABLE=0" };
+  try {
+    const out = execFileSync("docker", ["info", "--format", "{{.Server.Version}}"], {
+      timeout: 20_000,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { available: true, detail: `docker server ${String(out).trim()}` };
+  } catch (err) {
+    const why = String(err?.message ?? err).split("\n").map((l) => l.trim()).filter(Boolean)[0];
+    return { available: false, detail: why || "docker probe failed" };
+  }
+}
+
+/**
+ * Parse and shape-validate `--container-run` / `--container-unavailable`
+ * (FOC-1179). One of each, at most — the record field is singular. Shape
+ * errors and the contradiction are refused for ANY verdict: the container
+ * either ran or it did not, and evidence that does not exist is not evidence
+ * on a fail either. The outputRef existence/containment check runs later, in
+ * checkOutputRef — the SAME path the review evidence uses, never a fork.
+ */
+function containerRunEvidence(args) {
+  const runs = asArray(args["container-run"]).map((raw, i) => parseJsonFlag(raw, "container-run", i));
+  const whys = asArray(args["container-unavailable"]);
+  if (runs.length > 1) {
+    failJson(`--container-run takes ONE entry — the record field is singular; cite the decisive run`);
+  }
+  if (whys.length > 1) {
+    failJson(`--container-unavailable takes ONE why — the record field is singular`);
+  }
+  const problems = [];
+  runs.forEach((r) => {
+    if (!isEvidence(r.cmd)) problems.push(`--container-run names no command`);
+    if (!Number.isInteger(r.exit)) problems.push(`--container-run has no integer exit`);
+    if (!isEvidence(r.outputRef)) problems.push(`--container-run names no outputRef`);
+  });
+  if (problems.length) {
+    failJson(`the container-run flags are malformed`, {
+      problems,
+      hint: `--container-run '{"cmd":"docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`,
+    });
+  }
+  if (runs.length && whys.length) {
+    failJson(
+      `container-run-contradiction: --container-run and --container-unavailable are mutually exclusive — ` +
+        `the container either ran or it did not`,
+      { hint: "cite the run, or explain its absence — never both" },
+    );
+  }
+  if (whys.length && !isEvidence(whys[0])) {
+    failJson(
+      `--container-unavailable needs a non-empty why — "unavailable: ${whys[0]}" tells delivery nothing`,
+      { hint: `--container-unavailable "docker daemon not installed on this runner"` },
+    );
+  }
+  return { run: runs[0] ?? null, unavailableWhy: whys[0] ?? null };
+}
+
 // A verdict is about a Linear issue, and EVERYTHING in cmdRecord derives from
 // the id: the verdict file name (a `../`-bearing id would climb out of the
 // verdicts dir), the linear-ops invocations, and the enforcement gate's
@@ -877,6 +962,36 @@ function cmdRecord(args) {
     );
   }
 
+  // ── FOC-1179: a TEST pass ran the suite the way CI runs it ─────────────────
+  // Shape + outputRef checks for any verdict that cites them; the REQUIREMENT
+  // is a test-pass gate only — a fail does not need a container run, and other
+  // squads are not asked for one.
+  const { run: containerRun, unavailableWhy } = containerRunEvidence(args);
+  let containerRunField;
+  if (containerRun) {
+    containerRunField = {
+      ...containerRun,
+      outputRef: checkOutputRef(containerRun.outputRef, "--container-run", 0, runId, entry.worktree),
+    };
+  } else if (unavailableWhy) {
+    containerRunField = `unavailable: ${unavailableWhy}`;
+  }
+  if (verdict === "pass" && entry.squad === "test") {
+    if (!containerRunField) {
+      const docker = dockerAvailability();
+      failJson(
+        `test-pass-without-container-run: a TEST pass must cite the Fenix-container run ` +
+          `(--container-run '{"cmd":"...","exit":0,"outputRef":"..."}' — docker/test-in-container.sh, as CI runs it) ` +
+          `or, when docker is not available, say why (--container-unavailable "<why>")`,
+        { dockerAvailable: docker.available, hint: "delivery has to be able to see whether the container ran" },
+      );
+    }
+    if (!containerRun) {
+      const docker = dockerAvailability();
+      warnings.push(`container run skipped — docker probe: ${docker.detail}`);
+    }
+  }
+
   // ── FOC-449: explicit decision provenance ───────────────────────────────────
   // The decision events this verdict labels with its outcome (the verdict
   // value itself, by:"agent", via:"verdict"). Same plumbing as the gate emit:
@@ -925,6 +1040,11 @@ function cmdRecord(args) {
     // flags were passed — a dev/test record without them stays byte-identical.
     ...(ranChecked.length ? { ran: ranChecked } : {}),
     ...(redFirstChecked.length ? { redFirst: redFirstChecked } : {}),
+    // FOC-1179: the Fenix-container run a TEST pass cites — the evidence object
+    // when --container-run was given, `unavailable: <why>` when the why was.
+    // Required on a test pass, absent otherwise; a record without the flags
+    // stays byte-identical.
+    ...(containerRunField !== undefined ? { containerRun: containerRunField } : {}),
     declaredAcs: declared,
     fingerprint,
     // FOC-220: present only when the fail DECLARED an empty test axis, carrying
@@ -1019,6 +1139,14 @@ function cmdRecordDelivery(args) {
   }
   if (args["red-first"]) {
     failJson("--red-first is not used in --delivery mode — a red-first claim is a REVIEW pass requirement");
+  }
+  // The container run is a TEST-pass requirement (FOC-1179); delivery judges the
+  // delivered tree, it does not run suites. Refused by name, like --ran above.
+  if (args["container-run"]) {
+    failJson("--container-run is not used in --delivery mode — the container run is a TEST pass requirement");
+  }
+  if (args["container-unavailable"]) {
+    failJson("--container-unavailable is not used in --delivery mode — the container run is a TEST pass requirement");
   }
 
   const verdict = args.verdict;

@@ -472,6 +472,162 @@ test("a --ran cited on a fail still has to point at real output", () => {
   assert.match(out.error, /evidence-outputRef-missing/);
 });
 
+// ── 2c. a TEST pass ran the suite the way CI runs it (FOC-1179) ─────────────
+console.log("\ntest — parzystość z CI: werdykt cykuje przebieg w kontenerze");
+
+/**
+ * A TEST child and the review child, each with a REAL worktree — the same
+ * shape the inert-fail test below uses. The TEST child's worktree is the
+ * containment root for its own `--container-run` outputRef.
+ */
+function testScenario() {
+  const { base, repo } = fixtureRepo();
+  const testTree = fixtureWorktree(repo, "foc-123-test");
+  const reviewTree = fixtureWorktree(repo, "foc-123-test-review");
+  const runId = fixtureRun();
+  const child = (childId, squad, wt) => ({
+    childId,
+    squad,
+    taskId: "FOC-123",
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    status: "exited",
+    turns: [{ pid: 1 }],
+    permissionMode: "bypassPermissions",
+    worktree: wt.worktree,
+    branch: wt.branch,
+    baseRevision: wt.baseRevision,
+  });
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "test-1": child("test-1", "test", testTree),
+      "review-1": child("review-1", "review", reviewTree),
+    },
+    rounds: {},
+  });
+  return { base, repo, runId, ...testTree, reviewTree: reviewTree.worktree };
+}
+
+const testRecord = (s, extra = [], env = {}) =>
+  parse(verdict(["record", "--run", s.runId, "--child", "test-1", ...extra], env), fail);
+
+const testPassArgs = (s) => [
+  "--verdict", "pass",
+  "--issue-file", issueFile(s.base, 1),
+  "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+];
+const containerRunFlag = (s, name = "container-output.txt", body = "74 passed, 0 failed\n") => {
+  const path = join(s.worktree, name);
+  writeFileSync(path, body, "utf8");
+  return JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 0, outputRef: path });
+};
+
+test("a test pass without a container run is refused when docker is available (test-pass-without-container-run)", () => {
+  // TEST re-ran REVIEW's checks on win32 only; both Linux-only CI reds of the
+  // session were invisible to it. A pass that never saw the Fenix image is the
+  // same false pass the review gate already refuses — absence of a container
+  // row is not CI parity.
+  const s = testScenario();
+  const out = testRecord(s, testPassArgs(s), { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /test-pass-without-container-run/);
+});
+
+test("a test pass without a container run is refused even when docker is NOT available — the why is mandatory", () => {
+  // The seam being false does not waive the field: it changes what the field
+  // has to SAY. A bare missing field is still refused — delivery can always
+  // see whether the container ran.
+  const s = testScenario();
+  const out = testRecord(s, testPassArgs(s), { LA_DOCKER_AVAILABLE: "0" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /test-pass-without-container-run/);
+});
+
+test("a test pass with the why recorded lands as containerRun: \"unavailable: <why>\"", () => {
+  const s = testScenario();
+  const out = testRecord(s, [...testPassArgs(s), "--container-unavailable", "docker daemon not installed on this runner"], { LA_DOCKER_AVAILABLE: "0" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun, "unavailable: docker daemon not installed on this runner");
+});
+
+test("a test pass with a cited container run is recorded, keys in shape order", () => {
+  const s = testScenario();
+  const out = testRecord(s, [...testPassArgs(s), "--container-run", containerRunFlag(s)], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun.cmd, "sh /src/docker/test-in-container.sh");
+  assert.equal(out.containerRun.exit, 0);
+  assert.ok(existsSync(out.containerRun.outputRef));
+  // The key sits with the other conditional evidence keys, before declaredAcs.
+  const rec = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  assert.equal(
+    Object.keys(rec).join(","),
+    "taskId,runId,childId,squad,round,verdict,findings,acMapping,containerRun,declaredAcs,fingerprint,recordedAt,linearEffects",
+  );
+});
+
+test("a --container-run whose outputRef does not exist is refused", () => {
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 0, outputRef: join(runDir(s.runId), "scratch", "never-ran.txt") }),
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
+});
+
+test("a placeholder --container-unavailable why is refused", () => {
+  // "unavailable: n/a" tells delivery nothing — the same cheat the citation
+  // checks already refuse.
+  const s = testScenario();
+  const out = testRecord(s, [...testPassArgs(s), "--container-unavailable", "n/a"], { LA_DOCKER_AVAILABLE: "0" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--container-unavailable/);
+});
+
+test("--container-run and --container-unavailable together are refused (container-run-contradiction)", () => {
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-run", containerRunFlag(s, "container-both.txt"),
+    "--container-unavailable", "docker daemon not installed on this runner",
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /container-run-contradiction/);
+});
+
+test("a test fail needs no container run — the gate is a pass gate", () => {
+  const s = testScenario();
+  const out = testRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun, undefined, "no containerRun key without the flag — the fail shape stays as it was");
+});
+
+test("a review pass is never asked for a container run — the record shape stays byte-identical", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun, undefined);
+});
+
+test("a --container-run cited on a fail still has to point at real output", () => {
+  // Same duty as --ran: the shape check protects every record; the verdict-
+  // dependent REQUIREMENT is the pass gate only.
+  const s = testScenario();
+  const out = testRecord(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 1, outputRef: join(runDir(s.runId), "scratch", "never-ran.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
+});
+
 // ── 3. the fingerprint ───────────────────────────────────────────────────────
 console.log("\nodcisk postępu");
 
@@ -1187,11 +1343,34 @@ test("--ran is refused in --delivery mode — an evidence run is a REVIEW pass r
 });
 
 test("--red-first is refused in --delivery mode", () => {
+
   const s = scenario();
   advance(s, "attempt.txt");
   const out = deliveryRecord(s, ["--verdict", "pass", "--red-first", redFirstFlag(s, "delivery-red-first.txt")]);
   assert.equal(out.ok, false);
   assert.match(out.error, /--red-first is not used in --delivery mode/);
+});
+
+test("--container-run is refused in --delivery mode — the container run is a TEST pass requirement", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "pass",
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 0, outputRef: join(runDir(s.runId), "scratch", "never-ran.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--container-run is not used in --delivery mode/);
+});
+
+test("--container-unavailable is refused in --delivery mode", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "pass",
+    "--container-unavailable", "docker daemon not installed on this runner",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--container-unavailable is not used in --delivery mode/);
 });
 
 test("--recorded-at without --backfill is refused", () => {

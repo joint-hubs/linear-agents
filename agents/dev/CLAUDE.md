@@ -53,21 +53,26 @@ Model routing is **not** specified here — it changes often. Sole source of tru
 | debugger | hard: multi-layer bug, architecture decision | `hard` |
 | worker | simple: single-file change, boilerplate, verbose commands | `worker` |
 | flash | mechanical: extraction, formatting, checklists | `flash` |
+
+**FOC-1179 — one context for one change: subagents are for reading (recon) only.** In the
+supervised DEV flow `recon`, `worker` and `flash` do read-only lookups; `implementer`,
+`refactorer` and `debugger` are NOT part of the flow (their role files say so) — the
+implementation, the red-first tests and the journal are written by the lead, in its own tree.
 </dev_squad>
 
 <dev_delegation_policy>
 ## Delegation policy (cost)
-Your turn is the most expensive (long context × every turn); a subagent's fresh small context is 3–20× cheaper. **Delegate first.**
+Your turn is the most expensive (long context × every turn); a subagent's fresh small context is 3–20× cheaper. **Delegate reading first — never writing.**
 
-Routing by difficulty:
-- simple / mechanical → `worker` or `flash`
-- standard craft → `recon` (context — always, instead of reading code yourself), `implementer` (the WHOLE phase as ONE delegation — step 3), `refactorer` (multi-file)
-- genuinely hard → think briefly, slice the problem, hand to `debugger`/`implementer`; execution stays out of your turn
+Routing (FOC-1179 — one context for one change):
+- Subagents are for reading (recon) only: `recon` for the context packet, `worker`/`flash` for bounded read-only lookups.
+- The implementation, the red-first tests and the journal are written by YOU, the lead, in your own tree. Fan-out into `implementer`/`debugger`/`refactorer` split one change across contexts and caused the FOC-1166 incidents (plan §4) — a code-writing delegation is a protocol violation, not a cost optimization.
+- Your own test is red → you debug and fix it yourself, in the same context that wrote it.
 
 Budget drains — each of these re-bills your context on every subsequent turn:
-- A step that would produce >30 lines of analysis OR any code block → delegate it.
 - Large files are read only by `recon`, which returns a summary.
-- Code is edited only by `implementer`/`debugger`. Build/test/npm runs there too (verbose command → `worker`: "run X, return ≤10 lines of findings").
+- A verbose, slow command (long build, full suite) may still go to `worker`: "run X, return ≤10 lines of findings" — a run, never a write.
+- Code is edited only by you (the lead).
 - Subagent results are summaries — never re-paste raw dumps downstream.
 - Bookkeeping (TaskCreate/TaskUpdate) only at phase boundaries — max 4 per run.
 - Run single cheap commands yourself (linear-*, git, dev-branch, manifest).
@@ -77,7 +82,11 @@ Context checkpoint: approaching ~70% of the window, write `.state/dev-wip.json` 
 </dev_delegation_policy>
 
 <brief_contract>
-## How to brief the implementer
+## How to brief a subagent
+
+Under FOC-1179 the lead writes the code itself, so an implementation brief is no longer part of
+the flow — this contract governs the briefs that remain: `recon` and the read-only `worker`/
+`flash` lookups (and nothing else, unless Mateusz explicitly re-authorizes a writing delegation).
 
 Specify **WHAT and WHY — never HOW.**
 
@@ -142,20 +151,20 @@ node $LA_ROOT/scripts/dev-branch.mjs start <identifier> <slug>
 ```
 One branch per task, off main, rebase if it already exists. NEVER `git push` (denied in settings).
 
-### 3. Execution = phases delegated whole (protocol, not a suggestion)
+### 3. Execution = one context for one change (FOC-1179)
 **3a.** `Task(recon)` → context packet (files, patterns, risks). You do not read code.
-**3b.** One `Task(implementer)`, briefed per `<brief_contract>`. It runs the entire edit→build→test→commit loop and returns: change summary, file list, test tail (≤15 lines), commit hash, open questions.
-**3c.** Failed? → one `Task(debugger)` with the implementer's report. You do not debug inline. The debugger reproduces, fixes, commits. Still red →
+**3b.** You implement: the edit, the red-first test and the journal are written by YOU, the lead, in your own tree — one context for one change. Subagents are for reading (recon) only; a code-writing `Task(implementer)`/`Task(debugger)`/`Task(refactorer)` is a protocol violation, not a shortcut.
+**3c.** Your test is red → you debug and fix it yourself, in the same context that wrote it. Still red after a real diagnosis →
 ```
 node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add escalated --add needs:answer
 ```
-then a short WIP note and a clean EXIT (step 5). Do not busy-wait. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, drop the `needs:answer` label and emit a `question` gate carrying the debugger's report; keep `escalated`.
+then a short WIP note and a clean EXIT (step 5). Do not busy-wait. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, drop the `needs:answer` label and emit a `question` gate carrying the diagnosis; keep `escalated`.
 **3d.** Lead spot-check: max 2 cheap commands (e.g. `git log -1 --stat`, tail of one test). Budget drains from `<dev_delegation_policy>` apply here too.
 
-WHY — inline debugging re-bills the lead's whole context every turn; subagents run 5–10× cheaper on fresh context.
+WHY — implementation fan-out split one change across contexts and caused the FOC-1166 incidents: no single context held the whole change, so the red-first test and the journal described a diff nobody had fully in view (plan §4).
 
 ### 4. Hand-off (success)
-Write the handoff summary under `.state/` — it must tell REVIEW how to test the change (commands + scope; the `--next` line carries it). Inspect working and staged diffs; commit only task-owned, authorized paths after their checks pass — the candidate tree's lint gate (exit 0; `node scripts/lint.mjs` run from the task worktree when the tree carries it, else the repo's own lint gate named in the brief) is a completion condition next to the task's own verify commands. Never sweep unrelated changes, logs, local configuration or another worker's files into a commit. If the implementer already committed the candidate, report that commit; do not create a redundant commit.
+Write the handoff summary under `.state/` — it must tell REVIEW how to test the change (commands + scope; the `--next` line carries it). Inspect working and staged diffs; commit only task-owned, authorized paths after their checks pass — the candidate tree's lint gate (exit 0; `node scripts/lint.mjs` run from the task worktree when the tree carries it, else the repo's own lint gate named in the brief) is a completion condition next to the task's own verify commands. Never sweep unrelated changes, logs, local configuration or another worker's files into a commit.
 ```
 git add -- <explicit-task-paths>
 git diff --cached --stat

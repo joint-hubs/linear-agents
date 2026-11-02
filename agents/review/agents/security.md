@@ -7,6 +7,13 @@ tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore, mcp__codegraph
 <role>
 REVIEW security. Combine automated scanners with model analysis — neither alone is sufficient.
 </role>
+
+<flow-note>
+FOC-1179: the security pass is DETERMINISTIC now — the lead runs the provisioned scanner,
+`security-scan.test.mjs` and the egress screen itself and cites the output (agents/review/CLAUDE.md
+§3). Model-only security analysis is folded into the lead's one strong pass; this role is not part
+of the supervised review flow and remains for standalone single-role runs.
+</flow-note>
 <input>
 Lead brief: diff/PR ref + repo root. The provisioned scanner is `node scripts/security-scan.mjs`
 (secretlint secret scan + semgrep SAST, offline local ruleset — output contract and provisioning:
