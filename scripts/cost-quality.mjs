@@ -36,7 +36,13 @@ export const DEFINITIONS = {
   attribution:
     "Share of Supervisor cost attributed to a ticket or to declared overhead; the banner shows while the share is below 0.8.",
   firstTimeRight:
-    "Share of tickets whose round-1 review verdict is PASS, among tickets with a round-1 verdict.",
+    "Review first-time-right: share of tickets whose round-1 review verdict is PASS, among tickets with a round-1 review verdict.",
+  deliveryFirstTimeRight:
+    "Share of tickets whose first delivery verdict is PASS, among tickets with any delivery verdict.",
+  reviewFalsePass:
+    "Share of REVIEW PASS rounds followed by a delivery FAIL on the same fingerprint, among REVIEW PASS rounds that have a later delivery verdict. Counted in rounds, not tickets.",
+  ciRedAfterReady:
+    "Share of tickets with a delivery FAIL citing reason \"ci\" (a CI red after READY TO PUSH), among tickets with any delivery verdict.",
   reworkShare:
     "Children's cost of turns ≥ 2 divided by children's cost, over children with a known turn-2 start and priced telemetry.",
   interventionsPerTicket:
@@ -57,6 +63,9 @@ const DEV_SQUAD = "dev";
 const PERIOD_MS = { "7d": 7 * 86_400_000, "30d": 30 * 86_400_000, all: null };
 const SIGNAL_UNITS = {
   firstTimeRight: "share",
+  deliveryFirstTimeRight: "share",
+  reviewFalsePass: "share",
+  ciRedAfterReady: "share",
   reworkShare: "share",
   interventionsPerTicket: "count",
   landingYield: "share",
@@ -92,9 +101,13 @@ const staleOf = (snapshot, now, staleAfterMs) => {
   return computedMs == null ? true : now - computedMs > staleAfterMs;
 };
 
-/** The round-1 verdict of a TicketFacts entry, or null when there is none. */
+/** The round-1 REVIEW verdict of a TicketFacts entry, or null when there is none. */
 const round1VerdictOf = (fact) =>
-  (Array.isArray(fact.verdicts) ? fact.verdicts : []).find((v) => v.round === 1)?.verdict ?? null;
+  (Array.isArray(fact.verdicts) ? fact.verdicts : [])
+    // FOC-1169: a delivery verdict never counts as the review opinion, even
+    // when it sits at round 1 of the chain. squad null is a legacy record,
+    // written before verdicts carried a squad — those were review records.
+    .find((v) => v.round === 1 && (v.squad === "review" || v.squad == null))?.verdict ?? null;
 
 /**
  * "Why" for a most-expensive ticket: the FIRST matching rule — rounds ≥ 3,
@@ -335,6 +348,51 @@ export function buildQualityPayload({
   );
   const landed = withDevChild.filter((f) => linearTypeOf(f.taskId) === "completed");
 
+  // ── delivery verdict signals (FOC-1169) ─────────────────────────────────────
+  // The verdict rows carry squad / fingerprint / reason since the delivery
+  // labels landed; rows from before that read null there, and null is UNKNOWN
+  // — never counted as delivery or review evidence on either side of a signal.
+  const orderedVerdicts = (f) =>
+    [...(Array.isArray(f.verdicts) ? f.verdicts : [])].sort((a, b) => {
+      const atA = String(a.at ?? "");
+      const atB = String(b.at ?? "");
+      return atA < atB ? -1 : atA > atB ? 1 : 0;
+    });
+  const deliveryRowsOf = (f) => orderedVerdicts(f).filter((v) => v.squad === "delivery");
+
+  // deliveryFirstTimeRight — tickets whose FIRST delivery verdict is PASS,
+  // among tickets with any delivery verdict.
+  const withDelivery = periodTickets.filter((f) => deliveryRowsOf(f).length > 0);
+  const deliveryFirstPass = withDelivery.filter((f) => deliveryRowsOf(f)[0].verdict === "PASS");
+
+  // reviewFalsePass — REVIEW PASS rounds followed by a delivery FAIL on the
+  // same fingerprint, among REVIEW PASS rounds that have a later delivery
+  // verdict. Counted in ROUNDS, not tickets: the unit a review pass is
+  // falsified in. A fingerprint that could not be read matches nothing —
+  // UNKNOWN is not evidence of a false pass.
+  let falsePassRounds = 0;
+  let contradictedRounds = 0;
+  const falsePassTasks = [];
+  for (const f of periodTickets) {
+    const rows = orderedVerdicts(f);
+    rows.forEach((row, i) => {
+      if (row.squad !== "review" || row.verdict !== "PASS") return;
+      const later = rows.slice(i + 1).filter((v) => v.squad === "delivery");
+      if (!later.length) return;
+      contradictedRounds += 1;
+      if (later.some((v) => v.verdict === "FAIL" && v.fingerprint != null && v.fingerprint === row.fingerprint)) {
+        falsePassRounds += 1;
+        falsePassTasks.push(f.taskId);
+      }
+    });
+  }
+
+  // ciRedAfterReady — tickets with a delivery FAIL citing reason "ci", among
+  // tickets with any delivery verdict.
+  const ciRedTasks = withDelivery
+    .filter((f) => deliveryRowsOf(f).some((v) => v.verdict === "FAIL" && v.reason === "ci"))
+    .map((f) => f.taskId);
+
   const signals = [
     {
       key: "firstTimeRight",
@@ -344,6 +402,33 @@ export function buildQualityPayload({
       unit: "share",
       definition: DEFINITIONS.firstTimeRight,
       evidence: cap(firstTimePass.map((f) => f.taskId)),
+    },
+    {
+      key: "deliveryFirstTimeRight",
+      value: withDelivery.length > 0 ? deliveryFirstPass.length / withDelivery.length : null,
+      numerator: deliveryFirstPass.length,
+      denominator: withDelivery.length,
+      unit: "share",
+      definition: DEFINITIONS.deliveryFirstTimeRight,
+      evidence: cap(deliveryFirstPass.map((f) => f.taskId)),
+    },
+    {
+      key: "reviewFalsePass",
+      value: contradictedRounds > 0 ? falsePassRounds / contradictedRounds : null,
+      numerator: falsePassRounds,
+      denominator: contradictedRounds,
+      unit: "share",
+      definition: DEFINITIONS.reviewFalsePass,
+      evidence: cap(falsePassTasks),
+    },
+    {
+      key: "ciRedAfterReady",
+      value: withDelivery.length > 0 ? ciRedTasks.length / withDelivery.length : null,
+      numerator: ciRedTasks.length,
+      denominator: withDelivery.length,
+      unit: "share",
+      definition: DEFINITIONS.ciRedAfterReady,
+      evidence: cap(ciRedTasks),
     },
     {
       key: "reworkShare",

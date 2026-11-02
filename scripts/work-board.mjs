@@ -325,6 +325,12 @@ export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 3
         records.map((record) => ({
           round: typeof record.round === "number" ? record.round : 0,
           verdict: record.unreadable ? "UNKNOWN" : verdictOf(record),
+          // FOC-1169: the delivery quality signals read squad / fingerprint /
+          // reason off these rows. A record from before the field existed reads
+          // null there — UNKNOWN, never counted as delivery or review evidence.
+          squad: record.unreadable ? null : record.squad ?? null,
+          fingerprint: record.unreadable ? null : record.fingerprint?.combined ?? null,
+          reason: record.unreadable ? null : record.reason ?? null,
           at: record.recordedAt ?? null,
           path: useLib
             ? verdictPath(runId, taskId, record.round ?? 0)

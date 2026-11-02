@@ -478,13 +478,14 @@ try {
     const badPeriod = await call(P, "GET", "/api/costs?period=5d");
     check("costs bad period -> 400", badPeriod.status === 400, `got ${badPeriod.status}`);
 
-    // /api/quality — the four signals, with landingYield counting WORK-1
+    // /api/quality — the seven signals (the four quality ones plus the three
+    // FOC-1169 delivery labels), with landingYield counting WORK-1
     // (dev child, Linear state started → not landed) in the denominator.
     const quality = await call(P, "GET", "/api/quality?period=all");
     check("quality -> 200 ok", quality.status === 200 && quality.body?.state === "ok", JSON.stringify(quality.body).slice(0, 200));
-    check("quality four signals",
+    check("quality seven signals",
       JSON.stringify((quality.body?.signals ?? []).map((s) => s.key).sort())
-      === '["firstTimeRight","interventionsPerTicket","landingYield","reworkShare"]',
+      === '["ciRedAfterReady","deliveryFirstTimeRight","firstTimeRight","interventionsPerTicket","landingYield","reviewFalsePass","reworkShare"]',
       JSON.stringify(quality.body?.signals?.map((s) => s.key)));
     const yieldSignal = (quality.body?.signals ?? []).find((s) => s.key === "landingYield");
     check("quality landingYield: WORK-1 has a dev child and is not landed",
