@@ -598,10 +598,13 @@ testAsync("skips the install when there is no package.json (FOC-1153 r2)", async
   if (out.ok !== true) fail(`a skipped install must not fail the run: ${JSON.stringify(out)}`);
 });
 
-testAsync("skips the install when a real node_modules is already present (FOC-1153 r2)", async () => {
+testAsync("skips the install when a real node_modules is already present WITH the completion marker (FOC-1153 r2 / FOC-1156)", async () => {
   const dir = r1Fixture();
   mkdirSync(join(dir, "node_modules"));
   writeFileSync(join(dir, "node_modules", "sentinel.txt"), "keep\n");
+  // FOC-1156: the fast path now requires the completion marker a successful
+  // install stamps — a bare node_modules no longer earns the skip.
+  writeFileSync(join(dir, "node_modules", ".fenix-install-ok"), "2026-11-02T00:00:00.000Z\n");
   const out = await installWorktreeDeps(dir);
   const root = (out.locations ?? []).find((l) => l.location === "root");
   if (!root || root.skipped !== true) fail(`the root install did not skip: ${JSON.stringify(root)}`);
@@ -612,6 +615,73 @@ testAsync("skips the install when a real node_modules is already present (FOC-11
   if (out.ok !== true) fail(`a skipped install must not fail the run: ${JSON.stringify(out)}`);
   if (!existsSync(join(dir, "node_modules", "sentinel.txt"))) {
     fail("npm ran over an existing node_modules — the skip branch did not hold");
+  }
+});
+
+// FOC-1156: a partial node_modules survives a failed or timed-out install, and
+// the old presence check skipped such a stale tree forever. installDepsAt now
+// stamps node_modules/.fenix-install-ok ONLY on a successful install and
+// treats a marker-less tree as stale: removed (never following a reparse
+// point) and installed fresh. The offline fixture is r1's.
+testAsync("a pre-existing node_modules WITHOUT the marker is stale — removed and reinstalled (FOC-1156)", async () => {
+  const dir = r1Fixture();
+  mkdirSync(join(dir, "node_modules"));
+  writeFileSync(join(dir, "node_modules", "sentinel.txt"), "stale\n");
+  const out = await installWorktreeDeps(dir);
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped) fail(`the marker-less tree was skipped as already present: ${JSON.stringify(root)}`);
+  if (root.removedStale !== true) fail(`the stale removal was not reported: ${JSON.stringify(root)}`);
+  if (root.ok !== true) fail(`the reinstall over the stale tree failed: ${JSON.stringify(root)}`);
+  if (existsSync(join(dir, "node_modules", "sentinel.txt"))) {
+    fail("the stale residue survived the reinstall — node_modules was not removed");
+  }
+  if (!existsSync(join(dir, "node_modules", ".fenix-install-ok"))) {
+    fail("the successful install did not stamp the completion marker");
+  }
+  const dep = spawnSync(process.execPath, ["-e", "process.exit(require('fake-dep') === 42 ? 0 : 1)"], { cwd: dir });
+  if (dep.status !== 0) fail("fake-dep does not resolve after the reinstall");
+});
+
+testAsync("a timed-out install leaves no marker — the next ensure reinstalls the stale tree (FOC-1156)", async () => {
+  // First install: the preinstall hangs, the test-seam timeout fires, and the
+  // run must leave node_modules WITHOUT the completion marker — the stale
+  // shape a mere presence check would skip forever.
+  const dir = r1Fixture({
+    preinstall: `node -e "setTimeout(function(){},600000)"`,
+  });
+  process.env.LA_DEPS_INSTALL_TIMEOUT_MS = "8000";
+  try {
+    const first = await installWorktreeDeps(dir);
+    const firstRoot = (first.locations ?? []).find((l) => l.location === "root");
+    if (!firstRoot || firstRoot.skipped) fail(`the first install did not run: ${JSON.stringify(firstRoot)}`);
+    if (firstRoot.timedOut !== true) fail(`the first install did not time out: ${JSON.stringify(firstRoot)}`);
+    if (existsSync(join(dir, "node_modules", ".fenix-install-ok"))) {
+      fail("the marker must not be written by a timed-out install");
+    }
+    // Deterministic residue: some timed-out runs die before npm materializes
+    // node_modules at all. The stale shape is "node_modules without the
+    // marker" — plant exactly that when the killed run left nothing behind.
+    if (!existsSync(join(dir, "node_modules"))) {
+      mkdirSync(join(dir, "node_modules", "fake-dep"), { recursive: true });
+      writeFileSync(join(dir, "node_modules", "fake-dep", "index.js"), "module.exports=1;");
+    }
+    // Second ensure: a healthy install (the fixture's normal offline
+    // preinstall) — the marker-less residue must NOT be skipped as "already
+    // present"; it is removed and installed fresh.
+    delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
+    writeFileSync(join(dir, "package.json"), JSON.stringify(DEPS_FIXTURE_PKG));
+    const second = await installWorktreeDeps(dir);
+    const root = (second.locations ?? []).find((l) => l.location === "root");
+    if (!root || root.skipped) fail(`the stale tree was skipped as already present: ${JSON.stringify(root)}`);
+    if (root.removedStale !== true) fail(`the stale removal was not reported: ${JSON.stringify(root)}`);
+    if (root.ok !== true) fail(`the reinstall over the stale tree failed: ${JSON.stringify(root)}`);
+    if (!existsSync(join(dir, "node_modules", ".fenix-install-ok"))) {
+      fail("the successful reinstall did not stamp the completion marker");
+    }
+    const dep = spawnSync(process.execPath, ["-e", "process.exit(require('fake-dep') === 42 ? 0 : 1)"], { cwd: dir });
+    if (dep.status !== 0) fail("fake-dep does not resolve after the reinstall");
+  } finally {
+    delete process.env.LA_DEPS_INSTALL_TIMEOUT_MS;
   }
 });
 

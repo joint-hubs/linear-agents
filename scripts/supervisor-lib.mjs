@@ -15,7 +15,7 @@
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2157,6 +2157,12 @@ function withOwnership(gitRoot, result, ownerId) {
 // Spawn blocks the child launch on this, but must not hang on it: bounded well
 // under the merge tool's 900 s install/verify ceiling (supervisor-merge.mjs),
 // comfortably above this repo's own installs, which measure in seconds.
+//
+// FOC-1156 record correction: the install is NOT an out-of-turn wait — the
+// Supervisor's Bash call DOES wait for it, bounded at 300 s + 10 s kill grace,
+// and Claude Code moves an over-time call to the background rather than
+// killing it, so nothing is lost when the bound is hit. The block on the
+// child launch stays; only the old "not an in-turn wait" wording was wrong.
 const DEPS_INSTALL_TIMEOUT_MS = 300_000;
 
 /** Test seam for the production budget above — the r1 orphan test needs a
@@ -2177,6 +2183,11 @@ const INSTALL_OUTPUT_KEEP_BYTES = 1024 * 1024;
 // anyway. `taskkill /F` lands in milliseconds when it lands at all, so in the
 // normal case `close` wins this race long before the timer fires.
 const INSTALL_KILL_GRACE_MS = 10_000;
+
+// FOC-1156: stamped inside node_modules only by a COMPLETED install. A partial
+// tree left behind by a failed or timed-out install carries no marker, so the
+// next ensure removes and reinstalls it instead of skipping on mere presence.
+const INSTALL_OK_MARKER = ".fenix-install-ok";
 
 /**
  * True when the entry is a reparse point of ANY win32 tag, not merely a symlink
@@ -2229,14 +2240,27 @@ async function installDepsAt(dir, location) {
     }
   }
   if (st && !isReparsePoint(st, dirent) && st.isDirectory()) {
-    return { ...record, skipped: true, reason: "node_modules already present" };
+    if (existsSync(join(nm, INSTALL_OK_MARKER))) {
+      return { ...record, skipped: true, reason: "node_modules already present" };
+    }
+    // FOC-1156: node_modules WITHOUT the completion marker is the residue of a
+    // failed or timed-out install — the old presence check skipped such a
+    // partial tree forever. It falls through: removed below, installed fresh.
   }
   if (st) {
     try {
-      rmSync(nm); // link or stray file; rmSync does not follow a reparse point
+      // A link, a stray file, or — FOC-1156 — a stale marker-less tree.
+      // recursive covers the stale real directory; rmSync still unlinks a
+      // reparse point AS A LINK, never following it out of the tree.
+      rmSync(nm, { recursive: true, force: true });
       // r2 N6: renamed from `replacedReparsePoint` — this branch also fires for
       // a node_modules that is a stray FILE, and the old name overclaimed.
-      record.replacedObstruction = true;
+      if (isReparsePoint(st, dirent) || !st.isDirectory()) {
+        record.replacedObstruction = true;
+      } else {
+        // FOC-1156: a real directory without the marker — the stale shape.
+        record.removedStale = true;
+      }
     } catch (err) {
       return {
         ...record,
@@ -2256,6 +2280,17 @@ async function installDepsAt(dir, location) {
   // stderr falls back to stdout.
   const stderrLines = run.stderr.split("\n").filter(Boolean);
   const stdoutLines = run.stdout.split("\n").filter(Boolean);
+  if (run.code === 0) {
+    // FOC-1156: the completion marker is stamped ONLY on a fully successful
+    // install — a failed or timed-out run leaves the tree without it, so the
+    // next ensure treats the residue as stale and reinstalls.
+    try {
+      writeFileSync(join(nm, INSTALL_OK_MARKER), `${new Date().toISOString()}\n`);
+    } catch {
+      // A missing marker is the safe direction: the next ensure reinstalls
+      // rather than skipping.
+    }
+  }
   return {
     ...record,
     skipped: false,
