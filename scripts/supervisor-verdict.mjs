@@ -7,7 +7,7 @@
 //        [--decision-run <runId> ...] [--dry-run]
 //   node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n
 //        --verdict pass|fail --reason <design|evidence|test-gap|ci|scope|other>
-//        [--finding '<json>' ...] [--work-child <id>]
+//        [--finding '<json>' ...] [--work-child <id>] [--round N]
 //        [--recorded-at <iso> --backfill] [--dry-run]     (FOC-1169)
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
@@ -96,6 +96,10 @@ import { atomicWriteJSON } from "./utils.mjs";
 
 const VERDICTS = ["pass", "fail"];
 const SEVERITIES = ["issue", "todo", "nit", "question", "praise"];
+
+// Strict ISO 8601 for a backfilled record's `--recorded-at`: calendar date, T,
+// time, optional fraction, Z or an explicit offset. Nothing locale-shaped.
+const RE_ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 // The closed set a delivery verdict's `--reason` comes from (FOC-1169). The
 // reason IS the label: `ci` feeds ciRedAfterReady, the rest categorize why a
@@ -211,10 +215,13 @@ function resolveWorkChild(registry, entry, taskId, args, opts = {}) {
   if (matches.length === 1) return matches[0];
 
   if (matches.length === 0) {
+    // A delivery verdict has no child of its own — the hint must not print
+    // "Fingerprinting null's own tree"; name what WOULD be fingerprinted.
+    const who = entry.childId ?? (entry.squad === "delivery" ? "the delivery owner's (nonexistent) own tree" : "the recording child's own tree");
     failJson(
       `no ${producer} child for ${taskId} in this run, so there is no tree holding the work ${entry.squad} is reviewing`,
       {
-        hint: `name it: --work-child <id>. Fingerprinting ${entry.childId}'s own tree would measure the reviewer, not the work.`,
+        hint: `name it: --work-child <id>. Fingerprinting ${who} would measure the reviewer, not the work.`,
         candidates: children.map((c) => ({ childId: c.childId, squad: c.squad, taskId: c.taskId })),
       },
     );
@@ -892,11 +899,13 @@ function cmdRecordDelivery(args) {
     if (!recordedAtArg || recordedAtArg === true) {
       failJson("--backfill needs --recorded-at <iso> — the baseline's when is part of the record");
     }
-    const ms = Date.parse(String(recordedAtArg));
-    if (Number.isNaN(ms)) {
-      failJson(`--recorded-at "${recordedAtArg}" is not a readable timestamp (expected ISO)`);
+    // Strict ISO: Date.parse is a locale-tolerant reader ("11/01/2026" parses),
+    // and a backdated record whose when depends on the recorder's locale is not
+    // a baseline anyone can reproduce. The shape is ISO 8601 only.
+    if (!RE_ISO_STAMP.test(String(recordedAtArg)) || Number.isNaN(Date.parse(String(recordedAtArg)))) {
+      failJson(`--recorded-at "${recordedAtArg}" is not an ISO timestamp (expected e.g. 2026-11-01T10:00:00.000Z)`);
     }
-    recordedAt = new Date(ms).toISOString();
+    recordedAt = new Date(Date.parse(String(recordedAtArg))).toISOString();
   }
 
   // reason: required for fail, optional for pass, always from the closed set.

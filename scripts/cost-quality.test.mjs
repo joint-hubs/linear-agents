@@ -523,12 +523,14 @@ test("quality: stale flag on an old snapshot", () => {
 // ── delivery verdict signals (FOC-1169) ──────────────────────────────────────
 
 // A verdict row as work-board.mjs's collectTicketFacts serves it — with the
-// squad / fingerprint / reason fields the delivery labels (FOC-1169) added.
+// squad / fingerprint / reason fields the delivery labels (FOC-1169) added, and
+// the fingerprintDiff tree axis the reviewFalsePass fix matches on.
 const vRow = (over = {}) => ({
   round: 1,
   verdict: "PASS",
   squad: "review",
   fingerprint: "fp1",
+  fingerprintDiff: "d1",
   reason: null,
   at: "2026-11-01T10:00:00.000Z",
   path: "p",
@@ -568,23 +570,42 @@ test("quality: deliveryFirstTimeRight counts tickets whose first delivery verdic
   assert.equal(signal.unit, "share");
 });
 
-test("quality: reviewFalsePass counts REVIEW pass rounds contradicted by a delivery fail on the SAME fingerprint", () => {
+test("quality: reviewFalsePass counts REVIEW pass rounds contradicted by a delivery fail on the SAME work tree", () => {
   const facts = [
-    // counted: the delivery fail landed on the tree the REVIEW pass accepted
+    // counted — the motivating case: the delivery FAIL declared a failing test
+    // (so its combined fingerprint differs from the pass's — the tests axis is
+    // a per-verdict declaration), but the TREE is the one the REVIEW pass
+    // accepted. Same fingerprintDiff, different combined → still a false pass.
     fact({
       taskId: "FP1",
       verdicts: [
-        vRow({ at: "2026-11-01T09:00:00Z" }),
-        vRow({ squad: "delivery", verdict: "FAIL", round: 2, fingerprint: "fp1", reason: "design", at: "2026-11-01T10:00:00Z" }),
+        vRow({ fingerprint: "c-pass-1", fingerprintDiff: "d1", at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: "c-fail-1",
+          fingerprintDiff: "d1",
+          reason: "design",
+          at: "2026-11-01T10:00:00Z",
+        }),
       ],
       lastActivityAt: NOW - DAY,
     }),
-    // same fingerprint requirement fails: delivery failed on a DIFFERENT tree
+    // not counted: delivery failed on a DIFFERENT tree (diff axis differs)
     fact({
       taskId: "FP2",
       verdicts: [
-        vRow({ fingerprint: "fp2", at: "2026-11-01T09:00:00Z" }),
-        vRow({ squad: "delivery", verdict: "FAIL", round: 2, fingerprint: "fp3", reason: "design", at: "2026-11-01T10:00:00Z" }),
+        vRow({ fingerprint: "c-pass-2", fingerprintDiff: "d2", at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: "c-fail-2",
+          fingerprintDiff: "d3",
+          reason: "design",
+          at: "2026-11-01T10:00:00Z",
+        }),
       ],
       lastActivityAt: NOW - DAY,
     }),
@@ -592,28 +613,48 @@ test("quality: reviewFalsePass counts REVIEW pass rounds contradicted by a deliv
     fact({
       taskId: "FP3",
       verdicts: [
-        vRow({ fingerprint: "fp4", at: "2026-11-01T09:00:00Z" }),
-        vRow({ squad: "delivery", verdict: "PASS", round: 2, at: "2026-11-01T10:00:00Z" }),
+        vRow({ fingerprint: "c-pass-3", fingerprintDiff: "d4", at: "2026-11-01T09:00:00Z" }),
+        vRow({ squad: "delivery", verdict: "PASS", round: 2, fingerprint: "c-ok-3", fingerprintDiff: "d4", at: "2026-11-01T10:00:00Z" }),
       ],
       lastActivityAt: NOW - DAY,
     }),
-    // the REVIEW pass fingerprint is UNKNOWN (null) — UNKNOWN never matches
+    // the REVIEW pass tree is UNKNOWN (null diff) — UNKNOWN never matches
     fact({
       taskId: "FP4",
       verdicts: [
-        vRow({ fingerprint: null, at: "2026-11-01T09:00:00Z" }),
-        vRow({ squad: "delivery", verdict: "FAIL", round: 2, fingerprint: null, reason: "ci", at: "2026-11-01T10:00:00Z" }),
+        vRow({ fingerprint: null, fingerprintDiff: null, at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: null,
+          fingerprintDiff: null,
+          reason: "ci",
+          at: "2026-11-01T10:00:00Z",
+        }),
       ],
       lastActivityAt: NOW - DAY,
     }),
     // no delivery verdict after the pass — outside the denominator entirely
-    fact({ taskId: "FP5", verdicts: [vRow({ fingerprint: "fp5", at: "2026-11-01T09:00:00Z" })], lastActivityAt: NOW - DAY }),
+    fact({
+      taskId: "FP5",
+      verdicts: [vRow({ fingerprint: "c-pass-5", fingerprintDiff: "d5", at: "2026-11-01T09:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
     // not provably REVIEW (squad unknown) — not a REVIEW pass round at all
     fact({
       taskId: "FP6",
       verdicts: [
-        vRow({ squad: null, at: "2026-11-01T09:00:00Z" }),
-        vRow({ squad: "delivery", verdict: "FAIL", round: 2, fingerprint: "fp6", reason: "scope", at: "2026-11-01T10:00:00Z" }),
+        vRow({ squad: null, fingerprintDiff: "d6", at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: "c-fail-6",
+          fingerprintDiff: "d6",
+          reason: "scope",
+          at: "2026-11-01T10:00:00Z",
+        }),
       ],
       lastActivityAt: NOW - DAY,
     }),

@@ -1041,6 +1041,101 @@ test("a delivery fail after a REVIEW pass on the same tree opens the round (FOC-
   assert.equal(loop.progress.rounds, 2);
 });
 
+test("--ac is refused in --delivery mode — an AC mapping is a REVIEW approve requirement", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = parse(
+    verdict([
+      "record", "--delivery", "--run", s.runId, "--task", "FOC-123", "--verdict", "pass",
+      "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    ]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--ac/);
+});
+
+test("--backfill without --recorded-at is refused — a backfill without its when is half a declaration", () => {
+  // The AC only forces --recorded-at without --backfill to be refused; the
+  // mirror case is a policy call, pinned here: backfill:true with a NOW
+  // timestamp would claim to be history without saying when that history was.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci", "--backfill"]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
+test("a delivery verdict with no dev child in the run is refused, not guessed at", () => {
+  const { repo } = fixtureRepo();
+  const review = fixtureWorktree(repo, "foc-123-review");
+  const runId = fixtureRun();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "review-1": {
+        childId: "review-1", squad: "review", taskId: "FOC-123", status: "exited", turns: [],
+        worktree: review.worktree, baseRevision: review.baseRevision,
+      },
+    },
+    rounds: {},
+  });
+  const out = parse(
+    verdict([
+      "record", "--delivery", "--run", runId, "--task", "FOC-123",
+      "--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON,
+    ]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /no dev child for FOC-123/);
+  // The hint names WHO would be fingerprinted — not a null childId.
+  assert.ok(!String(out.hint ?? "").includes("null"), `the hint interpolates a null childId: ${out.hint}`);
+});
+
+test("two dev children for the task are ambiguous — --work-child names the tree", () => {
+  const { repo } = fixtureRepo();
+  const devA = fixtureWorktree(repo, "foc-123-dev-a");
+  const devB = fixtureWorktree(repo, "foc-123-dev-b");
+  const runId = fixtureRun();
+  const child = (id, wt) => ({
+    childId: id, squad: "dev", taskId: "FOC-123", status: "exited", turns: [],
+    worktree: wt.worktree, baseRevision: wt.baseRevision,
+  });
+  writeRegistry(runId, { runId, children: { "dev-1": child("dev-1", devA), "dev-2": child("dev-2", devB) }, rounds: {} });
+  const mk = (extra = []) =>
+    parse(
+      verdict([
+        "record", "--delivery", "--run", runId, "--task", "FOC-123",
+        "--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON,
+        ...extra,
+      ]),
+      fail,
+    );
+
+  const refused = mk();
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /2 dev children carry FOC-123/);
+
+  // Naming one resolves the ambiguity; the record still has no child.
+  const named = mk(["--work-child", "dev-2"]);
+  assert.equal(named.ok, true, named.error);
+  assert.equal(named.childId, null);
+});
+
+test("a --recorded-at that Date.parse accepts but ISO does not is refused", () => {
+  // Todo-1 round 1: Date.parse("11/01/2026") is readable, but a backdated
+  // record whose when is locale-shaped is not a baseline anyone can reproduce.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "11/01/2026", "--backfill",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
 // ── 6. the two stall conditions stay distinct ────────────────────────────────
 console.log("\ndwa warunki zastoju, osobno raportowane");
 
