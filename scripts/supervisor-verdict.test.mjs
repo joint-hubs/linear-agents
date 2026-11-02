@@ -26,7 +26,7 @@ import {
   parse,
   runScript,
 } from "./supervisor-test-fixtures.mjs";
-import { gatesDir, progressFingerprint, readRegistry, verdictPath, verdictsDir, writeRegistry } from "./supervisor-lib.mjs";
+import { gatesDir, progressFingerprint, readRegistry, runDir, verdictPath, verdictsDir, writeRegistry } from "./supervisor-lib.mjs";
 import { returnGateQuestion } from "./supervisor-verdict.mjs";
 
 const { test, fail, summary } = harness();
@@ -164,6 +164,28 @@ function advance(s, name) {
 const record = (s, extra = []) =>
   parse(verdict(["record", "--run", s.runId, "--child", "review-1", ...extra]), fail);
 
+/**
+ * An output file the reviewer produced, under the run's scratch reviews dir —
+ * the same place the REVIEW round files go when supervised. `body` empty is
+ * how the empty-outputRef case is built.
+ */
+const scratchEvidence = (s, name, body) => {
+  const dir = join(runDir(s.runId), "scratch", "reviews");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  writeFileSync(path, body, "utf8");
+  return path;
+};
+const ranFlag = (s, name = "evidence.txt", body = "12 passed, 0 failed\n") =>
+  JSON.stringify({ cmd: "node scripts/supervisor-verdict.test.mjs", exit: 0, outputRef: scratchEvidence(s, name, body) });
+const redFirstFlag = (s, name = "red-first.txt", baseExit = 1, candidateExit = 0) =>
+  JSON.stringify({
+    cmd: "node scripts/supervisor-verdict.test.mjs",
+    baseExit,
+    candidateExit,
+    outputRef: scratchEvidence(s, name, `base exit ${baseExit}, candidate exit ${candidateExit}\n`),
+  });
+
 // ── 1. every finding cites something ─────────────────────────────────────────
 console.log("\nkażde ustalenie musi coś cytować");
 
@@ -240,6 +262,7 @@ test("a complete AC mapping passes", () => {
     "--issue-file", issueFile(s.base, 2),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ac", JSON.stringify({ ac: "AC-2", evidence: "scripts/b.test.mjs:44 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.acMapping.length, 2);
@@ -253,6 +276,7 @@ test("an unreadable issue warns instead of blocking the approve", () => {
     "--verdict", "pass",
     "--issue-file", join(s.base, "no-such-issue.json"),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.declaredAcs, null);
@@ -269,6 +293,183 @@ test("a pass cannot carry a blocking issue finding", () => {
   ]);
   assert.equal(out.ok, false);
   assert.match(out.error, /blocking/);
+});
+
+// ── 2b. the pass cites a command the reviewer ran itself (FOC-1170) ─────────
+console.log("\nevidence as code — a pass cites a command the reviewer ran");
+
+test("a review pass without an evidence run is refused (review-pass-without-evidence-run)", () => {
+  // The three false passes of 2026-11-01/02 all accepted output that could not
+  // have come out differently. Absence of objections is not evidence, and
+  // neither is a diff read; the tool refuses a pass that cites nothing ran.
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /review-pass-without-evidence-run/);
+});
+
+test("a --ran whose outputRef does not exist is refused", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/x.mjs", exit: 0, outputRef: join(runDir(s.runId), "scratch", "no-such-output.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
+});
+
+test("an empty outputRef is refused", () => {
+  // A zero-byte file is a citation of nothing — the same cheat as a dash.
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s, "empty.txt", ""),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-empty/);
+});
+
+test("an outputRef outside the run's scratch and the reviewer's worktree is refused", () => {
+  // DEV's tree is neither: an output the reviewer "ran" in the work tree under
+  // review is exactly the evidence nobody can audit after the fact.
+  const s = scenario();
+  const outside = join(s.worktree, "dev-tree-output.txt");
+  writeFileSync(outside, "looks like evidence\n", "utf8");
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/x.mjs", exit: 0, outputRef: outside }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-outside-run/);
+});
+
+test("a valid --ran under the reviewer's worktree is recorded", () => {
+  const s = scenario();
+  const path = join(s.reviewTree, "lint-output.txt");
+  writeFileSync(path, "0 violations\n", "utf8");
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/lint.mjs", exit: 0, outputRef: path }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran.length, 1);
+  assert.equal(out.ran[0].cmd, "node scripts/lint.mjs");
+  assert.equal(out.ran[0].exit, 0);
+  assert.equal(out.ran[0].outputRef, path);
+});
+
+test("a --ran given as a path relative to the reviewer's worktree resolves", () => {
+  // The reviewer runs from its own tree, so a relative citation is the natural
+  // shape; resolving it there (not against the tool's cwd) is what keeps the
+  // record's absolute path the one the reviewer actually produced.
+  const s = scenario();
+  writeFileSync(join(s.reviewTree, "test-output.txt"), "all green\n", "utf8");
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/suite.mjs", exit: 0, outputRef: "test-output.txt" }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran[0].outputRef, join(s.reviewTree, "test-output.txt"));
+});
+
+test("an outputRef whose path casing differs from the root is still contained (win32)", () => {
+  // The containment compare used to be case-sensitive: a citation typed with a
+  // lowercase drive letter (`c:/users/...`) resolved fine on the
+  // case-insensitive win32 filesystem but was refused as outside-run although
+  // the file sat inside the reviewer's worktree (review round 1, probe P15).
+  // Case-folding is a win32 property — posix paths ARE case-sensitive, so on
+  // other platforms this scenario does not exist and the test steps aside.
+  if (process.platform !== "win32") return;
+  const s = scenario();
+  const path = join(s.reviewTree, "cased-output.txt");
+  writeFileSync(path, "same file, typed differently\n", "utf8");
+  const lowered = path.replace(/^([A-Za-z]):/, (m, d) => `${d.toLowerCase()}:`);
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/lint.mjs", exit: 0, outputRef: lowered }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran[0].outputRef, lowered);
+});
+
+test("--red-first with equal exits is refused (red-first-not-red)", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+    "--red-first", redFirstFlag(s, "equal.txt", 1, 1),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /red-first-not-red/);
+});
+
+test("a malformed --red-first shape is refused", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+    "--red-first", JSON.stringify({ cmd: "node scripts/x.mjs", baseExit: 1 }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.ok(out.problems.some((p) => /--red-first #1/.test(p)), JSON.stringify(out.problems));
+});
+
+test("a valid --red-first is stored on the record as redFirst", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+    "--red-first", redFirstFlag(s),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.redFirst.length, 1);
+  assert.equal(out.redFirst[0].baseExit, 1);
+  assert.equal(out.redFirst[0].candidateExit, 0);
+  assert.ok(existsSync(out.redFirst[0].outputRef));
+});
+
+test("a fail without --ran still records — the gate is a pass gate", () => {
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran, undefined, "no ran key without the flag — the record shape stays as it was");
+});
+
+test("a --ran cited on a fail still has to point at real output", () => {
+  // The gate protects the pass; the SHAPE check protects every record. Evidence
+  // that does not exist is not evidence on a fail either — it just fails
+  // softer, so the shape check does not get a verdict-dependent blind spot.
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--ran", JSON.stringify({ cmd: "node scripts/x.mjs", exit: 1, outputRef: join(runDir(s.runId), "scratch", "never-written.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
 });
 
 // ── 3. the fingerprint ───────────────────────────────────────────────────────
@@ -485,6 +686,7 @@ test("a pass followed by a fail on the same tree is a new opinion, not a reprodu
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", NO_TESTS_REASON]);
 
@@ -586,6 +788,7 @@ test("a pass records no side effects at all", () => {
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.linearEffects.label.status, "not-applicable");
@@ -785,6 +988,7 @@ test("a non-allowlisted *_DRY_RUN cannot feed a fake issue into declaredAcs (R2-
         "record", "--run", s.runId, "--child", "review-1", "--verdict", "pass",
         "--work-child", "dev-1", "--task", "FOC-777",
         "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+        "--ran", ranFlag(s, "scrub-evidence.txt"),
       ],
       { REVIEW_DRY_RUN: "", FOO_DRY_RUN: "1" },
       { stripCreds: true },
@@ -969,6 +1173,25 @@ test("a delivery pass needs no reason and no AC mapping", () => {
   assert.equal(out.reason, null);
   assert.deepEqual(out.acMapping, []);
   assert.deepEqual(out.findings, []);
+  assert.equal(out.ran, undefined, "no ran key without the flag — the delivery record shape stays as it was");
+});
+
+test("--ran is refused in --delivery mode — an evidence run is a REVIEW pass requirement", () => {
+  // FOC-1170 round 1: the evidence flags parsed and VANISHED in delivery mode —
+  // the exact silent-accept class this ticket exists to kill, one layer over.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass", "--ran", ranFlag(s, "delivery-evidence.txt")]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--ran is not used in --delivery mode/);
+});
+
+test("--red-first is refused in --delivery mode", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass", "--red-first", redFirstFlag(s, "delivery-red-first.txt")]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--red-first is not used in --delivery mode/);
 });
 
 test("--recorded-at without --backfill is refused", () => {
@@ -1030,6 +1253,7 @@ test("a delivery fail after a REVIEW pass on the same tree opens the round (FOC-
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
   assert.equal(out.ok, true, out.error);

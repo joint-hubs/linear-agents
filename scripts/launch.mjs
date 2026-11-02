@@ -73,6 +73,7 @@ export const DEFAULT_KICKOFF_TEMPLATES = {
   review: [
     'Zrób review taska {taskId} (In Review) wg swojego CLAUDE.md (sekcja Pipeline).',
     'Trzy przebiegi równolegle, potem scal w Conventional Comments i wydaj werdykt.',
+    'Werdykt zapisujesz przez scripts/supervisor-verdict.mjs: pass bez --ran (komenda, exit, outputRef) jest odrzucony, red-first jako --red-first — szczegóły w CLAUDE.md § Verdict (FOC-1170).',
     'Modele przebiegów bierzesz z agents/review/agents/*.md — nie wybieraj ich sam.',
   ],
   test: [

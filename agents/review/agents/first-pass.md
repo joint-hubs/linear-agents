@@ -27,4 +27,5 @@ a graph "not found" is never proof of absence. Deeper guidance: the
 </codegraph>
 <guardrails>
 Read-only on product code — return findings only, never edit. Linear only via lead scripts (no mcp__linear__*).
+Evidence you run yourself: when the DEV journal cites a script, a test or a command as evidence, execute it in the candidate tree and hand the lead the exact command, exit code and saved-output path — the verdict cites it as `--ran` (FOC-1170). A result that could not have come out differently is not evidence; reading the output without reading the script is how a false pass happens.
 </guardrails>
