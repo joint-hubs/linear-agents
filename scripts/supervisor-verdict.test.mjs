@@ -33,6 +33,7 @@ import {
   readRegistry,
   roundsFor,
   runDir,
+  worktreeHead,
   verdictPath,
   verdictsDir,
   writeRegistry,
@@ -809,6 +810,20 @@ test("an unreadable tree is UNKNOWN, not empty", () => {
   const fp = progressFingerprint({ worktree: join(ROOT, "no-such-tree"), baseRevision: "HEAD" });
   assert.equal(fp.combined, null);
   assert.ok(fp.error);
+});
+
+test("worktreeHead names a spawn failure, never 'exited null' (FOC-1222 r2)", () => {
+  // A path that is a FILE: git cannot run with it as cwd, so spawnSync itself
+  // fails — r.status and r.stderr are both null, and the old fallback
+  // interpolated "exited null" into the error text. Cosmetic only (candidate
+  // stays honestly null), but an error nobody can read is no error at all.
+  const { base } = fixtureRepo();
+  const notADir = join(base, "not-a-dir");
+  writeFileSync(notADir, "x\n");
+  const r = worktreeHead(notADir);
+  assert.equal(r.sha, null);
+  assert.ok(r.error);
+  assert.doesNotMatch(r.error, /exited null/, `error text leaked the null status: ${r.error}`);
 });
 
 // ── 3a. the candidate sha the verdict covers (FOC-1222) ──────────────────────

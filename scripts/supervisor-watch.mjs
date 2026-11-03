@@ -951,10 +951,14 @@ function finalizeTurn(code, signal) {
   // field on the entry plus a note on the exit wake row — the same shape the
   // `sweptPids` audit note takes. Scope: dev only — REVIEW/TEST exit clean by
   // contract. A missing or unreadable worktree records UNKNOWN rather than
-  // inventing dirt or staying silent.
+  // inventing dirt or staying silent — and so does a dev row with NO worktree
+  // field at all: the registry not naming a worktree is itself the finding
+  // (r2, FOC-1222), the guard must not filter it out before the check runs.
   let dirtyExit = null;
-  if (status === "exited" && entry.squad === "dev" && entry.worktree) {
-    if (!existsSync(entry.worktree)) {
+  if (status === "exited" && entry.squad === "dev") {
+    if (!entry.worktree) {
+      dirtyExit = { unknown: "no worktree recorded", at: endedAt };
+    } else if (!existsSync(entry.worktree)) {
       dirtyExit = { unknown: "worktree missing", at: endedAt };
     } else {
       const dirtyFiles = dirtyTreeReport(entry.worktree);

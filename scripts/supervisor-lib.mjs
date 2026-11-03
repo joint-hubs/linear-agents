@@ -3043,7 +3043,7 @@ export function worktreeHead(worktree) {
     if (r.status !== 0) {
       return {
         sha: null,
-        error: (r.stderr || "").trim().split("\n")[0] || `git rev-parse HEAD exited ${r.status}`,
+        error: r.error?.message ?? ((r.stderr || "").trim().split("\n")[0] || `git rev-parse HEAD exited ${r.status}`),
       };
     }
     return { sha: r.stdout.trim() || null, error: null };

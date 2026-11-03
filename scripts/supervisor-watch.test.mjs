@@ -2183,6 +2183,16 @@ const resultReview = runWatcher(runIdReview, [], {
   FAKE_SESSION_ID: `watch-review-${process.pid}`,
 });
 
+const runIdNoWt = `test-watch-nowt-exit-${process.pid}`;
+// A dev row that lost (or never had) the worktree field: JSON.stringify drops
+// the undefined value, so the registry entry carries NO worktree key at all —
+// exactly the shape the guard must not read as a verified clean exit.
+fixtureChildAt(runIdNoWt, undefined);
+const resultNoWt = runWatcher(runIdNoWt, [], {
+  FAKE_ARGV_PATH: join(base, "argv-nowt-exit.json"),
+  FAKE_SESSION_ID: `watch-nowt-${process.pid}`,
+});
+
 test("FOC-1222: a DEV child that exits READY on a dirty tree is flagged dirtyExit", () => {
   assert.equal(resultDirty.status, 0, `watcher exit ${resultDirty.status}: ${resultDirty.stderr}`);
   const entry = readRegistry(runIdDirty).children["dev-1"];
@@ -2223,6 +2233,15 @@ test("FOC-1222: a REVIEW child's dirty tree is not flagged (scope: dev)", () => 
   const entry = readRegistry(runIdReview).children["dev-1"];
   assert.equal(entry.status, "exited");
   assert.equal(entry.dirtyExit, undefined, "REVIEW/TEST exit clean by contract — no flag on their dirt");
+});
+
+test("FOC-1222 r2: a dev row with NO worktree field records UNKNOWN, not silence", () => {
+  assert.equal(resultNoWt.status, 0, `watcher exit ${resultNoWt.status}: ${resultNoWt.stderr}`);
+  const entry = readRegistry(runIdNoWt).children["dev-1"];
+  assert.equal(entry.status, "exited");
+  assert.ok(entry.dirtyExit?.unknown, `a worktree-less dev row stayed silent: ${JSON.stringify(entry.dirtyExit)}`);
+  assert.match(entry.dirtyExit.unknown, /no worktree recorded/);
+  assert.equal(entry.dirtyExit.files, undefined, "UNKNOWN must never look like a file list");
 });
 
 console.log("");
