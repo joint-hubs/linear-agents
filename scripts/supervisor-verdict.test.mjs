@@ -839,6 +839,47 @@ test("a dirty work tree still records the HEAD it covers, and names the dirt (FO
   );
 });
 
+test("a named --work-child with no worktree records candidate null, never a guessed sha (FOC-1222 r2)", () => {
+  // Round-1 finding: the named --work-child path returns the entry with no
+  // worktree check, and worktreeHead ran `git rev-parse HEAD` in the VERDICT
+  // process cwd — the record then carried the REPO's HEAD as the work child's
+  // candidate with error: null. A guessed sha is exactly what the field must
+  // never be.
+  const { base, repo } = fixtureRepo();
+  const review = fixtureWorktree(repo, "foc-1222-r2-named");
+  const runId = fixtureRun();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "dev-1": { childId: "dev-1", squad: "dev", taskId: "FOC-123", status: "exited", turns: [] },
+      "review-1": {
+        childId: "review-1",
+        squad: "review",
+        taskId: "FOC-123",
+        status: "exited",
+        turns: [],
+        worktree: review.worktree,
+        branch: review.branch,
+        baseRevision: review.baseRevision,
+      },
+    },
+    rounds: {},
+  });
+  const out = parse(
+    verdict([
+      "record", "--run", runId, "--child", "review-1", "--work-child", "dev-1",
+      "--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a",
+    ]),
+    fail,
+  );
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.candidate, null, `candidate carried a sha (${out.candidate}) — a guessed sha, not the work child's HEAD`);
+  assert.ok(
+    out.warnings.some((w) => /candidate sha is UNKNOWN/i.test(w)),
+    `no UNKNOWN warning for the unreadable tree: ${JSON.stringify(out.warnings)}`,
+  );
+});
+
 // ── 3b. a launcher restart split the registry: --work-run (FOC-1155) ─────────
 console.log("\nrestart launchera rozerwał rejestr: --work-run");
 

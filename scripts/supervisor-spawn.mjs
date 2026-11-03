@@ -502,23 +502,25 @@ const branch = `${baseBranch}-${attemptHash}`;
 // ── FOC-1222: the candidate must exist ON THE DEV WORK BRANCH ────────────────
 // A sha that resolves is not enough — the pin must be a commit the DEV work
 // branch's history actually holds, never a foreign tip or a dangling commit
-// only a dirty worktree ever showed. Which branch is the dev one: the registry
-// names it for this run's dev children, an --after-child dependency names the
-// child being verified; when spawn cannot know the branch (a fresh run, a
-// fixture), the dev work branch by naming convention (<issue>-dev, optionally
-// with the per-attempt hash) stands in. Fail closed: no recognizable work
-// branch, no spawn.
+// only a dirty worktree ever showed. Which branch is the dev one, most precise
+// first: an --after-child dependency names the child being verified, then this
+// run's dev children FOR THIS TASK (a multi-task run must not accept another
+// task's branch — round-1 finding), then the dev work branch by naming
+// convention (<issue>-dev, optionally with the per-attempt hash) when spawn
+// cannot know the branch at all (a fresh run, a fixture). Fail closed: no
+// recognizable work branch, no spawn.
 function assertCandidateOnWorkBranch({ registry, dependencyChildren, taskId, gitRoot, candidateSha }) {
   const workBranches = (() => {
-    const fromRegistry = Object.values(registry.children)
-      .filter((c) => c.squad === "dev" && typeof c.branch === "string" && c.branch)
-      .map((c) => c.branch);
-    if (fromRegistry.length) return { branches: [...new Set(fromRegistry)], source: "registry" };
+    const sameTask = (c) => String(c.taskId ?? "").toLowerCase() === String(taskId).toLowerCase();
     const fromDeps = dependencyChildren
       .map((id) => registry.children[id])
-      .filter((c) => c?.squad === "dev" && typeof c.branch === "string" && c.branch)
+      .filter((c) => c?.squad === "dev" && sameTask(c) && typeof c.branch === "string" && c.branch)
       .map((c) => c.branch);
     if (fromDeps.length) return { branches: [...new Set(fromDeps)], source: "after-child" };
+    const fromRegistry = Object.values(registry.children)
+      .filter((c) => c.squad === "dev" && sameTask(c) && typeof c.branch === "string" && c.branch)
+      .map((c) => c.branch);
+    if (fromRegistry.length) return { branches: [...new Set(fromRegistry)], source: "registry" };
     try {
       const { key, number } = parseIdentifier(taskId);
       const prefix = `${key.toLowerCase()}-${number}-`;
@@ -589,19 +591,9 @@ if (hasCandidate) {
     );
   }
 
-  // ── FOC-1222: the candidate must exist ON THE DEV WORK BRANCH ───────────────
-  // A sha that resolves is not enough — the pin must be a commit the DEV work
-  // branch's history actually holds, never a foreign tip or a dangling commit
-  // only a dirty worktree ever showed. Which branch is the dev one: the
-  // registry names it for this run's dev children, an --after-child
-  // dependency names the child being verified; when spawn cannot know the
-  // branch (a fresh run, a fixture), the dev work branch by naming convention
-  // (<issue>-dev, optionally with the per-attempt hash) stands in. Fail
-  // closed: no recognizable work branch, no spawn. Scoped to review/test —
-  // a DEV spawn that passes --candidate rides the FOC-406 mechanics unchanged.
-  // ── FOC-1222: the candidate must exist ON THE DEV WORK BRANCH ───────────────
+  // ── FOC-1222: the candidate must exist ON THE DEV WORK BRANCH (round-2 scope) ─
   // Scoped to review/test — a DEV spawn that passes --candidate rides the
-  // FOC-406 mechanics unchanged.
+  // FOC-406 mechanics unchanged; the gate itself is assertCandidateOnWorkBranch.
   if (squad === "review" || squad === "test") {
     assertCandidateOnWorkBranch({ registry, dependencyChildren, taskId, gitRoot, candidateSha });
   }

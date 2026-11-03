@@ -3028,6 +3028,13 @@ export function progressFingerprint({ worktree, baseRevision, failingTests = [] 
  * just cannot name a reproducible commit.
  */
 export function worktreeHead(worktree) {
+  // Guard like progressFingerprint: a falsy or missing worktree must never let
+  // spawnSync fall through to THIS process's cwd — the repo's HEAD read there
+  // would be recorded as the judged tree's candidate with error: null, a
+  // guessed sha (round-1 finding).
+  if (!worktree || !existsSync(worktree)) {
+    return { sha: null, error: `worktree missing or unreadable: ${worktree ?? "(none)"}` };
+  }
   try {
     const r = spawnSync("git", childTreeGitArgs(["rev-parse", "HEAD"], worktree), {
       cwd: worktree,

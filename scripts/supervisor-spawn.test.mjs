@@ -34,6 +34,7 @@ import {
   readHolds,
   readRegistry,
   registryPath,
+  writeRegistry,
   redact,
   runDir,
 } from "./supervisor-lib.mjs";
@@ -1146,6 +1147,38 @@ test("a --candidate committed on the DEV work branch still starts (FOC-1222)", (
   if (!out.ok) fail(`on-branch candidate refused: ${out.error}`);
   if (out.baseRevision !== candidate) fail(`baseRevision was ${out.baseRevision}, not the candidate`);
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", "review-1"], { encoding: "utf8" });
+});
+
+test("a --candidate on ANOTHER task's dev branch is refused in a multi-task run (FOC-1222 r2)", () => {
+  // Round-1 finding: the registry source collected every dev branch in the run
+  // with no taskId filter, so a candidate committed on the OTHER task's dev
+  // work branch passed the gate — the same verify-the-wrong-tree class the
+  // ticket closes.
+  const { repo } = fixtureRepo();
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("checkout", "-b", "foc-124-dev", "main");
+  writeFileSync(join(repo, "other-task.txt"), "other\n");
+  git("add", "-A");
+  git("commit", "-m", "other task work");
+  const candidate = shaOf("HEAD", repo);
+  git("checkout", "main");
+
+  const runId = fixtureRun();
+  // THIS run's registry carries only the other task's dev child — the FOC-123
+  // review must not accept its branch as the work branch.
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "dev-1": { childId: "dev-1", squad: "dev", taskId: "FOC-124", status: "exited", turns: [], branch: "foc-124-dev" },
+    },
+    rounds: {},
+  });
+  const r = runSpawn(runId, repo, ["--squad", "review", "--child", "review-1", "--candidate", candidate]);
+  const out = parse(r);
+  if (out.ok !== false) fail(`spawn was not refused: ${JSON.stringify(out)}`);
+  if (!/candidate-work-branch-unknown|candidate-not-on-work-branch/.test(out.error)) {
+    fail(`error carries no stable reason slug: ${out.error}`);
+  }
 });
 
 test("a DEV spawn without --candidate still starts from base (DEV unaffected, FOC-1222)", () => {
