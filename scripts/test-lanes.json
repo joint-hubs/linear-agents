@@ -835,6 +835,10 @@
       "reason": "end-to-end through the real supervisor-watch.mjs child (fake claude behind the LA_CLAUDE_BIN seam) spawning a detached grandchild whose pid is verified via PowerShell CIM; LA_SUPERVISOR_STATE_HOME/LA_SQUAD_HOME seams set at module load and inherited by the child — conservative serial for processes, same harness as supervisor-watch-linger (FOC-1162)"
     },
     {
+      "file": "supervisor-watch-dead-intermediate-reap.test.mjs",
+      "reason": "end-to-end through the real supervisor-watch.mjs child (fake claude behind the LA_CLAUDE_BIN seam) spawning an intermediate and a detached grandchild whose pids are verified and reaped live (killTree teardown); LA_SUPERVISOR_STATE_HOME/LA_SQUAD_HOME seams set at module load and inherited by the child — conservative serial for processes, same harness as supervisor-watch-grandchild-reap (FOC-1168)"
+    },
+    {
       "file": "task-sessions.test.mjs",
       "reason": "cross-process invariants raced through independent node child processes (execFile) against one SQLite file in a mkdtemp dir — conservative serial for processes (task workspace P1)"
     },
