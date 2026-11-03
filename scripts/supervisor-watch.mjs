@@ -45,12 +45,14 @@ import {
   claudeCommand,
   costFromResult,
   gatesDir,
+  enumerateWin32Processes,
   hasPendingGate,
   installEnvFileSignalHandlers,
   killTree,
   parseArgs,
   readRegistry,
   reapChildDescendants,
+  rememberChildLineage,
   shareChildTranscripts,
   stallSilenceMs,
   sweepChildProcesses,
@@ -708,6 +710,70 @@ const scanner = setInterval(() => {
 }, GATE_SCAN_MS);
 scanner.unref(); // the child's pipes own this process's lifetime, not the timer
 
+// ── FOC-1168: the child's remembered lineage ─────────────────────────────────
+// The FOC-1162 reap walks the process table from the child's pid through LIVE
+// rows only, so `child → X (dead) → Y (alive)` is never reached — and that is
+// the shape every real host orphan had (a dead bash between the child and its
+// node --test suite; a dead codegraph server between it and its serve
+// grandchild). While the child is alive the watcher snapshots the table —
+// once shortly after the spawn, then once per LINEAGE_TICK_MS — and remembers
+// the verified descendants as pid → {creation, seenMs}. finalizeTurn hands
+// the map to the reap, which accepts a row its identity saw before, or one
+// born to a remembered (now dead) parent at or before the parent's
+// last-seen-alive moment and inside the child's spawn window. An intermediate
+// that died between two ticks — alive in no snapshot — stays a documented
+// safe miss. Enumeration is sync and bounded (execFileSync with a timeout,
+// windowsHide), runs on a timer and never on the child's stdout path, and a
+// failure is a note, never a crash.
+const LINEAGE_FIRST_TICK_MS = 1_200;
+const LINEAGE_TICK_MS = 60_000;
+const lineageRemembered = new Map(); // pid → {creation, seenMs}, verified while the child lived
+let lineageChildCreation = null; // the child row's creation stamp, from its first snapshot
+let lineageScanBusy = false; // the enumeration is sync; never overlap ticks
+function scanLineage() {
+  if (process.platform !== "win32" || finalized) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (lineageScanBusy) return;
+  lineageScanBusy = true;
+  try {
+    // seenMs is captured BEFORE the enumeration: the snapshot moment is later
+    // than this, never earlier, so "born at or before seenMs" stays provable.
+    const seenMs = Date.now();
+    const table = enumerateWin32Processes();
+    if (table.skipped) {
+      note({
+        subtype: "lineage_scan_skipped",
+        message: `lineage scan skipped: ${table.skipped}`,
+      });
+      return;
+    }
+    lineageChildCreation = rememberChildLineage(
+      table.entries.filter((e) => e.pid !== process.pid),
+      child.pid,
+      lineageRemembered,
+      {
+        minCreationMs: childSpawnAt,
+        maxCreationMs: Date.now(),
+        seenMs,
+        childCreation: lineageChildCreation,
+      },
+    );
+  } catch (err) {
+    note({
+      subtype: "lineage_scan_failed",
+      message: `lineage scan failed: ${err.message}`,
+    });
+  } finally {
+    lineageScanBusy = false;
+  }
+}
+if (process.platform === "win32") {
+  const lineageFirstTick = setTimeout(scanLineage, LINEAGE_FIRST_TICK_MS);
+  lineageFirstTick.unref(); // the child's pipes own this process's lifetime, not the timer
+  const lineageTimer = setInterval(scanLineage, LINEAGE_TICK_MS);
+  lineageTimer.unref();
+}
+
 // FOC-980: the child's Claude Code writes its transcripts as fenix-child with
 // mode 0600 — files created DURING the turn stay unreadable to node (pricing,
 // telemetry ingest, the follow-up's history copy all hit EACCES). The
@@ -982,6 +1048,7 @@ function finalizeTurn(code, signal) {
         rootPid: child.pid,
         exitAtMs: childExitAt,
         spawnAtMs: childSpawnAt,
+        remembered: lineageRemembered,
         excludePids: [process.pid],
       });
       reapedTreePids = (reap.killed ?? []).filter((k) => k.ok).map((k) => k.pid);
