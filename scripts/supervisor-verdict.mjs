@@ -4,7 +4,16 @@
 //   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail [--work-child <id>]
 //        [--work-run <runId>] [--finding '<json>' ...] [--ac '<json>' ...]
 //        [--failing-test <id> ...] [--no-failing-tests '<reason>']
-//        [--decision-event <eventId> ...] [--decision-run <runId> ...] [--dry-run]
+//        [--decision-event <eventId> ...] [--decision-run <runId> ...]
+//        [--ran '{"cmd":"...","exit":0,"outputRef":"<path>"}' ...]          (FOC-1170)
+//        [--red-first '{"cmd":"...","baseExit":1,"candidateExit":0,"outputRef":"..."}' ...]
+//        [--container-run '{"cmd":"...","exit":0,"outputRef":"..."}']       (FOC-1179, TEST pass)
+//        [--container-unavailable '<why>']                                  (FOC-1179, when docker is not)
+//        [--dry-run]
+//   node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n
+//        --verdict pass|fail --reason <design|evidence|test-gap|ci|scope|other>
+//        [--finding '<json>' ...] [--work-child <id>] [--round N]
+//        [--recorded-at <iso> --backfill] [--contradicts-round N] [--dry-run]     (FOC-1169)
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
 //
@@ -69,8 +78,8 @@
 // declaredAcs via linear-query — while this record still claimed a real run.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve, sep } from "node:path";
 
 import {
   ROOT,
@@ -78,6 +87,7 @@ import {
   ensureRunDir,
   failJson,
   isPathSafeRunId,
+  latestVerdict,
   normalizeFailingTests,
   parseArgs,
   producerOf,
@@ -86,6 +96,7 @@ import {
   registryPath,
   roundsAcross,
   roundsFor,
+  runDir,
   updateChild,
   verdictPath,
   verdictsDir,
@@ -97,11 +108,24 @@ import { atomicWriteJSON } from "./utils.mjs";
 const VERDICTS = ["pass", "fail"];
 const SEVERITIES = ["issue", "todo", "nit", "question", "praise"];
 
+// Strict ISO 8601 for a backfilled record's `--recorded-at`: calendar date, T,
+// time, optional fraction, Z or an explicit offset. Nothing locale-shaped.
+// The offset is bounded to ISO 8601's max magnitude, ±14:00 EXACTLY — hour 14
+// admits only :00, so neither `+99:99` (not a timezone) nor `+14:01`
+// (beyond the standard) is read as one.
+const RE_ISO_STAMP = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-](?:(?:0\d|1[0-3]):[0-5]\d|14:00))$/;
+
+// The closed set a delivery verdict's `--reason` comes from (FOC-1169). The
+// reason IS the label: `ci` feeds ciRedAfterReady, the rest categorize why a
+// READY TO PUSH was accepted or rejected. Unknown reasons are refused rather
+// than recorded — a fail nobody can categorize is a fail nobody learns from.
+const DELIVERY_REASONS = ["design", "evidence", "test-gap", "ci", "scope", "other"];
+
 // The cheap ways to satisfy "cite something" without citing anything. Checked
 // after trimming and lowercasing.
 const NON_EVIDENCE = ["", "-", "--", "n/a", "na", "none", "todo", "tbd", "?", "see above", "obvious"];
 
-const REPEATABLE = new Set(["finding", "ac", "failing-test", "decision-event", "decision-run"]);
+const REPEATABLE = new Set(["finding", "ac", "failing-test", "decision-event", "decision-run", "ran", "red-first", "container-run", "container-unavailable"]);
 
 const isEvidence = (v) => {
   const s = String(v ?? "").trim();
@@ -171,18 +195,22 @@ function acCount(taskId, args) {
  * `--work-child <id>` when you want to say it; otherwise the child of this
  * node's PRODUCER (config/graph.json) carrying the same taskId.
  *
- * `workRunId` (FOC-1155): when `--work-run` names another run, the registry
+ * `opts.workRunId` (FOC-1155): when `--work-run` names another run, the registry
  * searched here is THAT run's and the refusals name it — a missing run is
  * refused before this is called, a missing child and a different task here.
+ * `opts.producer` overrides the graph lookup. The delivery verdict (FOC-1169)
+ * has no node of its own in config/graph.json, but the work it judges is the
+ * dev child's — it passes its producer explicitly and gets the same
+ * fail-closed resolution as a review verdict.
  *
  * Fail-closed on ambiguity. Guessing here is how a verdict ends up fingerprinting
  * a tree nobody was reviewing, which is exactly the bug this function exists to
  * have fixed — and a wrong fingerprint is silent: it reads as "no progress" and
  * stops the loop.
  */
-function resolveWorkChild(registry, entry, taskId, args, workRunId = null) {
+function resolveWorkChild(registry, entry, taskId, args, opts = {}) {
   const children = Object.values(registry.children ?? {});
-  const where = workRunId ? `run "${workRunId}"` : "the registry";
+  const workRunId = opts.workRunId ?? null;
 
   if (args["work-child"] && args["work-child"] !== true) {
     const named = children.find((c) => c.childId === args["work-child"]);
@@ -206,7 +234,7 @@ function resolveWorkChild(registry, entry, taskId, args, workRunId = null) {
   }
 
   const graph = loadGraphOrNull();
-  const producer = graph ? producerOf(entry.squad, graph) : null;
+  const producer = opts.producer ?? (graph ? producerOf(entry.squad, graph) : null);
 
   // A node with no producer reviews its own work — the recording child IS the
   // work child, and that is not a guess.
@@ -216,13 +244,16 @@ function resolveWorkChild(registry, entry, taskId, args, workRunId = null) {
   if (matches.length === 1) return matches[0];
 
   if (matches.length === 0) {
+    // A delivery verdict has no child of its own — the hint must not print
+    // "Fingerprinting null's own tree"; name what WOULD be fingerprinted.
+    const who = entry.childId ?? (entry.squad === "delivery" ? "the delivery owner's (nonexistent) own tree" : "the recording child's own tree");
     failJson(
       `no ${producer} child for ${taskId} in ${workRunId ? `run "${workRunId}"` : "this run"}, ` +
         `so there is no tree holding the work ${entry.squad} is reviewing`,
       {
         hint: workRunId
-          ? `name it: --work-child <id> (with --work-run). Fingerprinting ${entry.childId}'s own tree would measure the reviewer, not the work.`
-          : `name it: --work-child <id>. Fingerprinting ${entry.childId}'s own tree would measure the reviewer, not the work.`,
+          ? `name it: --work-child <id> (with --work-run). Fingerprinting ${who} would measure the reviewer, not the work.`
+          : `name it: --work-child <id>. Fingerprinting ${who} would measure the reviewer, not the work.`,
         candidates: children.map((c) => ({ childId: c.childId, squad: c.squad, taskId: c.taskId })),
       },
     );
@@ -544,6 +575,287 @@ function maybeEmitReturnGate(record, taskId, workChild, runId, warnings) {
 
 // ── record ───────────────────────────────────────────────────────────────────
 
+// Findings, each cited. Shared by the review path and the delivery path
+// (FOC-1169) — a delivery finding is the delivery owner's rejection note, and
+// it is held to the same WHERE as a reviewer's.
+function citedFindings(args) {
+  const findings = asArray(args.finding).map((raw, i) => parseJsonFlag(raw, "finding", i));
+
+  const uncited = [];
+  findings.forEach((f, i) => {
+    if (!String(f.text ?? "").trim()) uncited.push(`finding #${i + 1} has no text`);
+    else if (!isEvidence(f.evidence)) {
+      uncited.push(`finding #${i + 1} ("${String(f.text).slice(0, 60)}") cites ${JSON.stringify(f.evidence ?? null)}`);
+    }
+    if (f.severity && !SEVERITIES.includes(f.severity)) {
+      uncited.push(`finding #${i + 1} has severity "${f.severity}" (expected ${SEVERITIES.join(" | ")})`);
+    }
+  });
+
+  if (uncited.length) {
+    failJson(`this verdict has ${uncited.length} uncited finding(s) — send it back to be grounded`, {
+      uncited,
+      hint:
+        "every finding names WHERE: a symbol or path from the code graph (codegraph_impact gives the " +
+        "blast radius), or the AC it maps to. A reviewer who cannot say where has not reviewed.",
+    });
+  }
+  return findings;
+}
+
+// The failing-test axis is a declaration, not a default (FOC-220). Shared by
+// the review path and the delivery path: both records land in the same
+// roundsFor chain, whose fingerprint is compared on the test axis — so the
+// declaration discipline has to be one gate, not two habits.
+function declaredFailingTests(args, verdict, taskId, warnings) {
+  // Normalized the way the fingerprint hashes it, so what is enforced here IS
+  // what lands in the record — `--failing-test " "` must not count as declared.
+  const failingTests = normalizeFailingTests(asArray(args["failing-test"]));
+  const declaredNone = args["no-failing-tests"]; // absent, `true` (flag without a reason), or the reason
+
+  if (declaredNone !== undefined) {
+    // FOC-220. A fail that is not test-backed — a design failure — is a real
+    // category, so the gate stays escapable; but the escape is an explicit,
+    // on-the-command-line declaration with a reason, never an omission. It
+    // rides the record out as `noFailingTests`, so an operator reading the JSON
+    // later can tell "declared none, here is why" from an axis left empty by
+    // accident (which the branch below stops new records from having).
+    if (verdict !== "fail") {
+      failJson("--no-failing-tests only means something on a fail verdict", {
+        verdict,
+        hint: "drop the flag, or move to a fail verdict that declares its failing tests",
+      });
+    }
+    if (failingTests.length) {
+      failJson(`--no-failing-tests and ${failingTests.length} --failing-test value(s) contradict each other`, {
+        failingTests,
+        hint: "declare the failing tests, or declare there are none — not both",
+      });
+    }
+    if (declaredNone === true || !isEvidence(declaredNone)) {
+      failJson("--no-failing-tests is a declaration and needs a reason: why does this fail cite no test?", {
+        hint: `example: --no-failing-tests "design failure: the AC contradicts the spec, no test can be red"`,
+      });
+    }
+    warnings.push(`failing tests declared absent on this fail: ${declaredNone}`);
+  } else if (verdict === "fail" && !failingTests.length) {
+    // FOC-220. This used to be a warning; 86 of 89 recorded verdicts shipped an
+    // empty test axis anyway, and two rounds that fixed nothing then compared
+    // equal on a fingerprint whose tests half hashed the empty string.
+    failJson("a fail verdict must declare its failing tests — the detector compares rounds on the test axis", {
+      taskId,
+      hint:
+        "pass --failing-test <test id> once per failing test; if the fail is not test-backed " +
+        '(a design failure), declare that instead: --no-failing-tests "<why this fail cites no test>"',
+    });
+  }
+  return { failingTests, declaredNone };
+}
+
+// ── the pass cites a command the reviewer ran itself (FOC-1170) ──────────────
+//
+// Three REVIEW passes in the 2026-11-01/02 session accepted evidence that could
+// not have come out differently: a dry-run that skipped every input and printed
+// "0 targets", a test whose `created: true` was set by hand, a liveness probe
+// that returned "dead" because PowerShell was missing. In each case the reviewer
+// read the output and not the script. A kickoff rule saying otherwise did not
+// hold — so the rule lives in the tool: a review PASS has to cite at least one
+// command the reviewer ran ITSELF (`--ran`), with the output saved where the run
+// can audit it. A result that could not have come out differently is not
+// evidence, and a citation of a file that does not exist is not a citation.
+
+/**
+ * Parse and shape-validate `--ran` / `--red-first` (FOC-1170). Shape errors are
+ * refused for ANY verdict — evidence that does not parse is not evidence on a
+ * fail either. The outputRef existence/containment check runs later, in
+ * checkOutputRef, so every entry carries a resolved, auditable path by the time
+ * it reaches the record.
+ */
+function evidenceRuns(args) {
+  const ran = asArray(args.ran).map((raw, i) => parseJsonFlag(raw, "ran", i));
+  const redFirst = asArray(args["red-first"]).map((raw, i) => parseJsonFlag(raw, "red-first", i));
+
+  const problems = [];
+  ran.forEach((r, i) => {
+    if (!isEvidence(r.cmd)) problems.push(`--ran #${i + 1} names no command`);
+    if (!Number.isInteger(r.exit)) problems.push(`--ran #${i + 1} has no integer exit`);
+    if (!isEvidence(r.outputRef)) problems.push(`--ran #${i + 1} names no outputRef`);
+  });
+  redFirst.forEach((r, i) => {
+    if (!isEvidence(r.cmd)) problems.push(`--red-first #${i + 1} names no command`);
+    if (!Number.isInteger(r.baseExit) || !Number.isInteger(r.candidateExit)) {
+      problems.push(`--red-first #${i + 1} needs integer baseExit and candidateExit`);
+    }
+    if (!isEvidence(r.outputRef)) problems.push(`--red-first #${i + 1} names no outputRef`);
+  });
+  if (problems.length) {
+    failJson(`the evidence flags are malformed`, {
+      problems,
+      hint: `--ran '{"cmd":"node scripts/x.test.mjs","exit":0,"outputRef":"<path under the run's scratch or the reviewer worktree>"}'`,
+    });
+  }
+
+  // The one semantic check the flag's name promises: a red-first claim whose
+  // base and candidate exited identically describes no change — the cheapest
+  // way to claim "it was red before" without ever running it red.
+  for (const [i, r] of redFirst.entries()) {
+    if (r.baseExit === r.candidateExit) {
+      failJson(
+        `red-first-not-red: --red-first #${i + 1} has baseExit ${r.baseExit} === candidateExit — ` +
+          `a red-first claim needs a base that failed and a candidate that exited differently`,
+        {
+          hint: `--red-first '{"cmd":"node scripts/x.test.mjs","baseExit":1,"candidateExit":0,"outputRef":"..."}'`,
+        },
+      );
+    }
+  }
+  return { ran, redFirst };
+}
+
+/**
+ * `outputRef` must exist, hold at least a byte, and sit under the run's scratch
+ * dir or the reviewer's own worktree (FOC-1170) — the two places whose content
+ * the run can audit after the fact. A relative ref is resolved against the
+ * REVIEWER's worktree first (that is the cwd the reviewer ran the command in),
+ * then the tool's cwd, then the run dir; the first that exists wins. The
+ * resolved ABSOLUTE path is what lands on the record — the citation has to be
+ * readable from wherever the record is read, not from where it was typed.
+ */
+function checkOutputRef(ref, flag, index, runId, worktree) {
+  const raw = String(ref);
+  const candidates = isAbsolute(raw)
+    ? [raw]
+    : [...(worktree ? [resolve(worktree, raw)] : []), resolve(process.cwd(), raw), resolve(runDir(runId), raw)];
+  const found = candidates.map((c) => resolve(c)).find((c) => existsSync(c));
+  if (!found) {
+    failJson(`evidence-outputRef-missing: ${flag} #${index + 1} outputRef does not exist: ${raw}`, {
+      outputRef: raw,
+      hint: "the output the citation points at has to be on disk — a missing file is not evidence",
+    });
+  }
+  const st = statSync(found);
+  const empty = st.isFile() ? st.size === 0 : readdirSync(found).length === 0;
+  if (empty) {
+    failJson(`evidence-outputRef-empty: ${flag} #${index + 1} outputRef holds nothing: ${found}`, {
+      outputRef: found,
+      hint: "a zero-byte file is a citation of nothing — the same cheat as a dash",
+    });
+  }
+  const roots = [join(runDir(runId), "scratch"), worktree].filter(Boolean).map((r) => resolve(r));
+  // Containment is a STRING compare, and win32 paths are case-insensitive while
+  // this string is not: a citation typed with a different drive-letter casing
+  // resolved fine on the filesystem and was then refused as outside-run
+  // although the file sat exactly where it should (review round 1, probe P15).
+  // Fold BOTH sides for the containment test only — posix paths are
+  // case-sensitive, so the fold must never run there.
+  const fold = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const inside = roots.some((root) => {
+    const r = fold(root);
+    const f = fold(found);
+    return f === r || f.startsWith(r + sep);
+  });
+  if (!inside) {
+    failJson(
+      `evidence-outputRef-outside-run: ${flag} #${index + 1} outputRef sits outside the run's ` +
+        `scratch dir and the reviewer's worktree: ${found}`,
+      { outputRef: found, roots },
+    );
+  }
+  return found;
+}
+
+// ── a TEST pass ran the suite the way CI runs it (FOC-1179) ──────────────────
+//
+// TEST re-ran REVIEW's checks on win32 only; both Linux-only CI reds of the
+// 2026-11-01/02 session (FOC-1151, FOC-1162) were invisible to it. A TEST pass
+// therefore has to cite the run CI would run — lint, the count guard and the
+// touched suites inside the Fenix image (`docker/test-in-container.sh`) — via
+// `--container-run`, with the output saved where the run can audit it (the
+// same roots `--ran` uses). When docker is NOT available the record must still
+// SAY why: `--container-unavailable "<why>"` lands as
+// `containerRun: "unavailable: <why>"`. Either way the field exists on a TEST
+// pass — delivery can always see whether the container ran. A fail does not
+// need it (the same asymmetry the `--ran` gate has).
+
+/**
+ * The probe command itself, exported so the suite can hold it: plain
+ * `docker info` with NO --format. Its Go-template field names drift between
+ * Docker CLI versions — CLI 28.4.0 refuses `{{.Server.Version}}` outright
+ * ("can't evaluate field Server in type system.dockerInfo", exit 1), so a
+ * templated probe reports a HEALTHY daemon as absent. The availability answer
+ * is the exit code only, which no CLI version can reinterpret.
+ */
+export const DOCKER_PROBE = { cmd: "docker", args: ["info"] };
+
+/**
+ * Is docker usable on this host? The env override is the TEST seam first
+ * (`LA_DOCKER_AVAILABLE=1|0` — the suites set it so both gate branches are
+ * pinnable offline and no suite depends on the host having a daemon); without
+ * it the daemon itself is probed: `docker info` answers "could this host run
+ * the Fenix container", which `docker --version` (CLI present, daemon dead)
+ * does not.
+ */
+export function dockerAvailability(env = process.env) {
+  const override = env.LA_DOCKER_AVAILABLE;
+  if (override === "1") return { available: true, detail: "seam: LA_DOCKER_AVAILABLE=1" };
+  if (override === "0") return { available: false, detail: "seam: LA_DOCKER_AVAILABLE=0" };
+  try {
+    execFileSync(DOCKER_PROBE.cmd, DOCKER_PROBE.args, {
+      timeout: 20_000,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return { available: true, detail: "docker daemon reachable (docker info exit 0)" };
+  } catch (err) {
+    const why = String(err?.message ?? err).split("\n").map((l) => l.trim()).filter(Boolean)[0];
+    return { available: false, detail: why || "docker probe failed" };
+  }
+}
+
+/**
+ * Parse and shape-validate `--container-run` / `--container-unavailable`
+ * (FOC-1179). One of each, at most — the record field is singular. Shape
+ * errors and the contradiction are refused for ANY verdict: the container
+ * either ran or it did not, and evidence that does not exist is not evidence
+ * on a fail either. The outputRef existence/containment check runs later, in
+ * checkOutputRef — the SAME path the review evidence uses, never a fork.
+ */
+function containerRunEvidence(args) {
+  const runs = asArray(args["container-run"]).map((raw, i) => parseJsonFlag(raw, "container-run", i));
+  const whys = asArray(args["container-unavailable"]);
+  if (runs.length > 1) {
+    failJson(`--container-run takes ONE entry — the record field is singular; cite the decisive run`);
+  }
+  if (whys.length > 1) {
+    failJson(`--container-unavailable takes ONE why — the record field is singular`);
+  }
+  const problems = [];
+  runs.forEach((r) => {
+    if (!isEvidence(r.cmd)) problems.push(`--container-run names no command`);
+    if (!Number.isInteger(r.exit)) problems.push(`--container-run has no integer exit`);
+    if (!isEvidence(r.outputRef)) problems.push(`--container-run names no outputRef`);
+  });
+  if (problems.length) {
+    failJson(`the container-run flags are malformed`, {
+      problems,
+      hint: `--container-run '{"cmd":"docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`,
+    });
+  }
+  if (runs.length && whys.length) {
+    failJson(
+      `container-run-contradiction: --container-run and --container-unavailable are mutually exclusive — ` +
+        `the container either ran or it did not`,
+      { hint: "cite the run, or explain its absence — never both" },
+    );
+  }
+  if (whys.length && !isEvidence(whys[0])) {
+    failJson(
+      `--container-unavailable needs a non-empty why — "unavailable: ${whys[0]}" tells delivery nothing`,
+      { hint: `--container-unavailable "docker daemon not installed on this runner"` },
+    );
+  }
+  return { run: runs[0] ?? null, unavailableWhy: whys[0] ?? null };
+}
+
 // A verdict is about a Linear issue, and EVERYTHING in cmdRecord derives from
 // the id: the verdict file name (a `../`-bearing id would climb out of the
 // verdicts dir), the linear-ops invocations, and the enforcement gate's
@@ -556,6 +868,10 @@ function maybeEmitReturnGate(record, taskId, workChild, runId, warnings) {
 const RE_TASK_ID = /^[A-Za-z]+-\d+$|^[0-9a-f-]{36}$/i;
 
 function cmdRecord(args) {
+  // FOC-1169: the delivery mode is a separate path, not a flag threaded through
+  // the review one — its record has no child to derive from, and the normal
+  // shape stays byte-identical only if the two never share a code line.
+  if (args.delivery) return cmdRecordDelivery(args);
   const runId = requireRun(args);
   const childId = args.child;
   if (!childId || childId === true) failJson("--child <childId> is required");
@@ -583,27 +899,7 @@ function cmdRecord(args) {
   }
 
   // ── findings, each cited ───────────────────────────────────────────────────
-  const findings = asArray(args.finding).map((raw, i) => parseJsonFlag(raw, "finding", i));
-
-  const uncited = [];
-  findings.forEach((f, i) => {
-    if (!String(f.text ?? "").trim()) uncited.push(`finding #${i + 1} has no text`);
-    else if (!isEvidence(f.evidence)) {
-      uncited.push(`finding #${i + 1} ("${String(f.text).slice(0, 60)}") cites ${JSON.stringify(f.evidence ?? null)}`);
-    }
-    if (f.severity && !SEVERITIES.includes(f.severity)) {
-      uncited.push(`finding #${i + 1} has severity "${f.severity}" (expected ${SEVERITIES.join(" | ")})`);
-    }
-  });
-
-  if (uncited.length) {
-    failJson(`this verdict has ${uncited.length} uncited finding(s) — send it back to be grounded`, {
-      uncited,
-      hint:
-        "every finding names WHERE: a symbol or path from the code graph (codegraph_impact gives the " +
-        "blast radius), or the AC it maps to. A reviewer who cannot say where has not reviewed.",
-    });
-  }
+  const findings = citedFindings(args);
 
   // ── an approve has to map the ACs ──────────────────────────────────────────
   const acMapping = asArray(args.ac).map((raw, i) => parseJsonFlag(raw, "ac", i));
@@ -658,46 +954,88 @@ function cmdRecord(args) {
   }
 
   // ── the failing-test axis is a declaration, not a default ──────────────────
-  // Normalized the way the fingerprint hashes it, so what is enforced here IS
-  // what lands in the record — `--failing-test " "` must not count as declared.
-  const failingTests = normalizeFailingTests(asArray(args["failing-test"]));
-  const declaredNone = args["no-failing-tests"]; // absent, `true` (flag without a reason), or the reason
+  const { failingTests, declaredNone } = declaredFailingTests(args, verdict, taskId, warnings);
 
-  if (declaredNone !== undefined) {
-    // FOC-220. A fail that is not test-backed — a design failure — is a real
-    // category, so the gate stays escapable; but the escape is an explicit,
-    // on-the-command-line declaration with a reason, never an omission. It
-    // rides the record out as `noFailingTests`, so an operator reading the JSON
-    // later can tell "declared none, here is why" from an axis left empty by
-    // accident (which the branch below stops new records from having).
-    if (verdict !== "fail") {
-      failJson("--no-failing-tests only means something on a fail verdict", {
-        verdict,
-        hint: "drop the flag, or move to a fail verdict that declares its failing tests",
-      });
+  // ── FOC-1170: the pass cites a command the reviewer ran itself ─────────────
+  // Shape + outputRef checks for any verdict that cites them; the ≥1 requirement
+  // is a review-pass gate only — a fail does not need an evidence run.
+  const { ran, redFirst } = evidenceRuns(args);
+  const ranChecked = ran.map((r, i) => ({ ...r, outputRef: checkOutputRef(r.outputRef, "--ran", i, runId, entry.worktree) }));
+  const redFirstChecked = redFirst.map((r, i) => ({
+    ...r,
+    outputRef: checkOutputRef(r.outputRef, "--red-first", i, runId, entry.worktree),
+  }));
+  if (verdict === "pass" && entry.squad === "review" && !ranChecked.length) {
+    failJson(
+      `review-pass-without-evidence-run: a review pass must cite at least one command the reviewer ` +
+        `ran itself (--ran '{"cmd":"...","exit":0,"outputRef":"<path under the run's scratch or the reviewer worktree>"}')`,
+      {
+        hint:
+          "a result that could not have come out differently is not evidence — run the cited script " +
+          "yourself and keep its output where the run can read it",
+      },
+    );
+  }
+
+  // ── FOC-1179: a TEST pass ran the suite the way CI runs it ─────────────────
+  // Shape + outputRef checks for any verdict that cites them; the REQUIREMENT
+  // is a test-pass gate only — a fail does not need a container run, and other
+  // squads are not asked for one.
+  const { run: containerRun, unavailableWhy } = containerRunEvidence(args);
+  if (unavailableWhy) {
+    // "Unavailable" while the daemon answers is a lie IN the record — the
+    // why flag is the escape hatch for a host that cannot run the container,
+    // not a skip button (REVIEW r1 probe P3b: seam=1 + a reason recorded
+    // ok:true with containerRun: "unavailable: …"). Claim-level, so it
+    // protects a fail verdict citing it just the same.
+    const docker = dockerAvailability();
+    if (docker.available) {
+      failJson(
+        `container-run-unavailable-while-docker-up: the record says the container could not run, ` +
+          `but the docker probe answers (${docker.detail}) — run the Fenix container and cite it, ` +
+          `or fix the record`,
+        { dockerAvailable: true, hint: "delivery has to be able to see whether the container ran" },
+      );
     }
-    if (failingTests.length) {
-      failJson(`--no-failing-tests and ${failingTests.length} --failing-test value(s) contradict each other`, {
-        failingTests,
-        hint: "declare the failing tests, or declare there are none — not both",
-      });
+  }
+  let containerRunField;
+  if (containerRun) {
+    containerRunField = {
+      ...containerRun,
+      outputRef: checkOutputRef(containerRun.outputRef, "--container-run", 0, runId, entry.worktree),
+    };
+  } else if (unavailableWhy) {
+    containerRunField = `unavailable: ${unavailableWhy}`;
+  }
+  if (verdict === "pass" && entry.squad === "test") {
+    if (!containerRunField) {
+      const docker = dockerAvailability();
+      failJson(
+        `test-pass-without-container-run: a TEST pass must cite the Fenix-container run ` +
+          `(--container-run '{"cmd":"...","exit":0,"outputRef":"..."}' — docker/test-in-container.sh, as CI runs it; ` +
+          `on Git Bash/MSYS prefix the command with MSYS_NO_PATHCONV=1 or the container-side path is rewritten) ` +
+          `or, when docker is not available, say why (--container-unavailable "<why>")`,
+        { dockerAvailable: docker.available, hint: "delivery has to be able to see whether the container ran" },
+      );
     }
-    if (declaredNone === true || !isEvidence(declaredNone)) {
-      failJson("--no-failing-tests is a declaration and needs a reason: why does this fail cite no test?", {
-        hint: `example: --no-failing-tests "design failure: the AC contradicts the spec, no test can be red"`,
-      });
+    if (!containerRun) {
+      const docker = dockerAvailability();
+      warnings.push(`container run skipped — docker probe: ${docker.detail}`);
     }
-    warnings.push(`failing tests declared absent on this fail: ${declaredNone}`);
-  } else if (verdict === "fail" && !failingTests.length) {
-    // FOC-220. This used to be a warning; 86 of 89 recorded verdicts shipped an
-    // empty test axis anyway, and two rounds that fixed nothing then compared
-    // equal on a fingerprint whose tests half hashed the empty string.
-    failJson("a fail verdict must declare its failing tests — the detector compares rounds on the test axis", {
-      taskId,
-      hint:
-        "pass --failing-test <test id> once per failing test; if the fail is not test-backed " +
-        '(a design failure), declare that instead: --no-failing-tests "<why this fail cites no test>"',
-    });
+    if (containerRun && containerRun.exit !== 0) {
+      // Delivery r4: the gate checked the citation's shape and the file's
+      // existence, never the exit — so a pass citing fenix:dev exit 125
+      // (image name mismatch) recorded ok. A pass whose only container
+      // evidence is red contradicts itself — the red-first-not-red class
+      // FOC-1170 refuses for --red-first. On a FAIL the exit stays verbatim:
+      // red evidence on a fail is the report doing its job.
+      failJson(
+        `container-run-not-green: a TEST pass cites a container run that exited ` +
+          `${containerRun.exit} — a pass whose container evidence is red contradicts itself; ` +
+          `fix the suite or record a fail`,
+        { exit: containerRun.exit, hint: "fix the suite or record a fail" },
+      );
+    }
   }
 
   // ── FOC-449: explicit decision provenance ───────────────────────────────────
@@ -746,7 +1084,7 @@ function cmdRecord(args) {
     return id;
   })();
   const workRegistry = workRunId ? readRegistry(workRunId) : registry;
-  const workChild = resolveWorkChild(workRegistry, entry, taskId, args, workRunId);
+  const workChild = resolveWorkChild(workRegistry, entry, taskId, args, { workRunId });
   // Where the work child's OWN registry entry lives — updateChild below must
   // write to that run, not to the verdict's.
   const workChildRunId = workRunId && workChild !== entry ? workRunId : runId;
@@ -778,6 +1116,16 @@ function cmdRecord(args) {
     verdict,
     findings,
     acMapping,
+    // FOC-1170: the commands the reviewer ran itself (and its red-first claims),
+    // with outputRef resolved to the auditable absolute path. Keys only when the
+    // flags were passed — a dev/test record without them stays byte-identical.
+    ...(ranChecked.length ? { ran: ranChecked } : {}),
+    ...(redFirstChecked.length ? { redFirst: redFirstChecked } : {}),
+    // FOC-1179: the Fenix-container run a TEST pass cites — the evidence object
+    // when --container-run was given, `unavailable: <why>` when the why was.
+    // Required on a test pass, absent otherwise; a record without the flags
+    // stays byte-identical.
+    ...(containerRunField !== undefined ? { containerRun: containerRunField } : {}),
     declaredAcs: declared,
     fingerprint,
     // FOC-220: present only when the fail DECLARED an empty test axis, carrying
@@ -875,6 +1223,276 @@ function cmdRecord(args) {
   console.log(JSON.stringify({ ok: true, path, warnings, ...record }, null, 2));
 }
 
+// ── record --delivery (FOC-1169) ─────────────────────────────────────────────
+
+// The delivery verdict is the label the plan asked for: every accept/reject of
+// a READY TO PUSH, and every CI red after READY, recorded by the delivery
+// owner — NOT by a child, so there is no --child and no AC mapping. It lands
+// in the same roundsFor chain a review verdict does, fingerprinting the dev
+// child's tree through the same resolveWorkChild path, so the FOC-1146
+// progress guard reads a delivery fail after a review pass as what it is: a
+// new opinion on the same tree.
+function cmdRecordDelivery(args) {
+  const runId = requireRun(args);
+
+  // A child in the invocation would be a different record pretending to be
+  // this one — the delivery record's childId is null by definition.
+  if (args.child) {
+    failJson("--child is not used in --delivery mode — a delivery verdict is recorded by the delivery owner, not a child", {
+      hint: "drop --child; the work child's tree is resolved from the registry (--work-child when ambiguous)",
+    });
+  }
+  // An AC mapping is the review approve's claim; a delivery verdict judges the
+  // delivered tree, not the issue's criteria list.
+  if (args.ac) {
+    failJson("--ac is not used in --delivery mode — an AC-by-AC mapping is a REVIEW approve requirement");
+  }
+  // The evidence flags are REVIEW-pass requirements (FOC-1170); silently
+  // accepting them here would be the exact silent-accept class this tool
+  // exists to kill, one layer over. Refused by name, like --child/--ac above.
+  if (args.ran) {
+    failJson("--ran is not used in --delivery mode — an evidence run is a REVIEW pass requirement");
+  }
+  if (args["red-first"]) {
+    failJson("--red-first is not used in --delivery mode — a red-first claim is a REVIEW pass requirement");
+  }
+  // The container run is a TEST-pass requirement (FOC-1179); delivery judges the
+  // delivered tree, it does not run suites. Refused by name, like --ran above.
+  if (args["container-run"]) {
+    failJson("--container-run is not used in --delivery mode — the container run is a TEST pass requirement");
+  }
+  if (args["container-unavailable"]) {
+    failJson("--container-unavailable is not used in --delivery mode — the container run is a TEST pass requirement");
+  }
+
+  const verdict = args.verdict;
+  if (!VERDICTS.includes(verdict)) failJson(`--verdict must be one of ${VERDICTS.join(" | ")}`);
+
+  // No child to derive the task from, so --task is required here.
+  const taskId = args.task && args.task !== true ? String(args.task).trim() : null;
+  if (!taskId) {
+    failJson("--task <id> is required in --delivery mode — there is no child to derive the task from");
+  }
+  // Same entry check as the normal path (R2-2): the file name, the work-child
+  // resolution and the round chain all derive from the id.
+  if (!RE_TASK_ID.test(taskId)) {
+    failJson(
+      `taskId "${taskId}" is neither an issue identifier (TEAM-123) nor a UUID — ` +
+        `refusing to derive a verdict file, linear-ops ops or enforcement gate from it`,
+    );
+  }
+
+  // A backdated record must ADMIT being a backfill: --recorded-at is accepted
+  // only together with --backfill, and the record carries backfill:true. That
+  // is how the 2026-11-01/02 baseline is written from the delivery owner's
+  // notes — with the timestamps the delivery verdicts actually happened, not
+  // the moment they were typed in.
+  const backfill = args.backfill === true;
+  const recordedAtArg = args["recorded-at"];
+  if (recordedAtArg !== undefined && !backfill) {
+    failJson("--recorded-at is accepted only together with --backfill — a backdated record must admit being a backfill");
+  }
+  let recordedAt = new Date().toISOString();
+  if (backfill) {
+    if (!recordedAtArg || recordedAtArg === true) {
+      failJson("--backfill needs --recorded-at <iso> — the baseline's when is part of the record");
+    }
+    // Strict ISO: Date.parse is a locale-tolerant reader ("11/01/2026" parses),
+    // and a backdated record whose when depends on the recorder's locale is not
+    // a baseline anyone can reproduce. The shape is ISO 8601 only.
+    // And a real calendar check: Date.parse ROLLS OVER an impossible date
+    // (2026-02-30 parses as 2026-03-02), so the record would carry a WHEN the
+    // operator never typed. The typed date components are validated directly
+    // against the calendar — the date as typed, offset-independent: a typed
+    // local time earlier than the offset magnitude shifts the UTC DATE too
+    // (09:30+14:00 records 2026-10-31, a date that was never typed), so the
+    // parsed UTC datetime is NOT the comparison target.
+    const isoMatch = RE_ISO_STAMP.exec(String(recordedAtArg));
+    const ms = isoMatch ? Date.parse(String(recordedAtArg)) : NaN;
+    if (!isoMatch || Number.isNaN(ms)) {
+      failJson(`--recorded-at "${recordedAtArg}" is not an ISO timestamp (expected e.g. 2026-11-01T10:00:00.000Z)`);
+    }
+    const [y, mo, d] = [Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3])];
+    // Date.UTC maps years 0-99 onto 1900-1999 (Date.UTC(26, 2, 1) is
+    // 1926-03-01), so the anchor year 2000 keeps the mapping away from the
+    // typed year; setUTCFullYear then lands on it exactly, and the round-trip
+    // below holds for every year the shape allows.
+    const asUTC = new Date(Date.UTC(2000, mo - 1, d));
+    asUTC.setUTCFullYear(y);
+    if (asUTC.getUTCFullYear() !== y || asUTC.getUTCMonth() !== mo - 1 || asUTC.getUTCDate() !== d) {
+      failJson(`--recorded-at "${recordedAtArg}" is not a real calendar date (${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")} does not exist)`);
+    }
+    recordedAt = new Date(ms).toISOString();
+  }
+
+  // FOC-1194: a backfilled delivery fail can name the round it CONTRADICTS and
+  // carry that round's fingerprint verbatim. A backfill recomputes from the dev
+  // child's tree as it is NOW — for a removed tree (most of the 2026-11-01/02
+  // baseline) that is diff: null, an UNKNOWN that matches nothing, and the
+  // reviewFalsePass pair is uncountable. Naming the round copies the
+  // fingerprint that round judged. Outside --backfill the flag is refused the
+  // same way --recorded-at is: a live record's "now" fingerprint is the honest
+  // one, and the flag without the backfill admission would be provenance
+  // nobody asked for.
+  const contradictsArg = args["contradicts-round"];
+  if (contradictsArg !== undefined && !backfill) {
+    failJson("--contradicts-round is accepted only together with --backfill — a live record fingerprints the tree as it is now");
+  }
+  // r2 finding 4 — decision journaled: the flag is a FAIL's provenance. A
+  // delivery pass contradicts nothing; accepting it would put named delivery
+  // passes into the quality signal's contradicted set with nothing to falsify.
+  if (contradictsArg !== undefined && verdict !== "fail") {
+    failJson("--contradicts-round is a fail's provenance — a delivery pass contradicts nothing");
+  }
+
+  // reason: required for fail, optional for pass, always from the closed set.
+  const reasonArg = args.reason && args.reason !== true ? String(args.reason).trim() : null;
+  if (verdict === "fail" && !reasonArg) {
+    failJson(`a delivery fail needs --reason <${DELIVERY_REASONS.join("|")}>`, {
+      hint: "the reason is the label's whole point — a fail nobody can categorize is a fail nobody learns from",
+    });
+  }
+  if (reasonArg !== null && !DELIVERY_REASONS.includes(reasonArg)) {
+    failJson(`unknown delivery reason "${reasonArg}" — expected ${DELIVERY_REASONS.join(" | ")}`);
+  }
+
+  const findings = citedFindings(args);
+  const warnings = [];
+  const { failingTests, declaredNone } = declaredFailingTests(args, verdict, taskId, warnings);
+
+  // WHICH TREE — the same resolveWorkChild path the review verdict uses, with
+  // the producer pinned to dev: the work being delivered is the dev child's.
+  // Fail-closed on ambiguity, exactly as a review verdict is.
+  const registry = readRegistry(runId);
+  const workChild = resolveWorkChild(registry, { squad: "delivery", childId: null, taskId }, taskId, args, {
+    producer: "dev",
+  });
+  let fingerprint;
+  if (contradictsArg !== undefined) {
+    // The named round must exist in THIS run's chain, be readable, and carry a
+    // diff: a copy of null would silently match nothing — exactly the UNKNOWN
+    // this flag exists to stop recording.
+    const n = contradictsArg === true || contradictsArg === "" ? NaN : Number(contradictsArg);
+    if (!Number.isInteger(n) || n < 1) {
+      failJson(`--contradicts-round "${contradictsArg === true ? "" : contradictsArg}" is not a round number N ≥ 1`);
+    }
+    const chain = roundsFor(runId, taskId);
+    const named = chain.find((r) => r.round === n);
+    if (!named) {
+      failJson(`round ${n} of ${taskId} does not exist in run ${runId} — there is no verdict record to copy the fingerprint from`, {
+        known: chain.map((r) => r.round),
+      });
+    }
+    if (named.unreadable) {
+      failJson(`round ${n} of ${taskId} is unreadable — the fingerprint cannot be copied from it`);
+    }
+    // The source marker must RESOLVE: the quality signal pairs it with review
+    // rows by round, so naming a delivery record would write provenance no
+    // consumer can resolve. A null squad is a legacy (pre-FOC-1169) record —
+    // those were review records by construction and stay allowed.
+    if (named.squad && named.squad !== "review") {
+      failJson(
+        `round ${n} of ${taskId} is a ${named.squad} verdict, not a REVIEW pass — ` +
+          `the flag names the round whose pass this record contradicts, and the copy must come from that pass`,
+      );
+    }
+    if (named.fingerprint?.diff == null) {
+      failJson(`round ${n} of ${taskId} has no diff on its fingerprint — nothing to contradict (its tree was already UNKNOWN)`);
+    }
+    const { diff, tests, combined, changedFiles, failingTests: namedTests } = named.fingerprint;
+    fingerprint = { diff, tests, combined, changedFiles, failingTests: namedTests, source: `round-${n}` };
+    warnings.push(`fingerprint copied from round ${n} of ${taskId} (--contradicts-round ${n}) — the tree as that round judged it, not the tree now`);
+    // r2 finding 3: the FOC-220-gated declaration must not vanish — the copy
+    // supersedes the fingerprint's failing-tests axis with round N's, so the
+    // operator's own words carry separately on the record.
+    if (failingTests.length) {
+      warnings.push(
+        `the --failing-test declaration (${failingTests.join(", ")}) is recorded as declaredFailingTests — ` +
+          `the fingerprint's failing-tests axis is round ${n}'s, superseded by the copy`,
+      );
+    }
+  } else {
+    fingerprint = progressFingerprint({
+      worktree: workChild.worktree,
+      baseRevision: workChild.baseRevision,
+      failingTests,
+    });
+    if (fingerprint.error) warnings.push(`fingerprint is UNKNOWN: ${fingerprint.error}`);
+    // resolveWorkChild fails closed, so workChild here is always the registry's
+    // dev child — name it, the way the review record does.
+    warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under delivery review`);
+  }
+
+  const prior = latestVerdict(runId, taskId);
+  const round = Number(args.round ?? (prior?.round ?? 0) + 1);
+
+  const record = {
+    taskId,
+    runId,
+    childId: null,
+    squad: "delivery",
+    round,
+    verdict,
+    findings,
+    acMapping: [],
+    // No AC read in delivery mode: the verdict judges the delivered tree, not
+    // the issue's criteria list. null is honest UNKNOWN, never a count.
+    declaredAcs: null,
+    fingerprint,
+    // FOC-1169: the label. reason is required on a fail; null on a pass that
+    // carried none. recordedBy separates this record's author from the
+    // (absent) recording child.
+    reason: reasonArg,
+    recordedBy: "delivery",
+    ...(backfill ? { backfill: true } : {}),
+    // r2 finding 3: on the copy path the record's fingerprint is round N's —
+    // the operator's own declaration carries here instead (empty on a fail is
+    // impossible: the FOC-220 gate forces --failing-test or --no-failing-tests,
+    // and the latter keeps its noFailingTests carrier).
+    ...(contradictsArg !== undefined && failingTests.length ? { declaredFailingTests: failingTests } : {}),
+    ...(declaredNone !== undefined ? { noFailingTests: { reason: declaredNone } } : {}),
+    recordedAt,
+  };
+
+  const path = verdictPath(runId, taskId, round);
+  if (existsSync(path) && !args.force) {
+    failJson(`round ${round} of ${taskId} is already recorded — a verdict is recorded once`, {
+      path,
+      hint: "record the next round, or pass --force if this is deliberately a correction",
+    });
+  }
+
+  // Delivery has no return emitter; the effects block is planned anyway so the
+  // record shape stays the normal one — both ops come back "not-applicable"
+  // (RETURN_EDGE_BY_SQUAD has no delivery entry), nothing is written to Linear.
+  record.linearEffects = planReturnEffects(record, taskId, verdict, args, warnings);
+
+  ensureRunDir(runId);
+  mkdirSync(verdictsDir(runId), { recursive: true });
+  atomicWriteJSON(path, record);
+
+  // FOC-449 auto-join — inert unless --decision-event/--decision-run were
+  // passed, same as the normal path.
+  warnings.push(...autoLabel(record.decisionEvents, { outcome: verdict, by: "agent", via: "verdict" }).warnings);
+
+  const opsRan = executeReturnEffects(record, taskId, warnings);
+  const gateAttempted = maybeEmitReturnGate(record, taskId, workChild, runId, warnings);
+
+  if (opsRan || gateAttempted) {
+    try {
+      atomicWriteJSON(path, record);
+    } catch (err) {
+      warnings.push(
+        `the verdict file could not be re-written after the return ops (${err.message}) — ` +
+          `the on-disk audit still reads "pending" while the operations did run`,
+      );
+    }
+  }
+
+  for (const w of warnings) console.error(`[verdict] ${w}`);
+  console.log(JSON.stringify({ ok: true, path, warnings, ...record }, null, 2));
+}
+
 // ── show / list ──────────────────────────────────────────────────────────────
 
 function cmdShow(args) {
@@ -942,6 +1560,6 @@ function main() {
   failJson(`unknown subcommand "${cmd ?? ""}" — expected record | show | list`);
 }
 
-export { VERDICTS, SEVERITIES, isEvidence, roundsFor, returnGateQuestion };
+export { VERDICTS, SEVERITIES, DELIVERY_REASONS, isEvidence, roundsFor, returnGateQuestion };
 
 if (process.argv[1]?.endsWith("supervisor-verdict.mjs")) main();

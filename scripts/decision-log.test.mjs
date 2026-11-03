@@ -40,7 +40,7 @@ import {
   parse,
   runScript,
 } from "./supervisor-test-fixtures.mjs";
-import { writeRegistry } from "./supervisor-lib.mjs";
+import { runDir, writeRegistry } from "./supervisor-lib.mjs";
 
 const { test, fail, summary } = harness();
 
@@ -350,6 +350,17 @@ const recordVerdict = (s, extra = []) => {
 
 const ONE_AC = JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" });
 
+// FOC-1170: a review pass must cite a command the reviewer ran itself. This
+// suite's passes are about the decision-log join, so they carry the minimal
+// valid citation: an output file under the run's scratch reviews dir.
+const RAN_FLAG = (s) => {
+  const dir = join(runDir(s.runId), "scratch", "reviews");
+  mkdirSync(dir, { recursive: true });
+  const outputRef = join(dir, "decision-log-evidence.txt");
+  writeFileSync(outputRef, "labels appended\n", "utf8");
+  return JSON.stringify({ cmd: "node scripts/decision-log.test.mjs", exit: 0, outputRef });
+};
+
 test("a pass verdict labels its decision events as agent via verdict", () => {
   const s = verdictScenario();
   const eventId = randomUUID();
@@ -357,6 +368,7 @@ test("a pass verdict labels its decision events as agent via verdict", () => {
   const out = parse(
     recordVerdict(s, [
       "--verdict", "pass", "--issue-file", issueFile(s.base, 1), "--ac", ONE_AC,
+      "--ran", RAN_FLAG(s),
       "--decision-event", eventId, "--decision-run", dlog.runId,
     ]),
     fail,
@@ -376,7 +388,7 @@ test("a verdict without provenance labels nothing", () => {
   const dlog = fixtureRunLog([EVENT()]);
   const before = readLog(dlog.path);
   const out = parse(
-    recordVerdict(s, ["--verdict", "pass", "--issue-file", issueFile(s.base, 1), "--ac", ONE_AC]),
+    recordVerdict(s, ["--verdict", "pass", "--issue-file", issueFile(s.base, 1), "--ac", ONE_AC, "--ran", RAN_FLAG(s)]),
     fail,
   );
   assert.equal(out.ok, true, out.error);

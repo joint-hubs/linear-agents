@@ -27,6 +27,9 @@ import { staleLabel } from '../workModel';
 // and the written definition; the label is presentation, so it lives here.
 const SIGNAL_LABELS = {
   firstTimeRight: 'First-time right',
+  deliveryFirstTimeRight: 'Delivery first-time right',
+  reviewFalsePass: 'Review false pass',
+  ciRedAfterReady: 'CI red after READY',
   reworkShare: 'Rework share of cost',
   interventionsPerTicket: 'Human interventions per ticket',
   landingYield: 'Landing yield',

@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 215 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 216 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 215 test files before you start; a red file invalidates the walk,
+node scripts/test-all.mjs                       # 216 test files before you start; a red file invalidates the walk,
                                                 # except security-scan.test.mjs — load-sensitive, seen red (13 probe
                                                 # misses) at base e3dea40 too, so its red alone is not a regression signal
 git diff --stat -- agents/orchestrator          # AC-10, see below
@@ -192,6 +192,75 @@ typed by hand walks past both keys (TEST pass, answered gate).
 
 ---
 
+## Delivery verdicts (FOC-1169) — when delivery records one
+
+Delivery (the Supervisor's delivery stage, not a child) records a verdict for every accept/reject
+of a `READY TO PUSH` — pass or fail, each with its `reason` from the closed set
+(`design | evidence | test-gap | ci | scope | other`; required on a fail) — and for every CI red
+after `READY TO PUSH` (`--verdict fail --reason ci`). There is no child to record it: run
+
+```bash
+node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n \
+  --verdict fail --reason ci --failing-test <id>   # or --no-failing-tests "<why>"
+```
+
+The record fingerprints the task's dev-child tree through the same `resolveWorkChild` path a
+review verdict uses, lands in the task's round chain, and feeds the three delivery signals
+(`deliveryFirstTimeRight`, `reviewFalsePass`, `ciRedAfterReady`) on the Costs & quality board.
+Backfilling a historical session (the 2026-11-01/02 baseline) adds
+`--recorded-at <iso> --backfill` — the pair is required together; `--recorded-at` alone is
+refused.
+
+---
+
+## Review evidence as code (FOC-1170) — a pass cites what the reviewer ran
+
+A REVIEW pass recorded through `supervisor-verdict.mjs record` must cite at least one command the
+reviewer executed itself:
+
+```bash
+node scripts/supervisor-verdict.mjs record --run <runId> --child <reviewChildId> --verdict pass \
+  ... --ran '{"cmd":"node scripts/lint.mjs","exit":0,"outputRef":"<path>"}' \
+  [--red-first '{"cmd":"node scripts/x.test.mjs","baseExit":1,"candidateExit":0,"outputRef":"<path>"}' ...]
+```
+
+The tool refuses a pass with no `--ran` (`review-pass-without-evidence-run`), refuses any
+`--ran`/`--red-first` whose `outputRef` does not exist, is empty (`evidence-outputRef-empty`), or
+sits outside the run's scratch dir and the reviewer's worktree
+(`evidence-outputRef-outside-run`), and refuses a red-first claim with
+`baseExit === candidateExit` (`red-first-not-red`). `outputRef` is stored resolved to an absolute
+path; `--ran`/`--red-first` are repeatable. A fail verdict does not need an evidence run, but any
+`--ran` it carries is still shape- and existence-checked. The instruction side of the rule lives
+in `agents/review/CLAUDE.md` §5 Verdict and `agents/review/agents/first-pass.md`, pinned by
+`scripts/config-drift.test.mjs`.
+
+---
+
+## The role set for quality (FOC-1179) — one pass, CI parity, lead-writes
+
+Three rules the role docs now carry (cross-squad table: `docs/agents/role-set.md`), each with a
+text pin in `scripts/config-drift.test.mjs`:
+
+- **REVIEW is one strong pass.** The lead reads the diff and the DEV journal itself, re-runs the
+  cited evidence (`--ran`), and the security step is DETERMINISTIC — `node scripts/security-scan.mjs`,
+  `node scripts/security-scan.test.mjs` and `node scripts/egress-screen.mjs check --body-file <round
+  file>` run as commands with their output cited, not an LLM role. `first-pass`/`security`/`deep`
+  are folded into the lead; `worker`/`flash` stay for read-only lookups.
+- **TEST has CI parity.** A TEST pass cites the Fenix-container run — `MSYS_NO_PATHCONV=1 docker
+  run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh` (what CI runs; on
+  Git Bash/MSYS the prefix keeps the container-side path from being rewritten to a host path —
+  exit 2 without it; the repo's `fenix` wrapper exports the same guard) — via
+  `--container-run '{"cmd","exit","outputRef"}'`, plus the full suite once on the host. When docker
+  is not available the record still names why: `--container-unavailable "<why>"` lands as
+  `containerRun: "unavailable: <why>"`. The tool refuses `test-pass-without-container-run`
+  either way a bare missing field appears; docker availability is probed by `docker info`, with
+  `LA_DOCKER_AVAILABLE=1|0` as the test seam. `deployer`/`scenario-gen` are not part of the
+  CLI-repo flow.
+- **DEV is one context for one change.** Subagents are for reading (recon) only; the
+  implementation, the red-first tests and the journal are written by the lead in its own tree.
+
+---
+
 ## What to do with a failed box
 
 Do not fix it inside the walk. Note the box, the command, and what actually happened, then finish
@@ -245,7 +314,7 @@ into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run
 `docs/scratch-and-fixtures.md`).
 
 ### Verification
-- `node scripts/test-all.mjs` → 215/215 files (the registered lane count: 199 parallel + 16 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 216/216 files (the registered lane count: 199 parallel + 17 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.

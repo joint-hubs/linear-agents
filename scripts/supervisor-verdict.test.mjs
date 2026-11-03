@@ -32,11 +32,17 @@ import {
   progressFingerprint,
   readRegistry,
   roundsFor,
+  runDir,
   verdictPath,
   verdictsDir,
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { returnGateQuestion } from "./supervisor-verdict.mjs";
+// Namespace (not named) import on purpose: the DOCKER_PROBE pin below has to
+// fail ON ITS OWN while the export does not exist yet — a named import of a
+// missing export is a link error that would kill the whole file, and red-first
+// honesty needs the named failure.
+import * as supervisorVerdict from "./supervisor-verdict.mjs";
 
 const { test, fail, summary } = harness();
 const VERDICT = join(ROOT, "scripts", "supervisor-verdict.mjs");
@@ -173,6 +179,28 @@ function advance(s, name) {
 const record = (s, extra = []) =>
   parse(verdict(["record", "--run", s.runId, "--child", "review-1", ...extra]), fail);
 
+/**
+ * An output file the reviewer produced, under the run's scratch reviews dir —
+ * the same place the REVIEW round files go when supervised. `body` empty is
+ * how the empty-outputRef case is built.
+ */
+const scratchEvidence = (s, name, body) => {
+  const dir = join(runDir(s.runId), "scratch", "reviews");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  writeFileSync(path, body, "utf8");
+  return path;
+};
+const ranFlag = (s, name = "evidence.txt", body = "12 passed, 0 failed\n") =>
+  JSON.stringify({ cmd: "node scripts/supervisor-verdict.test.mjs", exit: 0, outputRef: scratchEvidence(s, name, body) });
+const redFirstFlag = (s, name = "red-first.txt", baseExit = 1, candidateExit = 0) =>
+  JSON.stringify({
+    cmd: "node scripts/supervisor-verdict.test.mjs",
+    baseExit,
+    candidateExit,
+    outputRef: scratchEvidence(s, name, `base exit ${baseExit}, candidate exit ${candidateExit}\n`),
+  });
+
 // ── 1. every finding cites something ─────────────────────────────────────────
 console.log("\nkażde ustalenie musi coś cytować");
 
@@ -249,6 +277,7 @@ test("a complete AC mapping passes", () => {
     "--issue-file", issueFile(s.base, 2),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ac", JSON.stringify({ ac: "AC-2", evidence: "scripts/b.test.mjs:44 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.acMapping.length, 2);
@@ -262,6 +291,7 @@ test("an unreadable issue warns instead of blocking the approve", () => {
     "--verdict", "pass",
     "--issue-file", join(s.base, "no-such-issue.json"),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.declaredAcs, null);
@@ -278,6 +308,401 @@ test("a pass cannot carry a blocking issue finding", () => {
   ]);
   assert.equal(out.ok, false);
   assert.match(out.error, /blocking/);
+});
+
+// ── 2b. the pass cites a command the reviewer ran itself (FOC-1170) ─────────
+console.log("\nevidence as code — a pass cites a command the reviewer ran");
+
+test("a review pass without an evidence run is refused (review-pass-without-evidence-run)", () => {
+  // The three false passes of 2026-11-01/02 all accepted output that could not
+  // have come out differently. Absence of objections is not evidence, and
+  // neither is a diff read; the tool refuses a pass that cites nothing ran.
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /review-pass-without-evidence-run/);
+});
+
+test("a --ran whose outputRef does not exist is refused", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/x.mjs", exit: 0, outputRef: join(runDir(s.runId), "scratch", "no-such-output.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
+});
+
+test("an empty outputRef is refused", () => {
+  // A zero-byte file is a citation of nothing — the same cheat as a dash.
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s, "empty.txt", ""),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-empty/);
+});
+
+test("an outputRef outside the run's scratch and the reviewer's worktree is refused", () => {
+  // DEV's tree is neither: an output the reviewer "ran" in the work tree under
+  // review is exactly the evidence nobody can audit after the fact.
+  const s = scenario();
+  const outside = join(s.worktree, "dev-tree-output.txt");
+  writeFileSync(outside, "looks like evidence\n", "utf8");
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/x.mjs", exit: 0, outputRef: outside }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-outside-run/);
+});
+
+test("a valid --ran under the reviewer's worktree is recorded", () => {
+  const s = scenario();
+  const path = join(s.reviewTree, "lint-output.txt");
+  writeFileSync(path, "0 violations\n", "utf8");
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/lint.mjs", exit: 0, outputRef: path }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran.length, 1);
+  assert.equal(out.ran[0].cmd, "node scripts/lint.mjs");
+  assert.equal(out.ran[0].exit, 0);
+  assert.equal(out.ran[0].outputRef, path);
+});
+
+test("a --ran given as a path relative to the reviewer's worktree resolves", () => {
+  // The reviewer runs from its own tree, so a relative citation is the natural
+  // shape; resolving it there (not against the tool's cwd) is what keeps the
+  // record's absolute path the one the reviewer actually produced.
+  const s = scenario();
+  writeFileSync(join(s.reviewTree, "test-output.txt"), "all green\n", "utf8");
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/suite.mjs", exit: 0, outputRef: "test-output.txt" }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran[0].outputRef, join(s.reviewTree, "test-output.txt"));
+});
+
+test("an outputRef whose path casing differs from the root is still contained (win32)", () => {
+  // The containment compare used to be case-sensitive: a citation typed with a
+  // lowercase drive letter (`c:/users/...`) resolved fine on the
+  // case-insensitive win32 filesystem but was refused as outside-run although
+  // the file sat inside the reviewer's worktree (review round 1, probe P15).
+  // Case-folding is a win32 property — posix paths ARE case-sensitive, so on
+  // other platforms this scenario does not exist and the test steps aside.
+  if (process.platform !== "win32") return;
+  const s = scenario();
+  const path = join(s.reviewTree, "cased-output.txt");
+  writeFileSync(path, "same file, typed differently\n", "utf8");
+  const lowered = path.replace(/^([A-Za-z]):/, (m, d) => `${d.toLowerCase()}:`);
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", JSON.stringify({ cmd: "node scripts/lint.mjs", exit: 0, outputRef: lowered }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran[0].outputRef, lowered);
+});
+
+test("--red-first with equal exits is refused (red-first-not-red)", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+    "--red-first", redFirstFlag(s, "equal.txt", 1, 1),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /red-first-not-red/);
+});
+
+test("a malformed --red-first shape is refused", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+    "--red-first", JSON.stringify({ cmd: "node scripts/x.mjs", baseExit: 1 }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.ok(out.problems.some((p) => /--red-first #1/.test(p)), JSON.stringify(out.problems));
+});
+
+test("a valid --red-first is stored on the record as redFirst", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+    "--red-first", redFirstFlag(s),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.redFirst.length, 1);
+  assert.equal(out.redFirst[0].baseExit, 1);
+  assert.equal(out.redFirst[0].candidateExit, 0);
+  assert.ok(existsSync(out.redFirst[0].outputRef));
+});
+
+test("a fail without --ran still records — the gate is a pass gate", () => {
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ran, undefined, "no ran key without the flag — the record shape stays as it was");
+});
+
+test("a --ran cited on a fail still has to point at real output", () => {
+  // The gate protects the pass; the SHAPE check protects every record. Evidence
+  // that does not exist is not evidence on a fail either — it just fails
+  // softer, so the shape check does not get a verdict-dependent blind spot.
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--ran", JSON.stringify({ cmd: "node scripts/x.mjs", exit: 1, outputRef: join(runDir(s.runId), "scratch", "never-written.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
+});
+
+// ── 2c. a TEST pass ran the suite the way CI runs it (FOC-1179) ─────────────
+console.log("\ntest — parzystość z CI: werdykt cytuje przebieg w kontenerze");
+
+/**
+ * A TEST child and the review child, each with a REAL worktree — the same
+ * shape the inert-fail test below uses. The TEST child's worktree is the
+ * containment root for its own `--container-run` outputRef.
+ */
+function testScenario() {
+  const { base, repo } = fixtureRepo();
+  const testTree = fixtureWorktree(repo, "foc-123-test");
+  const reviewTree = fixtureWorktree(repo, "foc-123-test-review");
+  const runId = fixtureRun();
+  const child = (childId, squad, wt) => ({
+    childId,
+    squad,
+    taskId: "FOC-123",
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    status: "exited",
+    turns: [{ pid: 1 }],
+    permissionMode: "bypassPermissions",
+    worktree: wt.worktree,
+    branch: wt.branch,
+    baseRevision: wt.baseRevision,
+  });
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "test-1": child("test-1", "test", testTree),
+      "review-1": child("review-1", "review", reviewTree),
+    },
+    rounds: {},
+  });
+  return { base, repo, runId, ...testTree, reviewTree: reviewTree.worktree };
+}
+
+const testRecord = (s, extra = [], env = {}) =>
+  parse(verdict(["record", "--run", s.runId, "--child", "test-1", ...extra], env), fail);
+
+const testPassArgs = (s) => [
+  "--verdict", "pass",
+  "--issue-file", issueFile(s.base, 1),
+  "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+];
+const containerRunFlag = (s, name = "container-output.txt", body = "74 passed, 0 failed\n", exit = 0) => {
+  const path = join(s.worktree, name);
+  writeFileSync(path, body, "utf8");
+  return JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit, outputRef: path });
+};
+
+test("a test pass without a container run is refused when docker is available (test-pass-without-container-run)", () => {
+  // TEST re-ran REVIEW's checks on win32 only; both Linux-only CI reds of the
+  // session were invisible to it. A pass that never saw the Fenix image is the
+  // same false pass the review gate already refuses — absence of a container
+  // row is not CI parity.
+  const s = testScenario();
+  const out = testRecord(s, testPassArgs(s), { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /test-pass-without-container-run/);
+});
+
+test("a test pass without a container run is refused even when docker is NOT available — the why is mandatory", () => {
+  // The seam being false does not waive the field: it changes what the field
+  // has to SAY. A bare missing field is still refused — delivery can always
+  // see whether the container ran.
+  const s = testScenario();
+  const out = testRecord(s, testPassArgs(s), { LA_DOCKER_AVAILABLE: "0" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /test-pass-without-container-run/);
+});
+
+test("a test pass with the why recorded lands as containerRun: \"unavailable: <why>\"", () => {
+  const s = testScenario();
+  const out = testRecord(s, [...testPassArgs(s), "--container-unavailable", "docker daemon not installed on this runner"], { LA_DOCKER_AVAILABLE: "0" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun, "unavailable: docker daemon not installed on this runner");
+});
+
+test("a test pass with a cited container run is recorded, keys in shape order", () => {
+  const s = testScenario();
+  const out = testRecord(s, [...testPassArgs(s), "--container-run", containerRunFlag(s)], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun.cmd, "sh /src/docker/test-in-container.sh");
+  assert.equal(out.containerRun.exit, 0);
+  // The citation points at the OUTPUT, not just at a path that happens to
+  // exist — read it back, content and all.
+  assert.equal(readFileSync(out.containerRun.outputRef, "utf8"), "74 passed, 0 failed\n");
+  // The key sits with the other conditional evidence keys, before declaredAcs.
+  const rec = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  assert.equal(
+    Object.keys(rec).join(","),
+    "taskId,runId,childId,squad,round,verdict,findings,acMapping,containerRun,declaredAcs,fingerprint,recordedAt,linearEffects",
+  );
+});
+
+test("a --container-run whose outputRef does not exist is refused", () => {
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 0, outputRef: join(runDir(s.runId), "scratch", "never-ran.txt") }),
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
+});
+
+test("a placeholder --container-unavailable why is refused", () => {
+  // "unavailable: n/a" tells delivery nothing — the same cheat the citation
+  // checks already refuse.
+  const s = testScenario();
+  const out = testRecord(s, [...testPassArgs(s), "--container-unavailable", "n/a"], { LA_DOCKER_AVAILABLE: "0" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--container-unavailable/);
+});
+
+test("--container-run and --container-unavailable together are refused (container-run-contradiction)", () => {
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-run", containerRunFlag(s, "container-both.txt"),
+    "--container-unavailable", "docker daemon not installed on this runner",
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /container-run-contradiction/);
+});
+
+test("a --container-unavailable is refused when the probe says docker IS up (container-run-unavailable-while-docker-up)", () => {
+  // "unavailable" while the daemon answers is a lie IN the record — the same
+  // false-evidence class the pass gate refuses. The why flag is an escape
+  // hatch for a host that truly cannot run the container, not a skip button:
+  // REVIEW round 1 proved (probe P3b) that seam=1 + a reason recorded
+  // ok:true with containerRun: "unavailable: docker present but i did not
+  // run it" — exactly the omission-shaped record this refusal kills.
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-unavailable", "docker daemon not installed on this runner",
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /container-run-unavailable-while-docker-up/);
+});
+
+test("the docker probe is the template-free exit-code probe — docker info, no --format", () => {
+  // The round-1 probe ran `docker info --format {{.Server.Version}}`: docker
+  // info's Go-template field names drift between CLI versions, and CLI 28.4.0
+  // refuses that template outright ("can't evaluate field Server in type
+  // system.dockerInfo", exit 1) — so the probe reported a HEALTHY daemon as
+  // absent. The fix is the command itself: no template, exit code only, so
+  // the answer cannot depend on the CLI's output schema.
+  assert.deepEqual(supervisorVerdict.DOCKER_PROBE, { cmd: "docker", args: ["info"] });
+});
+
+test("a test fail needs no container run — the gate is a pass gate", () => {
+  const s = testScenario();
+  const out = testRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun, undefined, "no containerRun key without the flag — the fail shape stays as it was");
+});
+
+test("a review pass is never asked for a container run — the record shape stays byte-identical", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun, undefined);
+});
+
+test("a --container-run cited on a fail still has to point at real output", () => {
+  // Same duty as --ran: the shape check protects every record; the verdict-
+  // dependent REQUIREMENT is the pass gate only.
+  const s = testScenario();
+  const out = testRecord(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 1, outputRef: join(runDir(s.runId), "scratch", "never-ran.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /evidence-outputRef-missing/);
+});
+
+test("a test pass whose only container evidence is a RED run is refused (container-run-not-green)", () => {
+  // Delivery r4: both reviews honestly cited fenix:dev exit 125 (image name
+  // mismatch, since fixed on the host) — and the pass gate waved the record
+  // through, because it checked the citation's shape and the file's
+  // existence, never the exit. A pass whose only container evidence is red
+  // contradicts itself — the red-first-not-red class FOC-1170 already
+  // refuses for --red-first.
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-run", containerRunFlag(s, "container-red.txt", "docker: Error response from daemon: No such image\n", 125),
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /container-run-not-green/);
+  assert.match(out.error, /fix the suite or record a fail/);
+});
+
+test("a --container-run cited on a fail keeps its exit verbatim — red evidence on a fail is honest", () => {
+  // The asymmetry the refusal must keep: a FAIL verdict citing a red run is
+  // the report doing its job, so the exit lands in the record exactly as the
+  // child asserted it.
+  const s = testScenario();
+  const ref = join(s.worktree, "container-fail-red.txt");
+  writeFileSync(ref, "docker: Error response from daemon: No such image\n", "utf8");
+  const out = testRecord(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 125, outputRef: ref }),
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun.exit, 125);
 });
 
 // ── 3. the fingerprint ───────────────────────────────────────────────────────
@@ -597,10 +1022,18 @@ test("a repeated cross-run fail is refused as a repeat — the FOC-1146 semantic
 
 test("a cross-run fail stamps verdictRuns on the work child's entry on a PASS too", () => {
   const s = splitRunScenario();
+  // The merge brought the FOC-1179 gate: a TEST pass must cite the container
+  // run, and the cross-run path is no exception. The citation's output lives
+  // in the recording run's scratch — the same containment --ran is checked
+  // against.
+  mkdirSync(join(runDir(s.runB), "scratch"), { recursive: true });
+  const containerOut = join(runDir(s.runB), "scratch", "container-output.txt");
+  writeFileSync(containerOut, "74 passed, 0 failed\n", "utf8");
   const out = recordIn(s, [
     "--child", "recorder-1", "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 0, outputRef: containerOut }),
     "--work-run", s.runA, "--work-child", "dev-1",
   ]);
   assert.equal(out.ok, true, out.error);
@@ -665,6 +1098,9 @@ test("an illegal run id read from verdictRuns is refused, naming the value", () 
   assert.equal(loop.ok, false);
   assert.ok(loop.error.includes("../escape"), loop.error);
 });
+
+// ── 4. the failing-test axis is declared (FOC-220) ──────────────────────────
+console.log("\nbrak failing-test to deklaracja, nie domyślenie");
 
 // A fail that is not test-backed — a design failure — is a real category, so
 // the gate is escapable; but the escape is an explicit declaration with a
@@ -784,6 +1220,7 @@ test("a pass followed by a fail on the same tree is a new opinion, not a reprodu
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", NO_TESTS_REASON]);
 
@@ -885,6 +1322,7 @@ test("a pass records no side effects at all", () => {
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
   ]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.linearEffects.label.status, "not-applicable");
@@ -1084,6 +1522,7 @@ test("a non-allowlisted *_DRY_RUN cannot feed a fake issue into declaredAcs (R2-
         "record", "--run", s.runId, "--child", "review-1", "--verdict", "pass",
         "--work-child", "dev-1", "--task", "FOC-777",
         "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+        "--ran", ranFlag(s, "scrub-evidence.txt"),
       ],
       { REVIEW_DRY_RUN: "", FOO_DRY_RUN: "1" },
       { stripCreds: true },
@@ -1159,6 +1598,581 @@ test("a refused re-record of the same round touches no Linear write", () => {
   assert.equal(again.ok, false);
   assert.match(again.error, /recorded once/);
   assert.equal(again.linearEffects, undefined);
+});
+
+// ── 5c. delivery verdicts (FOC-1169) ─────────────────────────────────────────
+console.log("\ndelivery verdykty — etykiety bez dziecka");
+
+const deliveryRecord = (s, extra = []) =>
+  parse(verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", ...extra]), fail);
+
+// The byte-level pin of a NORMAL record, captured from the pre-FOC-1169 tool
+// (the recordedAt, runId and fingerprint hashes are the only dynamic parts —
+// normalized to "<ts>", "<run>" and "<hash>"). It is a regression guard, not an
+// evidence test: its job is to fail if `--delivery` ever leaks a key into the
+// normal shape. A pin that could only have been written one way is honest about
+// exactly that.
+const GOLDEN_NORMAL_RECORD = `{
+  "taskId": "FOC-123",
+  "runId": "<run>",
+  "childId": "review-1",
+  "squad": "review",
+  "round": 1,
+  "verdict": "fail",
+  "findings": [
+    {
+      "text": "resolvePrice ignores cacheRead",
+      "evidence": "scripts/ledger.mjs:88 resolvePrice"
+    }
+  ],
+  "acMapping": [],
+  "declaredAcs": 1,
+  "fingerprint": {
+    "diff": "<hash>",
+    "tests": "<hash>",
+    "combined": "<hash>",
+    "changedFiles": 0,
+    "failingTests": [
+      "suite/a"
+    ],
+    "error": null
+  },
+  "recordedAt": "<ts>",
+  "linearEffects": {
+    "dryRun": true,
+    "dryRunTrigger": "REVIEW_DRY_RUN=1",
+    "label": {
+      "status": "applied",
+      "detail": "[dry-run] would set labels: current=[] planned=[returned-by:review]"
+    },
+    "transition": {
+      "status": "applied",
+      "detail": "[dry-run:review] would transition FOC-123 -> In Progress"
+    }
+  }
+}`;
+
+test("the record shape without --delivery is unchanged (byte-level pin)", () => {
+  const s = scenario();
+  advance(s, "golden.txt");
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const rec = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  const norm = {
+    ...rec,
+    runId: "<run>",
+    recordedAt: "<ts>",
+    fingerprint: { ...rec.fingerprint, diff: "<hash>", tests: "<hash>", combined: "<hash>" },
+  };
+  // Key ORDER is part of the shape: a key appended later shifts every byte after it.
+  assert.equal(
+    Object.keys(rec).join(","),
+    "taskId,runId,childId,squad,round,verdict,findings,acMapping,declaredAcs,fingerprint,recordedAt,linearEffects",
+  );
+  assert.equal(JSON.stringify(norm, null, 2), GOLDEN_NORMAL_RECORD);
+  // The delivery-only keys must not leak into a normal record.
+  for (const k of ["recordedBy", "reason", "backfill"]) {
+    assert.ok(!(k in rec), `${k} leaked into a record without --delivery`);
+  }
+});
+
+test("a delivery fail is recorded without a child, fingerprinting the dev child's tree", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.squad, "delivery");
+  assert.equal(out.childId, null);
+  assert.equal(out.recordedBy, "delivery");
+  assert.equal(out.reason, "design");
+  assert.equal(out.verdict, "fail");
+  assert.equal(out.round, 1);
+  // The fingerprint measures DEV's tree — the work being delivered, not a reviewer's.
+  const fp = progressFingerprint({ worktree: s.worktree, baseRevision: s.baseRevision, failingTests: [] });
+  assert.equal(out.fingerprint.combined, fp.combined);
+  // Delivery has no return emitter: the side effects are inert BY SHAPE.
+  assert.equal(out.linearEffects.label.status, "not-applicable");
+  assert.equal(out.linearEffects.transition.status, "not-applicable");
+  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  assert.equal(onDisk.recordedBy, "delivery");
+  assert.equal(onDisk.childId, null);
+});
+
+test("a delivery pass needs no reason and no AC mapping", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass"]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.squad, "delivery");
+  assert.equal(out.recordedBy, "delivery");
+  assert.equal(out.reason, null);
+  assert.deepEqual(out.acMapping, []);
+  assert.deepEqual(out.findings, []);
+  assert.equal(out.ran, undefined, "no ran key without the flag — the delivery record shape stays as it was");
+});
+
+test("--ran is refused in --delivery mode — an evidence run is a REVIEW pass requirement", () => {
+  // FOC-1170 round 1: the evidence flags parsed and VANISHED in delivery mode —
+  // the exact silent-accept class this ticket exists to kill, one layer over.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass", "--ran", ranFlag(s, "delivery-evidence.txt")]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--ran is not used in --delivery mode/);
+});
+
+test("--red-first is refused in --delivery mode", () => {
+
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "pass", "--red-first", redFirstFlag(s, "delivery-red-first.txt")]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--red-first is not used in --delivery mode/);
+});
+
+test("--container-run is refused in --delivery mode — the container run is a TEST pass requirement", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "pass",
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 0, outputRef: join(runDir(s.runId), "scratch", "never-ran.txt") }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--container-run is not used in --delivery mode/);
+});
+
+test("--container-unavailable is refused in --delivery mode", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "pass",
+    "--container-unavailable", "docker daemon not installed on this runner",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--container-unavailable is not used in --delivery mode/);
+});
+
+test("--recorded-at without --backfill is refused", () => {
+  const s = scenario();
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci",
+    "--recorded-at", "2026-11-01T10:00:00.000Z",
+    "--no-failing-tests", NO_TESTS_REASON,
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
+test("--recorded-at with --backfill lands with backfill:true and the given timestamp", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-01T10:00:00.000Z", "--backfill",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.backfill, true);
+  assert.equal(out.recordedAt, "2026-11-01T10:00:00.000Z");
+  assert.equal(out.reason, "ci");
+});
+
+test("an unknown delivery reason is refused", () => {
+  const s = scenario();
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "vibes", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /unknown delivery reason "vibes"/);
+});
+
+test("a delivery fail without a reason is refused", () => {
+  const s = scenario();
+  const out = deliveryRecord(s, ["--verdict", "fail", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--reason/);
+});
+
+test("--child is refused in --delivery mode — the record has no child", () => {
+  const s = scenario();
+  const out = parse(
+    verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", "--child", "review-1", "--verdict", "pass"]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--child/);
+});
+
+test("a delivery fail after a REVIEW pass on the same tree opens the round (FOC-1146 interplay)", () => {
+  // The FOC-1146 guard refuses only a repeat of verdict AND findings. A REVIEW
+  // pass contradicted by a delivery fail on the same tree is a NEW opinion, so
+  // the round it asks for must open — the delivery verdict joins the same
+  // roundsFor chain that guard reads.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.round, 2, "the delivery verdict joins the task's round chain");
+
+  const loop = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
+  assert.equal(loop.ok, true, loop.error);
+  assert.equal(loop.progress.repeated, true, "the tree did not move — and that is not the blocker");
+  assert.equal(loop.progress.rounds, 2);
+});
+
+test("--ac is refused in --delivery mode — an AC mapping is a REVIEW approve requirement", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = parse(
+    verdict([
+      "record", "--delivery", "--run", s.runId, "--task", "FOC-123", "--verdict", "pass",
+      "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    ]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--ac/);
+});
+
+test("--backfill without --recorded-at is refused — a backfill without its when is half a declaration", () => {
+  // The AC only forces --recorded-at without --backfill to be refused; the
+  // mirror case is a policy call, pinned here: backfill:true with a NOW
+  // timestamp would claim to be history without saying when that history was.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci", "--backfill"]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
+test("a delivery verdict with no dev child in the run is refused, not guessed at", () => {
+  const { repo } = fixtureRepo();
+  const review = fixtureWorktree(repo, "foc-123-review");
+  const runId = fixtureRun();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "review-1": {
+        childId: "review-1", squad: "review", taskId: "FOC-123", status: "exited", turns: [],
+        worktree: review.worktree, baseRevision: review.baseRevision,
+      },
+    },
+    rounds: {},
+  });
+  const out = parse(
+    verdict([
+      "record", "--delivery", "--run", runId, "--task", "FOC-123",
+      "--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON,
+    ]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /no dev child for FOC-123/);
+  // The hint names WHO would be fingerprinted — not a null childId.
+  assert.ok(!String(out.hint ?? "").includes("null"), `the hint interpolates a null childId: ${out.hint}`);
+});
+
+test("two dev children for the task are ambiguous — --work-child names the tree", () => {
+  const { repo } = fixtureRepo();
+  const devA = fixtureWorktree(repo, "foc-123-dev-a");
+  const devB = fixtureWorktree(repo, "foc-123-dev-b");
+  const runId = fixtureRun();
+  const child = (id, wt) => ({
+    childId: id, squad: "dev", taskId: "FOC-123", status: "exited", turns: [],
+    worktree: wt.worktree, baseRevision: wt.baseRevision,
+  });
+  writeRegistry(runId, { runId, children: { "dev-1": child("dev-1", devA), "dev-2": child("dev-2", devB) }, rounds: {} });
+  const mk = (extra = []) =>
+    parse(
+      verdict([
+        "record", "--delivery", "--run", runId, "--task", "FOC-123",
+        "--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON,
+        ...extra,
+      ]),
+      fail,
+    );
+
+  const refused = mk();
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /2 dev children carry FOC-123/);
+
+  // Naming one resolves the ambiguity; the record still has no child.
+  const named = mk(["--work-child", "dev-2"]);
+  assert.equal(named.ok, true, named.error);
+  assert.equal(named.childId, null);
+});
+
+test("a --recorded-at that Date.parse accepts but ISO does not is refused", () => {
+  // Todo-1 round 1: Date.parse("11/01/2026") is readable, but a backdated
+  // record whose when is locale-shaped is not a baseline anyone can reproduce.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "11/01/2026", "--backfill",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--recorded-at/);
+});
+
+test("a calendar-overflow --recorded-at is refused, not rolled over to a date the operator never typed", () => {
+  // Round 2: Date.parse("2026-02-30T00:00:00Z") is 2026-03-02 — a backfill
+  // storing that WHEN would reorder the signal inputs by a stamp nobody
+  // typed. Every rollover case refuses; the message names the typed date.
+  for (const stamp of ["2026-02-30T00:00:00Z", "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z"]) {
+    const s = scenario();
+    advance(s, "attempt.txt");
+    const out = deliveryRecord(s, [
+      "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+      "--recorded-at", stamp, "--backfill",
+    ]);
+    assert.equal(out.ok, false, `${stamp} was accepted`);
+    assert.match(out.error, new RegExp(`--recorded-at "${stamp}" is not a real calendar date`));
+  }
+});
+
+test("a --recorded-at offset is bounded to ISO 8601 (±14:00 exactly), a real offset still records", () => {
+  // Round 2 nit 1: [+-]\d{2}:\d{2} read +99:99. Bounded to ±14:00 per ISO.
+  // Round 3: the first bound was ±14:59 — (?:0\d|1[0-4]):[0-5]\d admits
+  // +14:01..+14:59 and Date.parse does not NaN them, so the gate accepted
+  // them end-to-end while every comment claimed ±14:00. Hour 14 admits only
+  // :00 now, and the boundary pins below can actually go red.
+  for (const stamp of [
+    "2026-11-01T10:00:00+99:99",
+    "2026-11-01T10:00:00+14:01",
+    "2026-11-01T10:00:00+14:59",
+  ]) {
+    const s = scenario();
+    advance(s, "attempt.txt");
+    const refused = deliveryRecord(s, [
+      "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+      "--recorded-at", stamp, "--backfill",
+    ]);
+    assert.equal(refused.ok, false, `${stamp} was accepted`);
+    assert.ok(
+      refused.error.includes(`--recorded-at "${stamp}" is not an ISO timestamp`),
+      refused.error,
+    );
+  }
+
+  // A +14:00 stamp legitimately shifts the UTC instant (23:30+14:00 is
+  // 09:30Z) — the record keeps the parsed instant, not the typed wall clock.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-01T23:30:00+14:00", "--backfill",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.recordedAt, "2026-11-01T09:30:00.000Z");
+});
+
+// ── 5d. backfilled delivery fingerprints name the round they contradict (FOC-1194) ──
+console.log("\nbackfill --contradicts-round — osadzony w tej samej twarzy co wyrok");
+
+test("--contradicts-round without --backfill is refused", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--contradicts-round/);
+  assert.match(out.error, /--backfill/);
+});
+
+test("a backfilled delivery fail with --contradicts-round carries the judged round's fingerprint, source round-N", () => {
+  // The motivating case: the dev worktree is GONE by the time the baseline is
+  // backfilled (FOC-1147, 1151, 1156, …) — recomputing reads diff: null and the
+  // reviewFalsePass pair is uncountable. --contradicts-round N copies the
+  // fingerprint round N judged, so the record means "the tree as that round
+  // saw it", not "the tree now".
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  const passRecord = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  assert.ok(passRecord.fingerprint.diff, "the review pass round 1 fingerprinted a real tree");
+
+  rmSync(s.worktree, { recursive: true, force: true });
+
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.round, 2);
+  assert.equal(out.fingerprint.diff, passRecord.fingerprint.diff);
+  assert.equal(out.fingerprint.combined, passRecord.fingerprint.combined);
+  assert.equal(out.fingerprint.source, "round-1");
+  assert.equal(out.fingerprint.error, undefined, "a copied fingerprint is not UNKNOWN");
+  // All FIVE identity fields, not a subset: a field dropped from the copy
+  // destructure would otherwise pass unnoticed (r2 nit 7).
+  assert.equal(out.fingerprint.tests, passRecord.fingerprint.tests);
+  assert.equal(out.fingerprint.changedFiles, passRecord.fingerprint.changedFiles);
+  assert.deepEqual(out.fingerprint.failingTests, passRecord.fingerprint.failingTests);
+  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 2), "utf8"));
+  assert.equal(onDisk.fingerprint.source, "round-1");
+});
+
+test("backfill without --contradicts-round still recomputes (UNKNOWN warning on a removed tree)", () => {
+  // Item 3 of the ticket: without the flag, backfill behaves exactly as today.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  rmSync(s.worktree, { recursive: true, force: true });
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.fingerprint.diff, null);
+  assert.ok(out.fingerprint.error, "the recomputed fingerprint on a removed tree is UNKNOWN");
+  assert.ok(!("source" in out.fingerprint), "no source key on a recomputed fingerprint");
+});
+
+test("--contradicts-round naming a round that does not exist is refused", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "3",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /round 3 of FOC-123/);
+});
+
+test("--contradicts-round naming a round without a diff is refused", () => {
+  // A REVIEW round whose fingerprint has no diff (the tree was already
+  // unreadable when it was recorded) has nothing to copy, and a null diff
+  // would silently match nothing. r2: the named round is a fixture REVIEW
+  // record — a delivery round is refused one step earlier (not a REVIEW pass).
+  const s = scenario();
+  advance(s, "attempt.txt");
+  mkdirSync(verdictsDir(s.runId), { recursive: true });
+  writeFileSync(
+    verdictPath(s.runId, "FOC-123", 1),
+    JSON.stringify({
+      taskId: "FOC-123",
+      runId: s.runId,
+      childId: null,
+      squad: "review",
+      round: 1,
+      verdict: "pass",
+      findings: [],
+      acMapping: [],
+      declaredAcs: null,
+      fingerprint: { diff: null, tests: null, combined: null, changedFiles: null, failingTests: [], error: "worktree or baseRevision missing" },
+      reason: null,
+      recordedBy: "review",
+      recordedAt: "2026-11-02T09:00:00.000Z",
+    }),
+  );
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /round 1 of FOC-123/);
+  // r2 nit 5: the /round 1 of FOC-123/ assertion alone also matches the
+  // missing-round message — pin the no-diff branch by its own words.
+  assert.match(out.error, /no diff/);
+});
+
+test("--contradicts-round with --verdict pass is refused — a pass contradicts nothing", () => {
+  // r2, finding 4 — decision: the flag's name is its contract. A delivery PASS
+  // does not falsify the round it names; letting it carry the fingerprint would
+  // put named delivery passes into the contradicted set with nothing to
+  // falsify. Refused like the sibling delivery-mode flags, not silently shaped.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  const out = deliveryRecord(s, [
+    "--verdict", "pass",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--contradicts-round/);
+  assert.match(out.error, /pass contradicts nothing|is a fail's provenance/);
+});
+
+test("--contradicts-round naming a delivery round is refused — the copy must come from the REVIEW pass", () => {
+  // r2, finding 2: the source marker has to RESOLVE to the pass being
+  // contradicted (reviewFalsePass pairs review rows by round). A chain of
+  // copies — naming a round that is itself a backfilled copy — yields a source
+  // no consumer can resolve. A named round that is not a REVIEW record is
+  // refused, so every copied source points at a genuine review round.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  const copied = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(copied.ok, true, copied.error);
+  assert.equal(copied.round, 2);
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "design", "--failing-test", "suite/design",
+    "--recorded-at", "2026-11-02T11:00:00.000Z", "--backfill",
+    "--contradicts-round", "2",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /round 2 of FOC-123/);
+  assert.match(out.error, /not a REVIEW/);
+});
+
+test("the copy path carries the operator's --failing-test declaration separately", () => {
+  // r2, finding 3: the FOC-220-gated declaration has no carrier once the copy
+  // overwrites fingerprint.failingTests with round N's — the operator's own
+  // words would vanish from the record. Carried as declaredFailingTests (the
+  // --no-failing-tests variant was already carried as noFailingTests).
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.deepEqual(out.declaredFailingTests, ["suite/ci"], "the declaration survives the copy");
+  assert.deepEqual(out.fingerprint.failingTests, [], "the fingerprint's axis is round N's, not the declaration");
+  assert.ok(
+    out.warnings.some((w) => w.includes("superseded")),
+    `the warning must say the declaration is superseded: ${JSON.stringify(out.warnings)}`,
+  );
 });
 
 // ── 6. the two stall conditions stay distinct ────────────────────────────────

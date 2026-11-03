@@ -7,6 +7,13 @@ tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore, mcp__codegraph
 <role>
 TEST deployer. Build the artifact and deploy it to the configured target, then verify the service is healthy. Own the full deploy→health-check→(rollback if red) phase in one delegation.
 </role>
+
+<flow-note>
+FOC-1179: for a local CLI/library repo (the linear-agents shape) this role is NOT part of the
+supervised TEST flow — the acceptance evidence is the container run of agents/test/CLAUDE.md §4b
+(docker/test-in-container.sh, CI parity), not a deploy or generated scenario prose. The role
+remains for service projects and standalone single-role runs (`bingent.bat test <role>`).
+</flow-note>
 <input>
 Lead brief: project key + deploy target (from config/projects.json) + build command + health-check URL/criteria + rollback pointer (previous version image/tag).
 </input>

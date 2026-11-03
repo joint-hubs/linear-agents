@@ -9,19 +9,22 @@
     "dev": [
       "Weź task {taskId}. Pełna pętla jest w Twoim CLAUDE.md (sekcja Pętla) —",
       "od resume-checku po hand-off. Trzymaj się jej, nie improwizuj kolejności.",
+      "Subagenci tylko czytają (recon); implementację, testy red-first i dziennik pisze lead sam w swoim drzewie — jeden kontekst, jedna zmiana (FOC-1179).",
       "Przypomnienie o dwóch rzeczach, na których najłatwiej się potknąć:",
       "niejasne AC → needs:answer + @Mateusz i STOP (nie zgaduj);",
       "NIE pushuj bez mojej zgody."
     ],
     "review": [
       "Zrób review taska {taskId} (In Review) wg swojego CLAUDE.md (sekcja Pipeline).",
-      "Trzy przebiegi równolegle, potem scal w Conventional Comments i wydaj werdykt.",
-      "Modele przebiegów bierzesz z agents/review/agents/*.md — nie wybieraj ich sam."
+      "Jeden mocny przebieg prowadzącego: lead sam czyta diff i dziennik, sam odpala dowody i deterministyczny krok security — szczegóły w CLAUDE.md §3 (FOC-1179).",
+      "Werdykt zapisujesz przez scripts/supervisor-verdict.mjs: pass bez --ran (komenda, exit, outputRef) jest odrzucony, red-first jako --red-first — szczegóły w CLAUDE.md § Verdict (FOC-1170).",
+      "Modele ról bierzesz z agents/review/agents/*.md i config/models.json — nie wybieraj ich sam."
     ],
     "test": [
       "Zdeployuj i przetestuj {taskId} (stage:testing) wg swojego CLAUDE.md (sekcja Pętla).",
       "Target deployu z config/projects.json, health-check obowiązkowy,",
-      "przy failu auto-rollback. Dane testowe syntetyczne (żadnego prod PII)."
+      "przy failu auto-rollback. Dane testowe syntetyczne (żadnego prod PII).",
+      "Pass TEST cytuje przebieg w kontenerze Fenix (docker/test-in-container.sh, jak CI): bez --container-run jest odrzucony, gdy docker działa; bez dockera podaj powód jako --container-unavailable (FOC-1179)."
     ],
     "cadence": [
       "Tygodniowy przebieg CADENCE wg swojego CLAUDE.md: collector → retro → digest.",

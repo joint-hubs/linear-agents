@@ -232,6 +232,56 @@ test("collectTicketFacts: the supervisor-lib path (default state home) reads ver
   assert.equal(f900.children[0].startedAt, iso(40)); // from the turn — no child.startedAt in the registry
 });
 
+test("collectTicketFacts: verdict rows carry squad, fingerprint and reason (FOC-1169 delivery labels)", () => {
+  // The quality signals for delivery verdicts read squad/fingerprint/reason off
+  // these rows — work-board.mjs must pass them through from the record, and the
+  // pre-FOC-1169 fields (round/verdict/at/path) must stay as they were.
+  // fingerprintDiff is the TREE axis (the fingerprint's diff hash): it is what
+  // reviewFalsePass matches on, because the combined hash folds in the declared
+  // failing-test axis a delivery fail always carries.
+  const run = fixtureRun("runv2");
+  writeRegistry(run, { d1: childEntry("d1", { taskId: "FOC-116", squad: "dev", status: "exited" }) });
+  writeVerdict(run, "FOC-116", 1, {
+    taskId: "FOC-116",
+    runId: run,
+    childId: null,
+    squad: "delivery",
+    round: 1,
+    verdict: "fail",
+    reason: "ci",
+    recordedAt: iso(30),
+    fingerprint: { combined: "fp-combined-1", diff: "fp-diff-1", tests: "y", failingTests: ["suite/ci"], changedFiles: 0, error: null, source: "round-2" },
+  });
+  writeVerdict(run, "FOC-116", 2, {
+    taskId: "FOC-116",
+    runId: run,
+    round: 2,
+    verdict: "pass",
+    squad: "review",
+    fingerprint: { combined: "fp-combined-2" },
+    reason: null,
+    recordedAt: iso(20),
+  });
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  const f116 = factsByTask(facts, "FOC-116");
+  assert.deepEqual(
+    f116.verdicts.map((v) => [v.squad, v.verdict, v.reason, v.fingerprint, v.fingerprintDiff, v.fingerprintSource, v.runId]),
+    [
+      ["delivery", "FAIL", "ci", "fp-combined-1", "fp-diff-1", "round-2", run],
+      // a record without fingerprint.diff reads null — UNKNOWN, never a match;
+      // one without fingerprint.source (the normal path) reads null too
+      ["review", "PASS", null, "fp-combined-2", null, null, run],
+    ],
+  );
+  assert.ok(f116.verdicts[0].path.endsWith("foc-116-round1.json"));
+  // The ticket timeline labels by squad: a delivery FAIL is not "review round N".
+  const detail = buildTicketDetail({ facts: f116, now: NOW });
+  assert.deepEqual(
+    detail.timeline.filter((e) => e.kind === "verdict").map((e) => e.text),
+    ["delivery verdict: FAIL", "review round 2: PASS"],
+  );
+});
+
 test("collectTicketFacts: children without startedAt take it from their turns", () => {
   // The registry's real shape: no child.startedAt/endedAt, turns only. The
   // effective start must make review-2 the latest child — on the acceptance

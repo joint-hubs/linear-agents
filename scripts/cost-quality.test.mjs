@@ -520,6 +520,304 @@ test("quality: stale flag on an old snapshot", () => {
   assert.equal(payload.stale, true);
 });
 
+// ── delivery verdict signals (FOC-1169) ──────────────────────────────────────
+
+// A verdict row as work-board.mjs's collectTicketFacts serves it — with the
+// squad / fingerprint / reason fields the delivery labels (FOC-1169) added, and
+// the fingerprintDiff tree axis the reviewFalsePass fix matches on.
+const vRow = (over = {}) => ({
+  round: 1,
+  verdict: "PASS",
+  squad: "review",
+  fingerprint: "fp1",
+  fingerprintDiff: "d1",
+  fingerprintSource: null,
+  runId: "run-fixture",
+  reason: null,
+  at: "2026-11-01T10:00:00.000Z",
+  path: "p",
+  ...over,
+});
+
+test("quality: deliveryFirstTimeRight counts tickets whose first delivery verdict is PASS", () => {
+  const facts = [
+    fact({
+      taskId: "D1",
+      verdicts: [vRow({ squad: "delivery", verdict: "PASS", round: 2, at: "2026-11-01T11:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    fact({
+      taskId: "D2",
+      verdicts: [vRow({ squad: "delivery", verdict: "FAIL", round: 1, reason: "design", at: "2026-11-01T10:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    // a REVIEW pass first, delivery pass later — the FIRST delivery verdict is PASS
+    fact({
+      taskId: "D3",
+      verdicts: [
+        vRow({ at: "2026-11-01T09:00:00Z" }),
+        vRow({ squad: "delivery", verdict: "PASS", round: 2, at: "2026-11-01T11:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // review only — no delivery verdict, outside the denominator
+    fact({ taskId: "R1", verdicts: [vRow({ at: "2026-11-01T09:00:00Z" })], lastActivityAt: NOW - DAY }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "deliveryFirstTimeRight");
+  assert.equal(signal.value, 2 / 3);
+  assert.equal(signal.numerator, 2);
+  assert.equal(signal.denominator, 3);
+  assert.deepEqual(signal.evidence, ["D1", "D3"]);
+  assert.equal(signal.unit, "share");
+});
+
+test("quality: reviewFalsePass counts REVIEW pass rounds contradicted by a delivery fail on the SAME work tree", () => {
+  const facts = [
+    // counted — the motivating case: the delivery FAIL declared a failing test
+    // (so its combined fingerprint differs from the pass's — the tests axis is
+    // a per-verdict declaration), but the TREE is the one the REVIEW pass
+    // accepted. Same fingerprintDiff, different combined → still a false pass.
+    fact({
+      taskId: "FP1",
+      verdicts: [
+        vRow({ fingerprint: "c-pass-1", fingerprintDiff: "d1", at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: "c-fail-1",
+          fingerprintDiff: "d1",
+          reason: "design",
+          at: "2026-11-01T10:00:00Z",
+        }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // not counted: delivery failed on a DIFFERENT tree (diff axis differs)
+    fact({
+      taskId: "FP2",
+      verdicts: [
+        vRow({ fingerprint: "c-pass-2", fingerprintDiff: "d2", at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: "c-fail-2",
+          fingerprintDiff: "d3",
+          reason: "design",
+          at: "2026-11-01T10:00:00Z",
+        }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // later delivery verdict exists but it is a pass, not a fail
+    fact({
+      taskId: "FP3",
+      verdicts: [
+        vRow({ fingerprint: "c-pass-3", fingerprintDiff: "d4", at: "2026-11-01T09:00:00Z" }),
+        vRow({ squad: "delivery", verdict: "PASS", round: 2, fingerprint: "c-ok-3", fingerprintDiff: "d4", at: "2026-11-01T10:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // the REVIEW pass tree is UNKNOWN (null diff) — UNKNOWN never matches
+    fact({
+      taskId: "FP4",
+      verdicts: [
+        vRow({ fingerprint: null, fingerprintDiff: null, at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: null,
+          fingerprintDiff: null,
+          reason: "ci",
+          at: "2026-11-01T10:00:00Z",
+        }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // no delivery verdict after the pass — outside the denominator entirely
+    fact({
+      taskId: "FP5",
+      verdicts: [vRow({ fingerprint: "c-pass-5", fingerprintDiff: "d5", at: "2026-11-01T09:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    // not provably REVIEW (squad unknown) — not a REVIEW pass round at all
+    fact({
+      taskId: "FP6",
+      verdicts: [
+        vRow({ squad: null, fingerprintDiff: "d6", at: "2026-11-01T09:00:00Z" }),
+        vRow({
+          squad: "delivery",
+          verdict: "FAIL",
+          round: 2,
+          fingerprint: "c-fail-6",
+          fingerprintDiff: "d6",
+          reason: "scope",
+          at: "2026-11-01T10:00:00Z",
+        }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, 1 / 4);
+  assert.equal(signal.numerator, 1);
+  assert.equal(signal.denominator, 4);
+  assert.deepEqual(signal.evidence, ["FP1"]);
+});
+
+test("quality: reviewFalsePass counts the pair a backfilled delivery fail names by source (round-N)", () => {
+  // FOC-1194: a backfilled delivery record carries the fingerprint of the round
+  // it contradicts (fingerprint.source "round-N"). Its recordedAt is the
+  // operator-typed truth of when it happened, so the round reference — not the
+  // clock — is the authoritative link to the pass. A delivery fail whose `at`
+  // orders it BEFORE the pass it names still falsifies that pass; a named fail
+  // whose diff axis does NOT match the pass still proves nothing (the tree must
+  // be the one the pass accepted).
+  const facts = [
+    fact({
+      taskId: "FP7",
+      verdicts: [
+        // the backfilled delivery fail, backdated before the pass it names —
+        // fingerprint copied verbatim from round 2: same combined, same diff
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", fingerprintSource: "round-2",
+          reason: "ci", at: "2026-11-01T08:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // named but the diff axis differs — UNKNOWN never matches, source alone
+    // does not falsify
+    fact({
+      taskId: "FP8",
+      verdicts: [
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-fail-8", fingerprintDiff: "d-other-8", fingerprintSource: "round-2",
+          reason: "design", at: "2026-11-01T08:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-8", fingerprintDiff: "d-pass-8", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, 1 / 2);
+  assert.equal(signal.numerator, 1);
+  assert.equal(signal.denominator, 2);
+  assert.deepEqual(signal.evidence, ["FP7"]);
+});
+
+test("quality: the named pairing is scoped to the record's run — round N of ANOTHER run never pairs", () => {
+  // r2 finding 1: facts.verdicts merges a task's rounds across every run in the
+  // window. A bare round number would pair a backfilled delivery with
+  // same-numbered review rounds of OTHER runs — the denominator inflates
+  // systematically in the multi-run backfill baseline. The named match needs
+  // the same runId; a row without one (legacy/unreadable) pairs positionally
+  // only.
+  const facts = [
+    fact({
+      taskId: "FP9",
+      verdicts: [
+        // the backfilled delivery fail — names round 2, but of run-other
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3, runId: "run-other",
+          fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", fingerprintSource: "round-2",
+          reason: "ci", at: "2026-11-01T08:00:00Z",
+        }),
+        // review pass round 2 — a DIFFERENT run's chain
+        vRow({ round: 2, runId: "run-fixture", fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, null, "a cross-run same-numbered round is not the pass this record contradicts");
+  assert.equal(signal.numerator, 0);
+  assert.equal(signal.denominator, 0);
+  assert.deepEqual(signal.evidence, []);
+});
+
+test("quality: ciRedAfterReady counts delivery fails citing reason ci", () => {
+  const facts = [
+    fact({
+      taskId: "C1",
+      verdicts: [vRow({ squad: "delivery", verdict: "FAIL", reason: "ci", at: "2026-11-01T10:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    fact({
+      taskId: "C2",
+      verdicts: [vRow({ squad: "delivery", verdict: "FAIL", reason: "design", at: "2026-11-01T10:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    fact({
+      taskId: "C3",
+      verdicts: [vRow({ squad: "delivery", verdict: "PASS", reason: null, at: "2026-11-01T10:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    // no delivery verdict — outside the denominator
+    fact({ taskId: "C4", verdicts: [vRow({ at: "2026-11-01T10:00:00Z" })], lastActivityAt: NOW - DAY }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "ciRedAfterReady");
+  assert.equal(signal.value, 1 / 3);
+  assert.equal(signal.numerator, 1);
+  assert.equal(signal.denominator, 3);
+  assert.deepEqual(signal.evidence, ["C1"]);
+});
+
+test("quality: the old firstTimeRight is unchanged by delivery verdicts in the chain", () => {
+  // A delivery verdict recorded at round 1 (no review happened) must not make
+  // the review signal look better: its denominator is review round-1 verdicts.
+  const facts = [
+    fact({
+      taskId: "R1",
+      verdicts: [vRow({ verdict: "PASS", squad: "review", at: "2026-11-01T09:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    fact({
+      taskId: "R2",
+      verdicts: [vRow({ verdict: "FAIL", squad: "review", at: "2026-11-01T09:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+    // delivery-only ticket — round 1 is a delivery PASS, never a review verdict
+    fact({
+      taskId: "D1",
+      verdicts: [vRow({ squad: "delivery", verdict: "PASS", round: 1, at: "2026-11-01T10:00:00Z" })],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "firstTimeRight");
+  assert.equal(signal.value, 1 / 2, "delivery verdicts leaked into the review firstTimeRight chain");
+  assert.equal(signal.numerator, 1);
+  assert.equal(signal.denominator, 2);
+});
+
+test("quality: the delivery signals are null when the denominator is 0", () => {
+  const payload = buildQualityPayload({
+    snapshot: snapshot(),
+    facts: [fact({ taskId: "R1", verdicts: [vRow({ at: "2026-11-01T09:00:00Z" })] })],
+    linearStates: {},
+    period: "all",
+    now: NOW,
+  });
+  for (const key of ["deliveryFirstTimeRight", "reviewFalsePass", "ciRedAfterReady"]) {
+    const signal = payload.signals.find((s) => s.key === key);
+    assert.equal(signal.value, null, key);
+    assert.equal(signal.denominator, 0, key);
+    assert.deepEqual(signal.evidence, [], key);
+  }
+});
+
 test("definitions: every contract key is present and non-empty", () => {
   for (const key of [
     "childrenPerTicket",
@@ -528,6 +826,9 @@ test("definitions: every contract key is present and non-empty", () => {
     "supervisorShare",
     "attribution",
     "firstTimeRight",
+    "deliveryFirstTimeRight",
+    "reviewFalsePass",
+    "ciRedAfterReady",
     "reworkShare",
     "interventionsPerTicket",
     "landingYield",
@@ -537,4 +838,6 @@ test("definitions: every contract key is present and non-empty", () => {
     assert.equal(typeof DEFINITIONS[key], "string", key);
     assert.ok(DEFINITIONS[key].length > 0, key);
   }
+  // The rename: the old signal's definition says what it always measured.
+  assert.match(DEFINITIONS.firstTimeRight, /review first-time-right/i);
 });
