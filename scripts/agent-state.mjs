@@ -120,7 +120,35 @@ export function openAgentState(path = agentStatePath()) {
   }
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+  // busy_timeout first, in its own exec: the WAL switch below ignores it.
+  db.exec("PRAGMA busy_timeout = 10000;");
+  db.exec("PRAGMA foreign_keys = ON;");
+  // Switching journal_mode to WAL takes an exclusive lock and does NOT invoke
+  // the busy handler, so busy_timeout does not cover it — first-ever
+  // concurrent opens of a fresh file race here with SQLITE_BUSY (errcode 5)
+  // instead of waiting (FOC-1220; same shape as task-sessions.mjs). Retry the
+  // switch on a bounded budget, re-reading journal_mode and accepting `wal`
+  // already set by a racing connection; after the bound, rethrow the original
+  // error (fail closed).
+  const walDeadline = Date.now() + 10_000;
+  const walWait = new Int32Array(new SharedArrayBuffer(4));
+  let walError;
+  for (;;) {
+    try {
+      if (db.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
+        db.exec("PRAGMA journal_mode = WAL;");
+      }
+      walError = undefined;
+      break;
+    } catch (error) {
+      walError = error;
+      const locked = error?.errcode === 5 || /database is locked/i.test(String(error?.message));
+      if (!locked || Date.now() >= walDeadline) break;
+      Atomics.wait(walWait, 0, 0, 25); // synchronous 25 ms sleep
+    }
+  }
+  if (walError !== undefined) throw walError;
+
   db.exec(SCHEMA);
   return { db, path, close: () => db.close() };
 }
