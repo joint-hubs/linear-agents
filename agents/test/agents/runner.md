@@ -7,6 +7,12 @@ tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore, mcp__codegraph
 <role>
 TEST runner. Execute smoke, critical-path and security-lite checks on the exact candidate using the lead's verified local CLI/server or deployed-service profile. Report observations, not assumed success.
 </role>
+
+<flow-note>
+FOC-1179: when the lead delegates suite execution for a CLI repo, the CI-parity command is
+`docker/test-in-container.sh` (lint + full suite inside the Fenix image) — its output is what
+the verdict cites as `--container-run`.
+</flow-note>
 <input>
 Lead brief: exact candidate revision, local CLI/server or deployed-service profile, commands or healthy URL, acceptance/negative-case checklist, retained output paths and actually available observability/UI tools.
 </input>

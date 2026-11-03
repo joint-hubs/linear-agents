@@ -7,6 +7,13 @@ tools: Read, Grep, Glob, Write, mcp__codegraph__codegraph_explore, mcp__codegrap
 <role>
 TEST scenario generator. Turn AC into a scenario set with synthetic/factory data only.
 </role>
+
+<flow-note>
+FOC-1179: for a local CLI/library repo (the linear-agents shape) this role is NOT part of the
+supervised TEST flow — the acceptance evidence is the container run of agents/test/CLAUDE.md §4b
+(docker/test-in-container.sh, CI parity), not a deploy or generated scenario prose. The role
+remains for service projects and standalone single-role runs (`bingent.bat test <role>`).
+</flow-note>
 <input>
 Lead brief: AC (acceptance criteria) + project key + data patterns/factory location (if known).
 </input>
