@@ -40,7 +40,7 @@ export const DEFINITIONS = {
   deliveryFirstTimeRight:
     "Share of tickets whose first delivery verdict is PASS, among tickets with any delivery verdict.",
   reviewFalsePass:
-    "Share of REVIEW PASS rounds followed by a delivery FAIL on the same work tree (the fingerprint's diff axis), among REVIEW PASS rounds that have a later delivery verdict — or one that names the round explicitly (a backfilled record's fingerprint source \"round-N\"; the round reference, not the backdated clock, is the link). Counted in rounds, not tickets. The declared failing-test axis is excluded from the match — it is a per-verdict declaration (a delivery fail always declares one, so the combined hashes could never compare equal), not part of work identity.",
+    "Share of REVIEW PASS rounds followed by a delivery FAIL on the same work tree (the fingerprint's diff axis), among REVIEW PASS rounds that have a later delivery verdict — or one that names the round explicitly (a backfilled record's fingerprint source \"round-N\", or a live record's contradicts block when a merge of the base branch was the only change since the pass — FOC-1210; the round reference, not the backdated clock, is the link). Counted in rounds, not tickets. The declared failing-test axis is excluded from the match — it is a per-verdict declaration (a delivery fail always declares one, so the combined hashes could never compare equal), not part of work identity.",
   ciRedAfterReady:
     "Share of tickets with a delivery FAIL citing reason \"ci\" (a CI red after READY TO PUSH), among tickets with any delivery verdict.",
   reworkShare:
@@ -368,10 +368,11 @@ export function buildQualityPayload({
   // reviewFalsePass — REVIEW PASS rounds followed by a delivery FAIL on the
   // same WORK TREE (the fingerprint's diff axis), among REVIEW PASS rounds that
   // have a later delivery verdict — or one that NAMES the round explicitly
-  // (fingerprintSource "round-N", FOC-1194): a backfilled delivery record's
-  // recordedAt is the operator-typed truth of when it happened, so the round
-  // reference, not the clock, is the authoritative link to the pass it
-  // contradicts. Counted in ROUNDS, not tickets: the unit a review pass is
+  // (fingerprintSource "round-N", FOC-1194 backfill; contradictsRound, FOC-1210
+  // live base-merge): a backfilled delivery record's recordedAt is the
+  // operator-typed truth of when it happened, so the round reference, not the
+  // clock, is the authoritative link to the pass it contradicts. Counted in
+  // ROUNDS, not tickets: the unit a review pass is
   // falsified in. NOT the combined hash: it folds the declared failing-test
   // axis into the identity, and a delivery fail always declares one — on
   // combined, the CI red after READY (the signal's motivating case) could never
@@ -391,7 +392,10 @@ export function buildQualityPayload({
           rows.filter(
             (v) =>
               v.squad === "delivery" &&
-              v.fingerprintSource === `round-${row.round}` &&
+              // FOC-1194 backfill (fingerprintSource "round-N") and the
+              // FOC-1210 live base-merge route (contradictsRound) both NAME
+              // the round — the round reference, not the clock, is the link.
+              (v.fingerprintSource === `round-${row.round}` || v.contradictsRound === row.round) &&
               // r2 finding 1: the source names a round WITHIN the record's own
               // run — one task's rows merge across every run in the window, so
               // a bare round number would pair same-numbered review rounds of
@@ -405,7 +409,12 @@ export function buildQualityPayload({
       const contradicted = [...new Set([...later, ...named])];
       if (!contradicted.length) return;
       contradictedRounds += 1;
-      if (contradicted.some((v) => v.verdict === "FAIL" && v.fingerprintDiff != null && v.fingerprintDiff === row.fingerprintDiff)) {
+      // FOC-1210: the diff axis a row pairs on. A contradicts row's OWN
+      // fingerprint is the tree as it is NOW (the base merge moved it, which
+      // is why the flag exists) — the COPY in `contradicts` is what pairs with
+      // the pass. Every other row pairs on its own fingerprintDiff.
+      const pairsOn = (v) => (v.contradictsRound === row.round ? v.contradictsDiff : v.fingerprintDiff);
+      if (contradicted.some((v) => v.verdict === "FAIL" && pairsOn(v) != null && pairsOn(v) === row.fingerprintDiff)) {
         falsePassRounds += 1;
         falsePassTasks.push(f.taskId);
       }

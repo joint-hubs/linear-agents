@@ -339,6 +339,12 @@ export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 3
           // (fingerprint.source "round-N"). null on every other record — the
           // quality signal pairs this with the named review round.
           fingerprintSource: record.unreadable ? null : record.fingerprint?.source ?? null,
+          // FOC-1210: the live base-merge route — the record keeps its own
+          // (now-tree) fingerprint and carries the contradicted pass's
+          // fingerprint in `contradicts`. The signal pairs on the COPY's diff
+          // axis; null on every record without the block.
+          contradictsRound: record.unreadable ? null : record.contradicts?.round ?? null,
+          contradictsDiff: record.unreadable ? null : record.contradicts?.fingerprint?.diff ?? null,
           // FOC-1194 r2: the record's run — the named pairing scopes "round-N"
           // to this run, so cross-run same-numbered rounds never pair. null
           // (legacy/unreadable) pairs positionally only.

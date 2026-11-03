@@ -88,6 +88,7 @@ import {
   failJson,
   isPathSafeRunId,
   latestVerdict,
+  mergeOnlySincePass,
   normalizeFailingTests,
   parseArgs,
   producerOf,
@@ -1330,14 +1331,18 @@ function cmdRecordDelivery(args) {
   // child's tree as it is NOW — for a removed tree (most of the 2026-11-01/02
   // baseline) that is diff: null, an UNKNOWN that matches nothing, and the
   // reviewFalsePass pair is uncountable. Naming the round copies the
-  // fingerprint that round judged. Outside --backfill the flag is refused the
-  // same way --recorded-at is: a live record's "now" fingerprint is the honest
-  // one, and the flag without the backfill admission would be provenance
-  // nobody asked for.
+  // fingerprint that round judged.
+  //
+  // FOC-1210: the flag now also works on a LIVE record — the FOC-1179 case.
+  // Merging main into the work branch between the REVIEW pass and the delivery
+  // read is a normal step of the flow (plan §4b), and it moves the diff axis
+  // the live fingerprint computes, so the pair is uncountable by the metric
+  // even though the delivered work is exactly what the pass judged. A live
+  // record keeps its own "now" fingerprint and ADDITIONALLY carries the pass's
+  // fingerprint in `contradicts` — but only once merge-only is PROVEN
+  // (mergeOnlySincePass below); anything it cannot prove is refused, never
+  // guessed, because a copied fingerprint mislabels whose defect it was.
   const contradictsArg = args["contradicts-round"];
-  if (contradictsArg !== undefined && !backfill) {
-    failJson("--contradicts-round is accepted only together with --backfill — a live record fingerprints the tree as it is now");
-  }
   // r2 finding 4 — decision journaled: the flag is a FAIL's provenance. A
   // delivery pass contradicts nothing; accepting it would put named delivery
   // passes into the quality signal's contradicted set with nothing to falsify.
@@ -1368,6 +1373,9 @@ function cmdRecordDelivery(args) {
     producer: "dev",
   });
   let fingerprint;
+  // FOC-1210: live base-merge provenance — set only on the live contradicts
+  // route, after mergeOnlySincePass proves it.
+  let contradicts = null;
   if (contradictsArg !== undefined) {
     // The named round must exist in THIS run's chain, be readable, and carry a
     // diff: a copy of null would silently match nothing — exactly the UNKNOWN
@@ -1400,15 +1408,56 @@ function cmdRecordDelivery(args) {
       failJson(`round ${n} of ${taskId} has no diff on its fingerprint — nothing to contradict (its tree was already UNKNOWN)`);
     }
     const { diff, tests, combined, changedFiles, failingTests: namedTests } = named.fingerprint;
-    fingerprint = { diff, tests, combined, changedFiles, failingTests: namedTests, source: `round-${n}` };
-    warnings.push(`fingerprint copied from round ${n} of ${taskId} (--contradicts-round ${n}) — the tree as that round judged it, not the tree now`);
-    // r2 finding 3: the FOC-220-gated declaration must not vanish — the copy
-    // supersedes the fingerprint's failing-tests axis with round N's, so the
-    // operator's own words carry separately on the record.
-    if (failingTests.length) {
+    if (backfill) {
+      fingerprint = { diff, tests, combined, changedFiles, failingTests: namedTests, source: `round-${n}` };
+      warnings.push(`fingerprint copied from round ${n} of ${taskId} (--contradicts-round ${n}) — the tree as that round judged it, not the tree now`);
+      // r2 finding 3: the FOC-220-gated declaration must not vanish — the copy
+      // supersedes the fingerprint's failing-tests axis with round N's, so the
+      // operator's own words carry separately on the record. (The live route
+      // keeps its own fingerprint, so the declaration lives inside it and
+      // needs no separate carrier.)
+      if (failingTests.length) {
+        warnings.push(
+          `the --failing-test declaration (${failingTests.join(", ")}) is recorded as declaredFailingTests — ` +
+            `the fingerprint's failing-tests axis is round ${n}'s, superseded by the copy`,
+        );
+      }
+    } else {
+      // FOC-1210 live route: keep the tree as it is NOW and prove that the
+      // only change since the pass is a merge of the base branch. Fail closed
+      // — a copy written without the proof would mislabel a later DEV round's
+      // defect as the reviewer's miss.
+      if (changedFiles > 0) {
+        failJson(
+          `--contradicts-round ${n} refused on a live record: round ${n} of ${taskId} judged a tree with ` +
+            `${changedFiles} uncommitted change(s) — uncommitted state cannot be reproduced from history, ` +
+            `so merge-only cannot be proven; refusing`,
+        );
+      }
+      const proof = mergeOnlySincePass({
+        worktree: workChild.worktree,
+        baseRevision: workChild.baseRevision,
+        passDiff: diff,
+      });
+      if (!proof.ok) {
+        failJson(`--contradicts-round ${n} refused on a live record: ${proof.error}`, {
+          hint: "record without --contradicts-round, or backfill the record with --backfill --recorded-at",
+        });
+      }
+      fingerprint = progressFingerprint({
+        worktree: workChild.worktree,
+        baseRevision: workChild.baseRevision,
+        failingTests,
+      });
+      if (fingerprint.error) warnings.push(`fingerprint is UNKNOWN: ${fingerprint.error}`);
+      // resolveWorkChild fails closed, so workChild here is always the registry's
+      // dev child — name it, the way the review record does.
+      warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under delivery review`);
+      contradicts = { round: n, reason: "base-merge", fingerprint: { ...named.fingerprint } };
       warnings.push(
-        `the --failing-test declaration (${failingTests.join(", ")}) is recorded as declaredFailingTests — ` +
-          `the fingerprint's failing-tests axis is round ${n}'s, superseded by the copy`,
+        `live --contradicts-round ${n}: only merges of the base branch landed since the pass ` +
+          `(base-merge, pass tree ${String(proof.passTip).slice(0, 12)}) — the fingerprint above is the tree as it is NOW; ` +
+          `the copy that pairs with the pass is in contradicts`,
       );
     }
   } else {
@@ -1448,8 +1497,12 @@ function cmdRecordDelivery(args) {
     // r2 finding 3: on the copy path the record's fingerprint is round N's —
     // the operator's own declaration carries here instead (empty on a fail is
     // impossible: the FOC-220 gate forces --failing-test or --no-failing-tests,
-    // and the latter keeps its noFailingTests carrier).
-    ...(contradictsArg !== undefined && failingTests.length ? { declaredFailingTests: failingTests } : {}),
+    // and the latter keeps its noFailingTests carrier). The live contradicts
+    // route keeps its own fingerprint, so the declaration is inside it.
+    ...(contradictsArg !== undefined && backfill && failingTests.length ? { declaredFailingTests: failingTests } : {}),
+    // FOC-1210: the live base-merge route — the record's own fingerprint stays
+    // "now", the contradicted pass's fingerprint rides in `contradicts`.
+    ...(contradicts ? { contradicts } : {}),
     ...(declaredNone !== undefined ? { noFailingTests: { reason: declaredNone } } : {}),
     recordedAt,
   };

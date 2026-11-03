@@ -3031,6 +3031,98 @@ export function comparableProgress(a, b) {
 }
 
 /**
+ * FOC-1210: can the work branch's history prove that the only change since the
+ * tree a REVIEW pass judged is a merge of the base branch?
+ *
+ * No verdict record carries the commit sha it judged — but the pass's
+ * fingerprint.diff is a measurement of a TREE (the `git diff <base>` text over
+ * a clean tree, `progressFingerprint`'s exact hash shape), and merge commits
+ * keep their first parent. So: walk the branch's first-parent history from the
+ * tip back to the base, hash each commit's tree-vs-base diff the same way, and
+ * the FIRST commit that reproduces the pass's diff is the pass tree. Every
+ * commit NEWER than it on that walk must be a merge — a non-merge commit means
+ * the work itself changed after the pass, and a copied fingerprint would
+ * mislabel the defect's owner (the AC's refusal case).
+ *
+ * The criterion is tree state, not commit count: an empty commit does not move
+ * the tree the pass judged, and a squash-merge of main is a non-merge commit
+ * that does — it is refused, conservatively. Fail closed everywhere: no
+ * worktree, a git error, a dirty pass tree (its uncommitted state cannot be
+ * reproduced from history) or no reproducing commit at all (rebase, squash,
+ * base moved) each refuse rather than guess.
+ *
+ * Returns { ok: true, tip, passTip } or { ok: false, error }.
+ */
+export function mergeOnlySincePass({ worktree, baseRevision, passDiff } = {}) {
+  if (!worktree || !baseRevision || !passDiff || !existsSync(worktree)) {
+    return { ok: false, error: "the work child's tree or base revision is missing — merge-only cannot be proven from history" };
+  }
+  const run = (args) =>
+    spawnSync("git", childTreeGitArgs(args, worktree), { cwd: worktree, encoding: "utf8" });
+  const head = run(["rev-parse", "HEAD"]);
+  if (head.status !== 0) {
+    return { ok: false, error: (head.stderr || "").trim().split("\n")[0] || "git rev-parse HEAD failed in the work tree" };
+  }
+  const tip = head.stdout.trim();
+  // --parents gives the parent count in the same walk that gives the order:
+  // newest first, one line per commit, "sha parent [parent2]".
+  const log = run(["rev-list", "--first-parent", "--parents", `${baseRevision}..${tip}`]);
+  if (log.status !== 0) {
+    return { ok: false, error: (log.stderr || "").trim().split("\n")[0] || `git rev-list failed from ${baseRevision.slice(0, 12)} to ${tip.slice(0, 12)}` };
+  }
+  const chain = log.stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const [sha, ...parents] = line.split(" ");
+      return { sha, parents };
+    });
+  // Same hash shape as progressFingerprint over a CLEAN tree: the diff text
+  // plus an empty porcelain join. The pass tree must have been clean for this
+  // to be provable at all — checked by the caller off the record's changedFiles.
+  const treeDiffHash = (commit) => {
+    const r = run(["diff", baseRevision, commit]);
+    if (r.status !== 0) {
+      return { error: (r.stderr || "").trim().split("\n")[0] || `git diff ${String(commit).slice(0, 12)} failed` };
+    }
+    return { hash: createHash("sha256").update(`${r.stdout}\n`).digest("hex").slice(0, 12) };
+  };
+  // The base itself is the last candidate: a pass that judged the bare base
+  // tree (no work commits yet) is still a tree in this history.
+  const candidates = [...chain.map((c) => c.sha), baseRevision];
+  let passTip = null;
+  for (const c of candidates) {
+    const d = treeDiffHash(c);
+    if (d.error) return { ok: false, error: d.error };
+    if (d.hash === passDiff) {
+      passTip = c;
+      break;
+    }
+  }
+  if (!passTip) {
+    return {
+      ok: false,
+      error:
+        `no commit on the work branch's history from ${baseRevision.slice(0, 12)} to ${tip.slice(0, 12)} ` +
+        `reproduces the pass's diff — the pass tree is not in this history (rework, a squash, or a moved base); merge-only cannot be proven`,
+    };
+  }
+  const at = chain.findIndex((c) => c.sha === passTip);
+  // passTip == baseRevision is not in the chain — then every chain entry is newer.
+  const newer = at === -1 ? chain : chain.slice(0, at);
+  const nonMerge = newer.filter((c) => c.parents.length < 2);
+  if (nonMerge.length) {
+    return {
+      ok: false,
+      error:
+        `commit ${nonMerge[0].sha.slice(0, 12)} is a non-merge commit that landed after the pass tree (${passTip.slice(0, 12)}) — ` +
+        `the work changed since the pass, and a copied fingerprint would mislabel the defect's owner`,
+    };
+  }
+  return { ok: true, tip, passTip };
+}
+
+/**
  * Every recorded REVIEW verdict for one task, oldest first.
  *
  * Lives here rather than in supervisor-verdict.mjs because supervisor-followup
