@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -1437,6 +1437,76 @@ store.close();
       assert.equal(raceStore.db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
     } finally {
       raceStore.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent first open of a fresh store survives the WAL-switch race (FOC-1220 pin)", async () => {
+  // The WAL switch takes an exclusive lock and does not invoke the busy
+  // handler, so two processes opening the same FRESH file at the same instant
+  // can both attempt `journal_mode = WAL` and one dies with SQLITE_BUSY
+  // (errcode 5) at once. openAgentState must retry that transition on a
+  // bounded budget instead of failing the open. The existing
+  // "two concurrent writer processes" test above covers the loaded-store
+  // integration shape; this pin hammers the first-open race specifically,
+  // over enough iterations to make the window likely, not possible.
+  const iterations = 25;
+  const dir = tempRoot();
+  try {
+    // Each child records itself ready, then spins on the go file so both
+    // openAgentState calls land within the same few microseconds.
+    const driver = (dbPath, readyPath, goPath) => `
+import { openAgentState } from ${JSON.stringify(pathToFileURL(SCRIPT).href)};
+import { existsSync, writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(readyPath)}, "");
+while (!existsSync(${JSON.stringify(goPath)})) {}
+const store = openAgentState(${JSON.stringify(dbPath)});
+store.close();
+console.log("ok");
+`;
+    const run = (dbPath, readyPath, goPath) =>
+      new Promise((resolvePromise, rejectPromise) => {
+        const child = spawn(
+          process.execPath,
+          ["--input-type=module", "-e", driver(dbPath, readyPath, goPath)],
+          { stdio: ["ignore", "ignore", "pipe"] }
+        );
+        let errText = "";
+        child.stderr.on("data", (chunk) => {
+          errText += chunk;
+        });
+        child.on("close", (code) => resolvePromise({ code, errText }));
+        child.on("error", rejectPromise);
+      });
+
+    for (let i = 0; i < iterations; i++) {
+      const round = join(dir, `round-${String(i).padStart(2, "0")}`);
+      mkdirSync(round, { recursive: true });
+      const dbPath = join(round, "agent-state.sqlite");
+      const readyA = join(round, "ready-a");
+      const readyB = join(round, "ready-b");
+      const go = join(round, "go");
+
+      const pending = Promise.all([run(dbPath, readyA, go), run(dbPath, readyB, go)]);
+      // Wait for BOTH children to be parked on the spin, THEN release them —
+      // releasing before awaiting completion, or the pin deadlocks (the
+      // children only exit once they are released). A deadline keeps a
+      // crashed child from hanging the pin.
+      for (const ready of [readyA, readyB]) {
+        const deadline = Date.now() + 10_000;
+        while (!existsSync(ready)) {
+          if (Date.now() > deadline) {
+            throw new Error(`child never signalled ready (${ready})`);
+          }
+        }
+      }
+      writeFileSync(go, "");
+      const [a, b] = await pending;
+
+      assert.equal(a.code, 0, `iteration ${i}, opener A stderr: ${a.errText}`);
+      assert.equal(b.code, 0, `iteration ${i}, opener B stderr: ${b.errText}`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
