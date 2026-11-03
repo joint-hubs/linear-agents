@@ -16,7 +16,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,6 +105,44 @@ function countMarkerProcesses(marker) {
   }
   const r = spawnSync("ps", ["-eo", "args="], { encoding: "utf8", timeout: 15_000 });
   return (r.stdout || "").split("\n").filter((l) => l.includes(marker) && !l.startsWith("ps ")).length;
+}
+
+// Kill every process still carrying the test marker — the documented stop
+// predicate the campaign runner uses (scripts/stability-campaign.mjs). On
+// win32 that is the CIM sweep + taskkill /T /F; on POSIX a /proc cmdline
+// scan, because the test's own process table is the only portable surface.
+// Never signals this process (its argv carries no marker) and tolerates a
+// vanished pid between the scan and the kill.
+function killMarkerProcesses(marker) {
+  if (process.platform === "win32") {
+    spawnSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '${marker}' -and $_.Name -notmatch 'powershell|pwsh|cmd' } | ForEach-Object { taskkill /PID $($_.ProcessId) /T /F }`,
+      ],
+      { stdio: "ignore", windowsHide: true, timeout: 30_000 },
+    );
+    return;
+  }
+  let pids = [];
+  try {
+    pids = readdirSync("/proc")
+      .map(Number)
+      .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
+  } catch {
+    return; // no /proc — nothing to sweep by this predicate
+  }
+  for (const pid of pids) {
+    try {
+      const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ");
+      if (cmd.includes(marker)) process.kill(pid, "SIGKILL");
+    } catch {
+      /* gone between the scan and the kill — exactly what we wanted */
+    }
+  }
 }
 
 describe("row schema", () => {
@@ -497,14 +535,40 @@ describe("load generator lifecycle", () => {
       assert.doesNotMatch(out, /parentFailures/, "the forced kill must pre-empt the stdout summary — the heartbeat is the only evidence");
       assert.deepEqual(validateRow({ ...ROW, mode: "under-load", observedLoad: agg }), []);
     } finally {
-      if (gen.exitCode === null) {
-        try {
-          gen.kill();
-        } catch {
-          /* already gone */
+      // FOC-1232: the kill above does not empty the tree, and rmSync raced
+      // whatever still wrote into `dir` — under parallel load a recreated
+      // stats file between the walk's unlink and rmdir failed the test with
+      // ENOTEMPTY on the cleanup, not on an assertion. On POSIX the group
+      // kill aims at pgid == gen.pid, but gen was spawned WITHOUT detached,
+      // so that group does not exist (ESRCH): only the generator dies and
+      // its load parents (60 s budget) keep spawning burst children that
+      // rewrite the stats files. The cleanup therefore mirrors the
+      // campaign's own stop predicate — wait for the generator to exit,
+      // sweep whatever still carries the test marker, wait for zero, and
+      // only then remove the dir; maxRetries stays belt-and-braces.
+      if (gen.exitCode === null && gen.signalCode === null) {
+        await new Promise((res) => {
+          const timer = setTimeout(res, 5_000);
+          gen.once("close", () => {
+            clearTimeout(timer);
+            res();
+          });
+        });
+        if (gen.exitCode === null && gen.signalCode === null) {
+          try {
+            gen.kill();
+          } catch {
+            /* already gone */
+          }
         }
       }
-      rmSync(dir, { recursive: true, force: true });
+      for (let round = 0; round < 6; round++) {
+        const n = await countWithRetry(TEST_MARKER, 2);
+        if (n === 0) break;
+        killMarkerProcesses(TEST_MARKER);
+        await sleep(500);
+      }
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });
