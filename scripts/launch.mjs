@@ -81,7 +81,7 @@ export const DEFAULT_KICKOFF_TEMPLATES = {
     'Zdeployuj i przetestuj {taskId} (stage:testing) wg swojego CLAUDE.md (sekcja Pętla).',
     'Target deployu z config/projects.json, health-check obowiązkowy,',
     'przy failu auto-rollback. Dane testowe syntetyczne (żadnego prod PII).',
-    'Pass TEST cykuje przebieg w kontenerze Fenix (docker/test-in-container.sh, jak CI): bez --container-run jest odrzucony, gdy docker działa; bez dockera podaj powód jako --container-unavailable (FOC-1179).',
+    'Pass TEST cytuje przebieg w kontenerze Fenix (docker/test-in-container.sh, jak CI): bez --container-run jest odrzucony, gdy docker działa; bez dockera podaj powód jako --container-unavailable (FOC-1179).',
   ],
   cadence: [
     'Tygodniowy przebieg CADENCE wg swojego CLAUDE.md: collector → retro → digest.',

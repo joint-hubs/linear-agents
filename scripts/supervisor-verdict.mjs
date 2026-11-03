@@ -1015,6 +1015,20 @@ function cmdRecord(args) {
       const docker = dockerAvailability();
       warnings.push(`container run skipped — docker probe: ${docker.detail}`);
     }
+    if (containerRun && containerRun.exit !== 0) {
+      // Delivery r4: the gate checked the citation's shape and the file's
+      // existence, never the exit — so a pass citing fenix:dev exit 125
+      // (image name mismatch) recorded ok. A pass whose only container
+      // evidence is red contradicts itself — the red-first-not-red class
+      // FOC-1170 refuses for --red-first. On a FAIL the exit stays verbatim:
+      // red evidence on a fail is the report doing its job.
+      failJson(
+        `container-run-not-green: a TEST pass cites a container run that exited ` +
+          `${containerRun.exit} — a pass whose container evidence is red contradicts itself; ` +
+          `fix the suite or record a fail`,
+        { exit: containerRun.exit, hint: "fix the suite or record a fail" },
+      );
+    }
   }
 
   // ── FOC-449: explicit decision provenance ───────────────────────────────────

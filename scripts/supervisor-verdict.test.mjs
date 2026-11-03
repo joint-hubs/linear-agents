@@ -521,10 +521,10 @@ const testPassArgs = (s) => [
   "--issue-file", issueFile(s.base, 1),
   "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
 ];
-const containerRunFlag = (s, name = "container-output.txt", body = "74 passed, 0 failed\n") => {
+const containerRunFlag = (s, name = "container-output.txt", body = "74 passed, 0 failed\n", exit = 0) => {
   const path = join(s.worktree, name);
   writeFileSync(path, body, "utf8");
-  return JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 0, outputRef: path });
+  return JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit, outputRef: path });
 };
 
 test("a test pass without a container run is refused when docker is available (test-pass-without-container-run)", () => {
@@ -659,6 +659,40 @@ test("a --container-run cited on a fail still has to point at real output", () =
   ]);
   assert.equal(out.ok, false);
   assert.match(out.error, /evidence-outputRef-missing/);
+});
+
+test("a test pass whose only container evidence is a RED run is refused (container-run-not-green)", () => {
+  // Delivery r4: both reviews honestly cited fenix:dev exit 125 (image name
+  // mismatch, since fixed on the host) — and the pass gate waved the record
+  // through, because it checked the citation's shape and the file's
+  // existence, never the exit. A pass whose only container evidence is red
+  // contradicts itself — the red-first-not-red class FOC-1170 already
+  // refuses for --red-first.
+  const s = testScenario();
+  const out = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-run", containerRunFlag(s, "container-red.txt", "docker: Error response from daemon: No such image\n", 125),
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /container-run-not-green/);
+  assert.match(out.error, /fix the suite or record a fail/);
+});
+
+test("a --container-run cited on a fail keeps its exit verbatim — red evidence on a fail is honest", () => {
+  // The asymmetry the refusal must keep: a FAIL verdict citing a red run is
+  // the report doing its job, so the exit lands in the record exactly as the
+  // child asserted it.
+  const s = testScenario();
+  const ref = join(s.worktree, "container-fail-red.txt");
+  writeFileSync(ref, "docker: Error response from daemon: No such image\n", "utf8");
+  const out = testRecord(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--container-run", JSON.stringify({ cmd: "sh /src/docker/test-in-container.sh", exit: 125, outputRef: ref }),
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.containerRun.exit, 125);
 });
 
 // ── 3. the fingerprint ───────────────────────────────────────────────────────
