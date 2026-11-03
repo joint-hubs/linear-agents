@@ -927,13 +927,18 @@ function startAnalysisCacheBuild() {
   }, analysisBuildTimeoutMs());
   // Both handlers clear `building` — it must never stick at true, or every
   // later rebuild would 409 forever.
-  child.on('error', (err) => {
+  const recordChildError = (err) => {
     clearTimeout(watchdog);
     analysisBuildState.building = false;
     build.finishedAt = new Date().toISOString();
     build.ok = false;
     build.error = String(err?.message ?? err).slice(-2048);
-  });
+  };
+  child.on('error', recordChildError);
+  // FOC-1207: the piped stderr socket can itself emit 'error' (win32 read
+  // ENOTCONN) while the child is being constructed — record it through the
+  // same path so it cannot escape uncaught and kill the server.
+  child.stderr.on('error', recordChildError);
   child.on('exit', (code) => {
     clearTimeout(watchdog);
     if (timedOut) return; // the watchdog already recorded the timeout
@@ -2768,6 +2773,35 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 // ---------------------------------------------------------------------------
+// FOC-1207 — child-stdio socket error guard
+// ---------------------------------------------------------------------------
+
+// A child's stdio socket can emit 'error' (win32: read ENOTCONN, errno -4053)
+// while execFile is still constructing the child — before any listener exists,
+// so neither the execFile callback nor a try/catch sees it, and Node's default
+// uncaught-exception path tears the whole server down. The guard recognizes
+// ONLY that shape and keeps serving; every other uncaught error keeps today's
+// behavior: print the error and exit non-zero.
+const CHILD_STDIO_STACK_RE = /node:(?:internal\/)?child_process/;
+
+function isChildStdioSocketError(err) {
+  return Boolean(err)
+    && (err.code === 'ENOTCONN' || err.code === 'ECONNRESET')
+    && err.syscall === 'read'
+    && typeof err.stack === 'string'
+    && CHILD_STDIO_STACK_RE.test(err.stack);
+}
+
+process.on('uncaughtException', (err) => {
+  if (isChildStdioSocketError(err)) {
+    console.error(`[telemetry] ignored a child-stdio socket error (syscall=${err.syscall} code=${err.code}) — keeping the server up`);
+    return;
+  }
+  console.error(err);
+  process.exit(1);
+});
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 
@@ -2778,6 +2812,32 @@ server.listen(PORT, HOST, () => {
       ? `Telemetry server listening on http://${HOST}:${PORT} (loopback only — POST /api/launch is local-only, §5)`
       : `Telemetry server listening on http://${HOST}:${PORT} (container bind — published on the host's 127.0.0.1 only; write endpoints accept loopback and the network gateway, FOC-800)`,
   );
+
+  // FOC-1207 TEST-ONLY hook (same NODE_ENV gate as LA_ANALYSIS_BUILD_CMD_TEST):
+  // LA_UNCAUGHT_CHILD_STDIO_TEST=<match|foreign>[:delayMs] throws one synthetic
+  // uncaught error once the server is listening, so the guard test
+  // (scripts/child-stdio-guard.test.mjs) can drive the uncaughtException path
+  // deterministically — the real win32 child-stdio race cannot be reproduced
+  // on demand. 'match' carries the exact shape the guard recognizes (read
+  // syscall, ENOTCONN, stack through child_process internals); 'foreign'
+  // fails the predicate and must still exit non-zero.
+  if (process.env.NODE_ENV === 'test' && process.env.LA_UNCAUGHT_CHILD_STDIO_TEST) {
+    const [kind, delayRaw] = process.env.LA_UNCAUGHT_CHILD_STDIO_TEST.split(':');
+    const delay = Number.parseInt(delayRaw, 10) || 500;
+    setTimeout(() => {
+      const err = kind === 'foreign'
+        ? Object.assign(new Error('read EIO'), {
+          code: 'EIO', errno: -5, syscall: 'read',
+          stack: 'Error: read EIO\n    at Socket._read (node:internal/net:950:19)',
+        })
+        : Object.assign(new Error('read ENOTCONN'), {
+          code: 'ENOTCONN', errno: -4053, syscall: 'read',
+          stack: 'Error: read ENOTCONN\n    at Socket._read (node:internal/child_process:582:19)\n'
+            + '    at tryReadStart (node:internal/child_process:573:19)',
+        });
+      throw err;
+    }, delay).unref();
+  }
 
   void bootstrapTelemetry().catch((error) => console.error(`[telemetry] bootstrap failed: ${error.message}`));
   // FOC-808: the default cadence stays 15 s; the env seam exists for the

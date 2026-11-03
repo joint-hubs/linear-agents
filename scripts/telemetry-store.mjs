@@ -1557,6 +1557,15 @@ function gitFactsPut(cwd, facts) {
   gitFactsCache.set(cwd, { facts, at: Date.now() });
 }
 
+// Test seam (FOC-1207): the stream-guard test swaps execFile for a fake-child
+// factory; production keeps the real child_process.execFile.
+const gitFactsDeps = { execFile };
+
+/** Swap warmGitFacts' process dependency for tests. */
+export function setGitFactsDeps(overrides = {}) {
+  Object.assign(gitFactsDeps, overrides);
+}
+
 // Prefetch git facts for `cwds` using non-blocking child processes. Resolves
 // once every missing cwd is in the cache; failures (non-repo paths, missing
 // git) resolve to the same unknown-shape the synchronous path produces.
@@ -1581,9 +1590,16 @@ export async function warmGitFacts(cwds) {
     const outputs = [];
     for (const args of GIT_FACTS_ARGS) {
       outputs.push(await new Promise((resolve) => {
-        execFile("git", args, { cwd, encoding: "utf8", windowsHide: true }, (error, stdout) => {
+        const child = gitFactsDeps.execFile("git", args, { cwd, encoding: "utf8", windowsHide: true }, (error, stdout) => {
           resolve(error ? null : String(stdout).trim() || null);
         });
+        // FOC-1207: a child-stdio socket can emit 'error' while the child is
+        // still being constructed (win32 read ENOTCONN) — before the execFile
+        // callback exists — and without a listener it escapes as an uncaught
+        // event that kills the server. Resolve null on it: the same outcome
+        // the callback's error path already produces for a failed spawn.
+        child.stdout.on("error", () => resolve(null));
+        child.stderr.on("error", () => resolve(null));
       }));
       await new Promise((resolve) => setImmediate(resolve));
     }
