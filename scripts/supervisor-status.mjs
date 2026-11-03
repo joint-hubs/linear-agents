@@ -306,6 +306,23 @@ function noteStrayWorktrees(snap) {
   }
 }
 
+// FOC-1222: the human counterpart of the `dirtyExit` entry flag — a DEV child
+// that ended READY with uncommitted work (run f43c: REVIEW/TEST copied its
+// tree byte for byte). Same channel as the notes above: stderr, because stdout
+// is the JSON the Supervisor parses. Cleanup is still the lead's call.
+function noteDirtyExit(snap) {
+  for (const c of snap.children) {
+    if (c.dirtyExit?.files) {
+      console.error(
+        `dirty exit: ${c.childId} ended READY with ${c.dirtyExit.count} uncommitted change(s) — ` +
+          `the candidate was never committed; see scripts/supervisor-cleanup.mjs before reusing the worktree`,
+      );
+    } else if (c.dirtyExit?.unknown) {
+      console.error(`dirty exit: ${c.childId} worktree could not be checked (${c.dirtyExit.unknown})`);
+    }
+  }
+}
+
 function snapshot(runId, { childFilter, tail }) {
   const registry = readRegistry(runId);
   const now = Date.now();
@@ -619,6 +636,9 @@ if (args.briefing) {
             status: c.status,
             lastTurnEndedAt: last?.endedAt ?? null,
             lastTurnExitCode: last?.exitCode ?? null,
+            // FOC-1222: the dirt flag rides the brief too — a READY-looking
+            // `exited` with a dirtyExit is not a hand-off, it is a copy risk.
+            dirtyExit: c.dirtyExit ?? null,
           };
         }),
       },
@@ -693,6 +713,7 @@ if (!args.wait) {
   noteIsolation(snap);
   noteModelDrift(snap.children);
   noteStrayWorktrees(snap);
+  noteDirtyExit(snap);
   console.log(JSON.stringify(snap, null, 2));
   process.exit(0);
 }
@@ -797,6 +818,7 @@ noteUnverifiedCost(final);
 noteIsolation(final);
 noteModelDrift(final.children);
 noteStrayWorktrees(final);
+noteDirtyExit(final);
 
 console.log(
   JSON.stringify(

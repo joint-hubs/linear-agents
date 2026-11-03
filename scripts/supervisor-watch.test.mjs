@@ -22,7 +22,7 @@
 // Run: node scripts/supervisor-watch.test.mjs
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -36,6 +36,7 @@ import {
   installEnvFileSignalHandlers,
   parseWin32ProcessTable,
   readRegistry,
+  readWakeQueue,
   reapChildDescendants,
   rememberChildLineage,
   runDir,
@@ -2113,6 +2114,116 @@ if (process.platform !== "win32") {
 } else {
   console.log("SKIP foreign-env-mark sweep guard — win32 has no /proc environ for this fixture to sweep");
 }
+
+// ── FOC-1222: a DEV child that ends READY on a dirty tree is flagged ──────────
+console.log("\nFOC-1222: brudne wyjście DEV jest oflagowane");
+
+function fixtureGitRepo(dirty) {
+  const repo = join(base, `wt-foc-1222-${dirty ? "dirty" : "clean"}-${process.pid}`);
+  mkdirSync(repo, { recursive: true });
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-b", "main");
+  git("config", "user.email", "test@example.com");
+  git("config", "user.name", "test");
+  writeFileSync(join(repo, "README.md"), "fixture\n");
+  git("add", "-A");
+  git("commit", "-m", "init");
+  if (dirty) writeFileSync(join(repo, "README.md"), "dirty\n");
+  return repo;
+}
+
+function fixtureChildAt(runId, worktree, squad = "dev") {
+  ensureRunDir(runId);
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "dev-1": {
+        childId: "dev-1",
+        squad,
+        taskId: "FOC-999",
+        status: "starting",
+        sessionId: null,
+        costUsd: 0,
+        turns: [],
+        worktree,
+        permissionMode: "bypassPermissions",
+      },
+    },
+    rounds: {},
+  });
+}
+
+const dirtyRepo = fixtureGitRepo(true);
+const runIdDirty = `test-watch-dirty-exit-${process.pid}`;
+fixtureChildAt(runIdDirty, dirtyRepo);
+const resultDirty = runWatcher(runIdDirty, [], {
+  FAKE_ARGV_PATH: join(base, "argv-dirty-exit.json"),
+  FAKE_SESSION_ID: `watch-dirty-${process.pid}`,
+});
+
+const cleanRepo = fixtureGitRepo(false);
+const runIdClean = `test-watch-clean-exit-${process.pid}`;
+fixtureChildAt(runIdClean, cleanRepo);
+const resultClean = runWatcher(runIdClean, [], {
+  FAKE_ARGV_PATH: join(base, "argv-clean-exit.json"),
+  FAKE_SESSION_ID: `watch-clean-${process.pid}`,
+});
+
+const runIdGone = `test-watch-gone-exit-${process.pid}`;
+fixtureChildAt(runIdGone, join(base, "no-such-worktree"));
+const resultGone = runWatcher(runIdGone, [], {
+  FAKE_ARGV_PATH: join(base, "argv-gone-exit.json"),
+  FAKE_SESSION_ID: `watch-gone-${process.pid}`,
+});
+
+const runIdReview = `test-watch-review-exit-${process.pid}`;
+fixtureChildAt(runIdReview, dirtyRepo, "review");
+const resultReview = runWatcher(runIdReview, [], {
+  FAKE_ARGV_PATH: join(base, "argv-review-exit.json"),
+  FAKE_SESSION_ID: `watch-review-${process.pid}`,
+});
+
+test("FOC-1222: a DEV child that exits READY on a dirty tree is flagged dirtyExit", () => {
+  assert.equal(resultDirty.status, 0, `watcher exit ${resultDirty.status}: ${resultDirty.stderr}`);
+  const entry = readRegistry(runIdDirty).children["dev-1"];
+  assert.equal(entry.status, "exited", "the flag rides an exited child, not a new status");
+  assert.ok(entry.dirtyExit, "no dirtyExit flag on a DEV child that left tracked changes behind");
+  assert.ok(
+    entry.dirtyExit.files.some((f) => /M\s+README\.md/.test(f)),
+    `dirtyExit.files lacks the tracked change: ${JSON.stringify(entry.dirtyExit)}`,
+  );
+  assert.equal(entry.dirtyExit.count, 1);
+  assert.ok(entry.dirtyExit.at);
+});
+
+test("FOC-1222: the exit wake row carries the dirty note", () => {
+  const rows = readWakeQueue(runIdDirty).filter((r) => r.event === "exit");
+  assert.equal(rows.length, 1, `expected one exit row: ${JSON.stringify(rows)}`);
+  assert.ok(rows[0].detail?.dirtyExit, `the exit wake row carries no dirty note: ${JSON.stringify(rows[0])}`);
+  assert.equal(rows[0].detail.dirtyExit.count, 1);
+});
+
+test("FOC-1222: a clean DEV exit carries no dirtyExit flag", () => {
+  assert.equal(resultClean.status, 0, `watcher exit ${resultClean.status}: ${resultClean.stderr}`);
+  const entry = readRegistry(runIdClean).children["dev-1"];
+  assert.equal(entry.status, "exited");
+  assert.equal(entry.dirtyExit, undefined, "a clean tree must not be flagged");
+});
+
+test("FOC-1222: a missing worktree records the check as UNKNOWN, not as dirt", () => {
+  assert.equal(resultGone.status, 0, `watcher exit ${resultGone.status}: ${resultGone.stderr}`);
+  const entry = readRegistry(runIdGone).children["dev-1"];
+  assert.equal(entry.status, "exited");
+  assert.ok(entry.dirtyExit?.unknown, `an unreadable worktree must record UNKNOWN: ${JSON.stringify(entry.dirtyExit)}`);
+  assert.equal(entry.dirtyExit.files, undefined, "UNKNOWN must never look like a file list");
+});
+
+test("FOC-1222: a REVIEW child's dirty tree is not flagged (scope: dev)", () => {
+  assert.equal(resultReview.status, 0, `watcher exit ${resultReview.status}: ${resultReview.stderr}`);
+  const entry = readRegistry(runIdReview).children["dev-1"];
+  assert.equal(entry.status, "exited");
+  assert.equal(entry.dirtyExit, undefined, "REVIEW/TEST exit clean by contract — no flag on their dirt");
+});
 
 console.log("");
 await Promise.all(pending);
