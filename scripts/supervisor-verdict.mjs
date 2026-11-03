@@ -13,7 +13,7 @@
 //   node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n
 //        --verdict pass|fail --reason <design|evidence|test-gap|ci|scope|other>
 //        [--finding '<json>' ...] [--work-child <id>] [--round N]
-//        [--recorded-at <iso> --backfill] [--dry-run]     (FOC-1169)
+//        [--recorded-at <iso> --backfill] [--contradicts-round N] [--dry-run]     (FOC-1169)
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
 //
@@ -1249,6 +1249,26 @@ function cmdRecordDelivery(args) {
     recordedAt = new Date(ms).toISOString();
   }
 
+  // FOC-1194: a backfilled delivery fail can name the round it CONTRADICTS and
+  // carry that round's fingerprint verbatim. A backfill recomputes from the dev
+  // child's tree as it is NOW — for a removed tree (most of the 2026-11-01/02
+  // baseline) that is diff: null, an UNKNOWN that matches nothing, and the
+  // reviewFalsePass pair is uncountable. Naming the round copies the
+  // fingerprint that round judged. Outside --backfill the flag is refused the
+  // same way --recorded-at is: a live record's "now" fingerprint is the honest
+  // one, and the flag without the backfill admission would be provenance
+  // nobody asked for.
+  const contradictsArg = args["contradicts-round"];
+  if (contradictsArg !== undefined && !backfill) {
+    failJson("--contradicts-round is accepted only together with --backfill — a live record fingerprints the tree as it is now");
+  }
+  // r2 finding 4 — decision journaled: the flag is a FAIL's provenance. A
+  // delivery pass contradicts nothing; accepting it would put named delivery
+  // passes into the quality signal's contradicted set with nothing to falsify.
+  if (contradictsArg !== undefined && verdict !== "fail") {
+    failJson("--contradicts-round is a fail's provenance — a delivery pass contradicts nothing");
+  }
+
   // reason: required for fail, optional for pass, always from the closed set.
   const reasonArg = args.reason && args.reason !== true ? String(args.reason).trim() : null;
   if (verdict === "fail" && !reasonArg) {
@@ -1271,15 +1291,61 @@ function cmdRecordDelivery(args) {
   const workChild = resolveWorkChild(registry, { squad: "delivery", childId: null, taskId }, taskId, args, {
     producer: "dev",
   });
-  const fingerprint = progressFingerprint({
-    worktree: workChild.worktree,
-    baseRevision: workChild.baseRevision,
-    failingTests,
-  });
-  if (fingerprint.error) warnings.push(`fingerprint is UNKNOWN: ${fingerprint.error}`);
-  // resolveWorkChild fails closed, so workChild here is always the registry's
-  // dev child — name it, the way the review record does.
-  warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under delivery review`);
+  let fingerprint;
+  if (contradictsArg !== undefined) {
+    // The named round must exist in THIS run's chain, be readable, and carry a
+    // diff: a copy of null would silently match nothing — exactly the UNKNOWN
+    // this flag exists to stop recording.
+    const n = contradictsArg === true || contradictsArg === "" ? NaN : Number(contradictsArg);
+    if (!Number.isInteger(n) || n < 1) {
+      failJson(`--contradicts-round "${contradictsArg === true ? "" : contradictsArg}" is not a round number N ≥ 1`);
+    }
+    const chain = roundsFor(runId, taskId);
+    const named = chain.find((r) => r.round === n);
+    if (!named) {
+      failJson(`round ${n} of ${taskId} does not exist in run ${runId} — there is no verdict record to copy the fingerprint from`, {
+        known: chain.map((r) => r.round),
+      });
+    }
+    if (named.unreadable) {
+      failJson(`round ${n} of ${taskId} is unreadable — the fingerprint cannot be copied from it`);
+    }
+    // The source marker must RESOLVE: the quality signal pairs it with review
+    // rows by round, so naming a delivery record would write provenance no
+    // consumer can resolve. A null squad is a legacy (pre-FOC-1169) record —
+    // those were review records by construction and stay allowed.
+    if (named.squad && named.squad !== "review") {
+      failJson(
+        `round ${n} of ${taskId} is a ${named.squad} verdict, not a REVIEW pass — ` +
+          `the flag names the round whose pass this record contradicts, and the copy must come from that pass`,
+      );
+    }
+    if (named.fingerprint?.diff == null) {
+      failJson(`round ${n} of ${taskId} has no diff on its fingerprint — nothing to contradict (its tree was already UNKNOWN)`);
+    }
+    const { diff, tests, combined, changedFiles, failingTests: namedTests } = named.fingerprint;
+    fingerprint = { diff, tests, combined, changedFiles, failingTests: namedTests, source: `round-${n}` };
+    warnings.push(`fingerprint copied from round ${n} of ${taskId} (--contradicts-round ${n}) — the tree as that round judged it, not the tree now`);
+    // r2 finding 3: the FOC-220-gated declaration must not vanish — the copy
+    // supersedes the fingerprint's failing-tests axis with round N's, so the
+    // operator's own words carry separately on the record.
+    if (failingTests.length) {
+      warnings.push(
+        `the --failing-test declaration (${failingTests.join(", ")}) is recorded as declaredFailingTests — ` +
+          `the fingerprint's failing-tests axis is round ${n}'s, superseded by the copy`,
+      );
+    }
+  } else {
+    fingerprint = progressFingerprint({
+      worktree: workChild.worktree,
+      baseRevision: workChild.baseRevision,
+      failingTests,
+    });
+    if (fingerprint.error) warnings.push(`fingerprint is UNKNOWN: ${fingerprint.error}`);
+    // resolveWorkChild fails closed, so workChild here is always the registry's
+    // dev child — name it, the way the review record does.
+    warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under delivery review`);
+  }
 
   const prior = latestVerdict(runId, taskId);
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);
@@ -1303,6 +1369,11 @@ function cmdRecordDelivery(args) {
     reason: reasonArg,
     recordedBy: "delivery",
     ...(backfill ? { backfill: true } : {}),
+    // r2 finding 3: on the copy path the record's fingerprint is round N's —
+    // the operator's own declaration carries here instead (empty on a fail is
+    // impossible: the FOC-220 gate forces --failing-test or --no-failing-tests,
+    // and the latter keeps its noFailingTests carrier).
+    ...(contradictsArg !== undefined && failingTests.length ? { declaredFailingTests: failingTests } : {}),
     ...(declaredNone !== undefined ? { noFailingTests: { reason: declaredNone } } : {}),
     recordedAt,
   };

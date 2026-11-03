@@ -531,6 +531,8 @@ const vRow = (over = {}) => ({
   squad: "review",
   fingerprint: "fp1",
   fingerprintDiff: "d1",
+  fingerprintSource: null,
+  runId: "run-fixture",
   reason: null,
   at: "2026-11-01T10:00:00.000Z",
   path: "p",
@@ -665,6 +667,83 @@ test("quality: reviewFalsePass counts REVIEW pass rounds contradicted by a deliv
   assert.equal(signal.numerator, 1);
   assert.equal(signal.denominator, 4);
   assert.deepEqual(signal.evidence, ["FP1"]);
+});
+
+test("quality: reviewFalsePass counts the pair a backfilled delivery fail names by source (round-N)", () => {
+  // FOC-1194: a backfilled delivery record carries the fingerprint of the round
+  // it contradicts (fingerprint.source "round-N"). Its recordedAt is the
+  // operator-typed truth of when it happened, so the round reference — not the
+  // clock — is the authoritative link to the pass. A delivery fail whose `at`
+  // orders it BEFORE the pass it names still falsifies that pass; a named fail
+  // whose diff axis does NOT match the pass still proves nothing (the tree must
+  // be the one the pass accepted).
+  const facts = [
+    fact({
+      taskId: "FP7",
+      verdicts: [
+        // the backfilled delivery fail, backdated before the pass it names —
+        // fingerprint copied verbatim from round 2: same combined, same diff
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", fingerprintSource: "round-2",
+          reason: "ci", at: "2026-11-01T08:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // named but the diff axis differs — UNKNOWN never matches, source alone
+    // does not falsify
+    fact({
+      taskId: "FP8",
+      verdicts: [
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-fail-8", fingerprintDiff: "d-other-8", fingerprintSource: "round-2",
+          reason: "design", at: "2026-11-01T08:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-8", fingerprintDiff: "d-pass-8", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, 1 / 2);
+  assert.equal(signal.numerator, 1);
+  assert.equal(signal.denominator, 2);
+  assert.deepEqual(signal.evidence, ["FP7"]);
+});
+
+test("quality: the named pairing is scoped to the record's run — round N of ANOTHER run never pairs", () => {
+  // r2 finding 1: facts.verdicts merges a task's rounds across every run in the
+  // window. A bare round number would pair a backfilled delivery with
+  // same-numbered review rounds of OTHER runs — the denominator inflates
+  // systematically in the multi-run backfill baseline. The named match needs
+  // the same runId; a row without one (legacy/unreadable) pairs positionally
+  // only.
+  const facts = [
+    fact({
+      taskId: "FP9",
+      verdicts: [
+        // the backfilled delivery fail — names round 2, but of run-other
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3, runId: "run-other",
+          fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", fingerprintSource: "round-2",
+          reason: "ci", at: "2026-11-01T08:00:00Z",
+        }),
+        // review pass round 2 — a DIFFERENT run's chain
+        vRow({ round: 2, runId: "run-fixture", fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, null, "a cross-run same-numbered round is not the pass this record contradicts");
+  assert.equal(signal.numerator, 0);
+  assert.equal(signal.denominator, 0);
+  assert.deepEqual(signal.evidence, []);
 });
 
 test("quality: ciRedAfterReady counts delivery fails citing reason ci", () => {

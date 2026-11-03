@@ -40,7 +40,7 @@ export const DEFINITIONS = {
   deliveryFirstTimeRight:
     "Share of tickets whose first delivery verdict is PASS, among tickets with any delivery verdict.",
   reviewFalsePass:
-    "Share of REVIEW PASS rounds followed by a delivery FAIL on the same work tree (the fingerprint's diff axis), among REVIEW PASS rounds that have a later delivery verdict. Counted in rounds, not tickets. The declared failing-test axis is excluded from the match — it is a per-verdict declaration (a delivery fail always declares one, so the combined hashes could never compare equal), not part of work identity.",
+    "Share of REVIEW PASS rounds followed by a delivery FAIL on the same work tree (the fingerprint's diff axis), among REVIEW PASS rounds that have a later delivery verdict — or one that names the round explicitly (a backfilled record's fingerprint source \"round-N\"; the round reference, not the backdated clock, is the link). Counted in rounds, not tickets. The declared failing-test axis is excluded from the match — it is a per-verdict declaration (a delivery fail always declares one, so the combined hashes could never compare equal), not part of work identity.",
   ciRedAfterReady:
     "Share of tickets with a delivery FAIL citing reason \"ci\" (a CI red after READY TO PUSH), among tickets with any delivery verdict.",
   reworkShare:
@@ -367,12 +367,17 @@ export function buildQualityPayload({
 
   // reviewFalsePass — REVIEW PASS rounds followed by a delivery FAIL on the
   // same WORK TREE (the fingerprint's diff axis), among REVIEW PASS rounds that
-  // have a later delivery verdict. Counted in ROUNDS, not tickets: the unit a
-  // review pass is falsified in. NOT the combined hash: it folds the declared
-  // failing-test axis into the identity, and a delivery fail always declares
-  // one — on combined, the CI red after READY (the signal's motivating case)
-  // could never compare equal to the pass it falsifies. A diff that could not
-  // be read matches nothing — UNKNOWN is not evidence of a false pass.
+  // have a later delivery verdict — or one that NAMES the round explicitly
+  // (fingerprintSource "round-N", FOC-1194): a backfilled delivery record's
+  // recordedAt is the operator-typed truth of when it happened, so the round
+  // reference, not the clock, is the authoritative link to the pass it
+  // contradicts. Counted in ROUNDS, not tickets: the unit a review pass is
+  // falsified in. NOT the combined hash: it folds the declared failing-test
+  // axis into the identity, and a delivery fail always declares one — on
+  // combined, the CI red after READY (the signal's motivating case) could never
+  // compare equal to the pass it falsifies. A diff that could not be read
+  // matches nothing — UNKNOWN is not evidence of a false pass, by position or
+  // by name.
   let falsePassRounds = 0;
   let contradictedRounds = 0;
   const falsePassTasks = [];
@@ -380,10 +385,27 @@ export function buildQualityPayload({
     const rows = orderedVerdicts(f);
     rows.forEach((row, i) => {
       if (row.squad !== "review" || row.verdict !== "PASS") return;
+      const named = row.round != null
+        ? // r2 nit 9: row.round is always numeric (work-board emits a 0
+          // fallback) — the guard documents the contract, it is not a check.
+          rows.filter(
+            (v) =>
+              v.squad === "delivery" &&
+              v.fingerprintSource === `round-${row.round}` &&
+              // r2 finding 1: the source names a round WITHIN the record's own
+              // run — one task's rows merge across every run in the window, so
+              // a bare round number would pair same-numbered review rounds of
+              // OTHER runs too. Null runIds (legacy/unreadable) pair
+              // positionally only.
+              v.runId != null && v.runId === row.runId,
+          )
+        : [];
       const later = rows.slice(i + 1).filter((v) => v.squad === "delivery");
-      if (!later.length) return;
+      // later and named can hold the same row — the union, deduped by identity.
+      const contradicted = [...new Set([...later, ...named])];
+      if (!contradicted.length) return;
       contradictedRounds += 1;
-      if (later.some((v) => v.verdict === "FAIL" && v.fingerprintDiff != null && v.fingerprintDiff === row.fingerprintDiff)) {
+      if (contradicted.some((v) => v.verdict === "FAIL" && v.fingerprintDiff != null && v.fingerprintDiff === row.fingerprintDiff)) {
         falsePassRounds += 1;
         falsePassTasks.push(f.taskId);
       }
