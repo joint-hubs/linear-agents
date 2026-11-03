@@ -1085,6 +1085,78 @@ test("a held --candidate request records the flag for replay (FOC-406)", () => {
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
 });
 
+// ── --candidate gates for REVIEW/TEST (FOC-1222) ─────────────────────────────
+// Observed on run f43c (FOC-1100): a DEV child finished READY with its candidate
+// uncommitted, REVIEW/TEST were spawned without a candidate and copied the dirty
+// tree byte for byte. Two gates close the hole: a review/test spawn without
+// --candidate is refused, and a candidate that is not committed on the DEV work
+// branch is refused — the pin must name a state that exists in the branch's
+// history, never a tree only a dirty worktree holds.
+console.log("\n--candidate gates for REVIEW/TEST (FOC-1222)");
+
+// A commit on a SIBLING branch of the fixture task — reachable from the repo's
+// history but NOT an ancestor of the DEV work branch foc-123-dev.
+function fixtureSideBranch(repo) {
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("checkout", "-b", "foc-123-side", "main");
+  writeFileSync(join(repo, "side.txt"), "side\n");
+  git("add", "-A");
+  git("commit", "-m", "side");
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  git("checkout", "main");
+  return sha;
+}
+
+test("a review spawn without --candidate is refused (candidate-required, FOC-1222)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--squad", "review", "--child", "review-1"]);
+  const out = parse(r);
+  if (out.ok !== false) fail(`spawn was not refused: ${JSON.stringify(out)}`);
+  if (!/candidate-required/.test(out.error)) fail(`error carries no stable reason slug: ${out.error}`);
+  const registry = readRegistry(runId);
+  if (registry.children["review-1"]) fail("a refused spawn must not write a registry entry");
+});
+
+test("a test spawn without --candidate is refused too (candidate-required, FOC-1222)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--squad", "test", "--child", "test-1"]);
+  const out = parse(r);
+  if (out.ok !== false) fail(`spawn was not refused: ${JSON.stringify(out)}`);
+  if (!/candidate-required/.test(out.error)) fail(`error carries no stable reason slug: ${out.error}`);
+});
+
+test("a --candidate sha from another branch is refused (candidate-not-on-work-branch, FOC-1222)", () => {
+  const { repo } = fixtureRepo();
+  fixtureCandidate(repo); // the DEV work branch foc-123-dev exists
+  const candidate = fixtureSideBranch(repo); // committed, but NOT on foc-123-dev
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--squad", "review", "--child", "review-1", "--candidate", candidate]);
+  const out = parse(r);
+  if (out.ok !== false) fail(`spawn was not refused: ${JSON.stringify(out)}`);
+  if (!/candidate-not-on-work-branch/.test(out.error)) fail(`error carries no stable reason slug: ${out.error}`);
+});
+
+test("a --candidate committed on the DEV work branch still starts (FOC-1222)", () => {
+  const { repo } = fixtureRepo();
+  const candidate = fixtureCandidate(repo); // the foc-123-dev tip
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo, ["--squad", "review", "--child", "review-1", "--candidate", candidate]));
+  if (!out.ok) fail(`on-branch candidate refused: ${out.error}`);
+  if (out.baseRevision !== candidate) fail(`baseRevision was ${out.baseRevision}, not the candidate`);
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", "review-1"], { encoding: "utf8" });
+});
+
+test("a DEV spawn without --candidate still starts from base (DEV unaffected, FOC-1222)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo, []));
+  if (!out.ok) fail(`dev spawn refused: ${out.error}`);
+  if (out.baseRevision !== shaOf("HEAD", repo)) fail(`dev baseRevision was ${out.baseRevision}, not the repo HEAD`);
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
 // ── session identity + tee ───────────────────────────────────────────────────
 console.log("\nsession identity and the event tee");
 
