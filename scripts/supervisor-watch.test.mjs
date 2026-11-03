@@ -76,6 +76,30 @@ function test(name, fn) {
   }
 }
 
+// FOC-1232 (measured): an async exit poll in this file races the file's own
+// synchronous sections — the spawnSync runWatcher turns, execFileSync git
+// fixtures and Atomics.wait sleeps that follow the SIGTERM blocks all run on
+// the single event loop, and under CI load they block it for tens of seconds.
+// Node queues a child's 'exit' and delivers it in the poll phase, AFTER
+// expired timers, so the first loop turn after such a stretch fires the
+// overdue poll timer FIRST: the deadline reads as expired while exitCode is
+// still null, and the poll gives up on a watcher that process.exit()ed long
+// before (measured in the container: the watcher's finalization landed 285 ms
+// into its life, yet the poll gave up 18 692 ms in with exit=null signal=null
+// — the CI signature). After the deadline expires, drain the queued exit
+// through the check phase — setImmediate callbacks run after the poll phase —
+// before holding the verdict against the watcher. A watcher that genuinely
+// survives fails fast: the drain is bounded and each turn is immediate.
+const awaitExitAfterDeadline = async (watcher) => {
+  for (
+    let drained = 0;
+    drained < 100 && watcher.exitCode === null && watcher.signalCode === null;
+    drained++
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
 const base = mkdtempSync(join(tmpdir(), "la-watch-args-"));
 const stateHome = join(base, "state");
 const squadHome = join(base, "agents");
@@ -755,29 +779,59 @@ if (process.platform !== "win32") {
 
   const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+  const sigT0 = Date.now();
+  let sigEnvSeenAt = null;
+  // The watcher's own last words in its tee, quoted into the failure messages
+  // — a flake report without what the watcher was doing when it was killed is
+  // a guess.
+  const watcherLastWords = () => {
+    try {
+      const lines = readFileSync(teeOf(runIdSig), "utf8").trimEnd().split("\n");
+      return lines.length ? lines.slice(-12).map((l) => (l.length > 400 ? `${l.slice(0, 400)}…` : l)).join("\n") : "(tee is empty)";
+    } catch (err) {
+      return `(tee unreadable: ${err.message})`;
+    }
+  };
+
   test("the watcher writes the env file and stays alive while the child hangs", () => {
     const deadline = Date.now() + 10_000;
     while (!existsSync(envFilePath) && Date.now() < deadline) sleepSync(50);
-    assert.ok(existsSync(envFilePath), "the env file never appeared");
+    sigEnvSeenAt = Date.now();
+    assert.ok(existsSync(envFilePath), `the env file never appeared (waited ${Date.now() - sigT0} ms)`);
     assert.equal(watcher.exitCode, null, `the watcher exited on its own: ${watcher.exitCode}`);
   });
 
   test("SIGTERM removes the env file and kills the watcher", async () => {
     watcher.kill("SIGTERM");
+    const sentAt = Date.now();
     // The wait MUST yield: exitCode/signalCode are set from the child's exit
     // event, which only runs on an event-loop tick — a synchronous
     // Atomics.wait spin never observes the death and would report a watcher
     // that died instantly as a survivor (FOC-802). The watcher exits 143 once
     // it has killed the child's process group, within its own 2 s bound.
-    const deadline = Date.now() + 10_000;
+    const deadline = sentAt + 10_000;
     while (watcher.exitCode === null && watcher.signalCode === null && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    // The 10 s deadline bounds the watcher's own death (measured in the
+    // container: SIGTERM handled instantly, process.exit landed well under
+    // 1 s of watcher life), NOT this test's ability to OBSERVE it — that is
+    // what awaitExitAfterDeadline is for (FOC-1232: the exit event is queued
+    // behind the file's own synchronous sections and delivered after expired
+    // timers).
+    if (watcher.exitCode === null && watcher.signalCode === null) {
+      await awaitExitAfterDeadline(watcher);
+    }
     assert.ok(
       watcher.exitCode === 143 || watcher.signalCode !== null,
-      `the watcher survived SIGTERM or died wrongly: exit=${watcher.exitCode} signal=${watcher.signalCode}`,
+      `the watcher survived SIGTERM or died wrongly: exit=${watcher.exitCode} signal=${watcher.signalCode}\n` +
+        `timeline: env file seen at +${sigEnvSeenAt - sigT0} ms, SIGTERM sent at +${sentAt - sigT0} ms, ` +
+        `poll gave up at +${Date.now() - sigT0} ms\nwatcher tee (last lines):\n${watcherLastWords()}`,
     );
-    assert.ok(!existsSync(envFilePath), "child.env outlived a SIGTERMed watcher");
+    assert.ok(
+      !existsSync(envFilePath),
+      `child.env outlived a SIGTERMed watcher\nwatcher tee (last lines):\n${watcherLastWords()}`,
+    );
     // The helper never ran to completion (the fake claude hangs forever), so
     // the fake sudo and its hanging child are still alive — kill the group the
     // detached watcher put them in, by the pid the registry recorded.
@@ -850,6 +904,12 @@ if (process.platform !== "win32") {
     const killDeadline = sentAt + 15_000;
     while (watcher.exitCode === null && watcher.signalCode === null && Date.now() < killDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // Same FOC-1232 exposure as the SIGTERM block above: this poll's deadline
+    // can expire during a synchronous stretch of the file while the exit event
+    // sits queued behind it — drain before verdict.
+    if (watcher.exitCode === null && watcher.signalCode === null) {
+      await awaitExitAfterDeadline(watcher);
     }
     assert.ok(
       watcher.exitCode === 143 || watcher.signalCode !== null,
