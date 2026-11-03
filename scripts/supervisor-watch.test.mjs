@@ -1420,6 +1420,52 @@ test("FOC-1168 r2: the bridge refuses a row born after the parent's last-seen-al
   );
 });
 
+test("FOC-1168 r3: the bridge fails closed on a remembered stamp without a finite seenMs", () => {
+  // A malformed stamp — a caller bug, an old-shape entry, a half-written map
+  // — must not reopen the r1 unprovable band: `born after undefined` is
+  // false, so without an explicit finiteness check the refusal silently does
+  // not fire and a stranger's transient-reuse child gets force-killed. The
+  // bridge refuses unless BOTH stamps are finite; identity acceptance is
+  // untouched (a valid creation is provable on its own).
+  const rows = TABLE([
+    [301, 201, 1500], // parent 201 has no seenMs — the bridge must refuse
+    [302, 202, 1600], // parent 202 has a non-finite seenMs — refused
+    [303, 203, 1700], // parent 203 has a NaN seenMs — refused
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, {
+    minCreationMs: 800,
+    maxCreationMs: 2000,
+    remembered: new Map([
+      [201, { creation: 900 }], // seenMs missing
+      [202, { creation: 910, seenMs: "x" }], // seenMs not a number
+      [203, { creation: 920, seenMs: Number.NaN }], // seenMs NaN
+    ]),
+  });
+  assert.deepEqual(
+    desc,
+    [],
+    "an unprovable last-seen-alive stamp must refuse the bridge, never reopen it",
+  );
+});
+
+test("FOC-1168 r3: rememberChildLineage refuses to stamp without a finite seenMs", () => {
+  // The same defect at the source: a caller that omits seenMs must not
+  // poison the map with rows whose last-seen-alive moment is undefined — the
+  // refusal is loud (a throw, which the watcher's scan wrapper converts into
+  // a note) and the map is left unstamped rather than half-stamped.
+  const rows = TABLE([
+    [100, 4, 700],
+    [201, 100, 900],
+  ]);
+  const remembered = new Map();
+  assert.throws(
+    () => rememberChildLineage(rows, 100, remembered, { minCreationMs: 800, maxCreationMs: 1000 }),
+    /seenMs/,
+    "stamping without a provable last-seen-alive moment would reopen the unprovable band",
+  );
+  assert.deepEqual([...remembered.entries()], [], "the map is not half-stamped");
+});
+
 test("FOC-1168: an orphan born BEFORE the reuse took the parent's pid still joins", () => {
   // The remembered intermediate (pid 201, creation 900) was last PROVEN
   // alive by the tick whose snapshot ran at 945; the reuse now holding pid

@@ -3481,10 +3481,13 @@ export function parseWin32ProcessTable(text) {
  *    process by the identity stamp), and inside the child's spawn window; a
  *    row born AFTER that moment has unprovable parentage — the parent may
  *    have been dead for ticks, its pid transiently held by a stranger that
- *    spawned the row and exited — and is refused. When the parent's pid is
- *    now held by a stranger (a reuse this snapshot CAN see), a row born after
- *    the stranger's own creation was spawned by the stranger, not by our
- *    parent, and is refused.
+ *    spawned the row and exited — and is refused. The refusal is fail closed:
+ *    a stamp whose creation or seenMs is not finite proves nothing and
+ *    refuses the row (an unguarded read would silently accept — `born after
+ *    undefined` is false). When the parent's pid is now held by a stranger
+ *    (a reuse this snapshot CAN see), a row born after the stranger's own
+ *    creation was spawned by the stranger, not by our parent, and is
+ *    refused.
  *
  * What this costs is stated, not hidden: an intermediate that died between two
  * lineage ticks — alive in no snapshot the watcher ever took — is not
@@ -3501,8 +3504,10 @@ export function parseWin32ProcessTable(text) {
  *     remembered?: Map<number, {creation: number, seenMs: number}>|null }} opts
  *   the child's spawn and exit times (epoch ms), plus the remembered lineage
  *   (pid → {creation, seenMs}: the creation stamp and the tick time the row
- *   was last proven alive at) from the watcher's earlier ticks; without BOTH
- *   finite bounds nothing is accepted — fail-safe.
+ *   was last proven alive at, BOTH finite) from the watcher's earlier ticks;
+ *   a stamp missing either fails closed — the bridge refuses, never accepts
+ *   on a malformed stamp; without BOTH finite window bounds nothing is
+ *   accepted — fail-safe.
  * @returns {Array<{pid: number, ppid: number, creation: number, name: string}>}
  */
 export function descendantsInProcessTable(
@@ -3544,8 +3549,19 @@ export function descendantsInProcessTable(
       for (const e of valid) {
         if (accepted.has(e.pid)) continue;
         const parent = remembered.get(e.ppid);
-        if (parent === undefined || e.creation <= parent.creation) continue;
-        if (e.creation > parent.seenMs) continue; // born after the parent was last proven alive
+        // Fail closed on a malformed stamp: without BOTH stamps finite there
+        // is no provable last-seen-alive moment, and a missing one must
+        // refuse the row — `born after undefined` is false, so an unguarded
+        // read silently accepts (the r2 review finding).
+        if (
+          parent === undefined ||
+          !Number.isFinite(parent.creation) ||
+          !Number.isFinite(parent.seenMs) ||
+          e.creation <= parent.creation ||
+          e.creation > parent.seenMs
+        ) {
+          continue;
+        }
         const holder = holders.get(e.ppid);
         if (holder) {
           if (holder.creation === parent.creation) continue; // live — the chain rule owns it
@@ -3584,9 +3600,11 @@ export function descendantsInProcessTable(
  * stamp the finalize-time reap re-verifies, plus the tick time the row was
  * last PROVEN alive at — the dead-intermediate bridge accepts rows born at
  * or before that moment and refuses later births, whose parentage a
- * stranger's transient reuse of the pid could fake. Returns the child's
- * creation stamp for the caller to carry into the next tick (unchanged when
- * the snapshot proved nothing).
+ * stranger's transient reuse of the pid could fake. A non-finite seenMs is
+ * refused with a throw — the watcher's scan wrapper turns it into a note —
+ * before anything is stamped, so a caller bug can never half-write the map.
+ * Returns the child's creation stamp for the caller to carry into the next
+ * tick (unchanged when the snapshot proved nothing).
  *
  * Enumeration stays off the event path: the caller runs this from a timer,
  * never from the child's stdout handlers, and a failed enumeration is a note
@@ -3606,6 +3624,16 @@ export function descendantsInProcessTable(
  *   this snapshot proved nothing
  */
 export function rememberChildLineage(entries, rootPid, remembered, { minCreationMs, maxCreationMs, seenMs, childCreation = null } = {}) {
+  // A stamp without a finite seenMs would write rows whose last-seen-alive
+  // moment is undefined — exactly the stamp the bridge must refuse — so the
+  // caller's omission is refused at the source, loudly: the throw lands in
+  // the watcher's scan wrapper and becomes a note, and the map is left
+  // unstamped (the validation runs before any mutation, never a half-stamp).
+  if (!Number.isFinite(seenMs)) {
+    throw new Error(
+      `rememberChildLineage: refusing to stamp without a finite seenMs — a missing last-seen-alive bound would reopen the unprovable-accept band`,
+    );
+  }
   const rootRow = entries.find((e) => e?.pid === rootPid && Number.isInteger(e?.creation));
   if (!rootRow) return childCreation; // the child was already dead when this snapshot was taken
   if (childCreation !== null && rootRow.creation !== childCreation) return childCreation; // pid reused
