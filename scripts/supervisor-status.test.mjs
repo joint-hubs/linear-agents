@@ -29,9 +29,29 @@ let passed = 0;
 const failures = [];
 const cleanup = [];
 
+const asyncTests = [];
 function test(name, fn) {
   try {
-    fn();
+    const result = fn();
+    // FOC-1221: one case must wait through its child asynchronously — a
+    // spawnSync wait blocks this event loop, which would hold back the very
+    // gate timer that case schedules. A thenable result is parked here and
+    // awaited before the summary below; everything else stays synchronous.
+    if (result && typeof result.then === "function") {
+      asyncTests.push(
+        result.then(
+          () => {
+            passed++;
+            console.log(`  PASS ${name}`);
+          },
+          (err) => {
+            failures.push(name);
+            console.log(`  FAIL ${name}\n       ${err.message}`);
+          },
+        ),
+      );
+      return;
+    }
     passed++;
     console.log(`  PASS ${name}`);
   } catch (err) {
@@ -86,6 +106,23 @@ const parse = (r) => {
     fail(`stdout was not JSON (exit ${r.status}):\n       ${r.stdout}\n       ${r.stderr}`);
   }
 };
+
+// The async twin of `status`: same child, same hermetic env, but awaited as a
+// promise so THIS process's timers keep firing while the wait child blocks.
+// `status` is spawnSync — the mid-wait gate case schedules its gate write on a
+// timer here, which only runs if this loop is free.
+const statusAsync = (runId, extra = [], env = {}) =>
+  new Promise((resolve) => {
+    const child = spawn(process.execPath, [STATUS, "--run", runId, ...extra], {
+      env: hermeticEnv(env),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ status: code, stdout, stderr }));
+  });
 
 // A valid holds.json store, written directly — same shape the gate CLI writes
 // (validated by readHolds on the status side), without needing the pricing
@@ -397,30 +434,6 @@ test("returns reason=exit when a live child finishes during the wait", () => {
   const out = parse(status(runId, ["--wait", "--timeout-ms", "15000"]));
   if (out.reason !== "exit") fail(`reason was ${out.reason} (child status ${out.children[0].status})`);
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", child.childId], { encoding: "utf8", env: hermeticEnv() });
-});
-
-test("returns reason=gate when a pending gate appears mid-wait", () => {
-  const runId = fixtureRun();
-  seedChild(runId, { status: "running" });
-  const gateFile = join(runDir(runId), "gates", "g-new.json");
-
-  // Detached writer: the gate must appear WHILE the wait is blocked, otherwise
-  // it is already in the baseline and correctly ignored.
-  const writer = spawn(
-    process.execPath,
-    [
-      "-e",
-      `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(gateFile)}, JSON.stringify({gateId:'g-new',status:'pending',kind:'question',summary:'need an answer',questions:['?']})),800)`,
-    ],
-    // windowsHide: a detached console process gets its own visible window on
-    // win32 otherwise — one black box per run of this file on the desktop.
-    { detached: true, stdio: "ignore", windowsHide: true },
-  );
-  writer.unref();
-
-  const out = parse(status(runId, ["--wait", "--timeout-ms", "10000"]));
-  if (out.reason !== "gate") fail(`reason was ${out.reason}`);
-  if (!out.pendingGates.some((g) => g.gateId === "g-new")) fail("the gate is not in the payload");
 });
 
 test("a gate already pending before the wait does not fire it", () => {
@@ -905,7 +918,48 @@ test("trees outside .claude/worktrees are not flagged; non-agent names are ignor
   if (JSON.stringify(out.strayWorktrees) !== "[]") fail(`strayWorktrees was ${JSON.stringify(out.strayWorktrees)}`);
 });
 
+// ── the one async case: gate appearing mid-wait ──────────────────────────────
+test("returns reason=gate when a pending gate appears mid-wait", async () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "running" });
+  const gateFile = join(runDir(runId), "gates", "g-new.json");
+
+  // FOC-1221: the gate is written by THIS process on a timer, not by a detached
+  // child. A detached writer depends on the scheduler actually running it
+  // (process start + its own timer) inside the wait's deadline — under load it
+  // was not, and the wait reported `timeout` for a gate that never landed. An
+  // in-process timer has nothing to schedule: the write fires at 1500 ms wall
+  // clock while statusAsync holds the loop open below.
+  //
+  // This case MUST stay last in the file. It is the one async test: the earlier
+  // cases run spawnSync, which blocks this event loop — a timer registered
+  // before them would not fire until they had finished, long after the wait
+  // child had already returned `timeout` (that was the first version of this
+  // fix, and it failed for exactly that reason). Run last, the loop is free:
+  // the timer fires while the wait child is genuinely mid-wait.
+  //
+  // The 1500 ms margin is not the writer's old 800 ms: the wait child must take
+  // its `before` baseline (which fixes `gatesBefore`) BEFORE the gate lands, or
+  // the gate joins the baseline and is correctly ignored. 1500 ms beats any
+  // plausible child boot while leaving 8.5 s of headroom against the 10 s
+  // deadline.
+  setTimeout(
+    () =>
+      writeFileSync(
+        gateFile,
+        JSON.stringify({ gateId: "g-new", status: "pending", kind: "question", summary: "need an answer", questions: ["?"] }),
+      ),
+    1500,
+  );
+
+  const out = parse(await statusAsync(runId, ["--wait", "--timeout-ms", "10000"]));
+  if (out.reason !== "gate") fail(`reason was ${out.reason}`);
+  if (!out.pendingGates.some((g) => g.gateId === "g-new")) fail("the gate is not in the payload");
+});
+
 // ── summary ──────────────────────────────────────────────────────────────────
+await Promise.all(asyncTests);
+
 for (const dir of cleanup) {
   try {
     rmSync(dir, { recursive: true, force: true });
