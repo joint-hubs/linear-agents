@@ -4,6 +4,7 @@
 //   node scripts/state-index.mjs render          print the block
 //   node scripts/state-index.mjs --write         insert/replace the block in docs/STATE.md
 //   node scripts/state-index.mjs --check         exit 1 when the committed block differs
+//   (--root <path> overrides the root on every verb — see state-root.mjs.)
 //
 // docs/STATE.md stays a hand-written journal for standing rules and global
 // decisions; the per-task journals live in docs/state/<TASK-ID>.md, and the
@@ -20,18 +21,16 @@
 // EOL style is preserved (the repo's STATE.md is CRLF); new files get LF.
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+import { resolveRoot } from "./state-root.mjs";
+
+export { resolveRoot };
 
 export const INDEX_START = "<!-- state-index:start -->";
 export const INDEX_END = "<!-- state-index:end -->";
 const BLOCK_HEADING = "## Task journals (generated)";
-
-/** The root whose docs/ is indexed: LA_ROOT, else this repo. */
-export function resolveRoot(env = process.env) {
-  if (env.LA_ROOT) return resolve(env.LA_ROOT);
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
-}
 
 /**
  * One row per journal file. Fields come from the metadata block; the date is
@@ -145,22 +144,30 @@ export function checkIndex(root) {
 
 function usage(stream) {
   stream(
-    "Usage: node scripts/state-index.mjs render | --write | --check\n" +
+    "Usage: node scripts/state-index.mjs render | --write | --check [--root <path>]\n" +
       "  render  print the generated block\n" +
       "  --write insert/replace the block in docs/STATE.md (splice; EOL preserved; exit 2 on malformed markers)\n" +
-      "  --check exit 1 when the committed block differs (CRLF-normalised)",
+      "  --check exit 1 when the committed block differs (CRLF-normalised)\n" +
+      "  Root: --root <path> overrides; else the cwd's git repository; else LA_ROOT; else this repo.",
   );
 }
 
 /** The CLI; returns the exit code so tests can drive it in-process. */
 export function runCli(argv, { env = process.env, stdout = console.log, stderr = console.error, root = null } = {}) {
-  const verb = argv[0];
+  let rootOverride = null;
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--root" && i + 1 < argv.length) rootOverride = argv[++i];
+    else rest.push(argv[i]);
+  }
+  const verb = rest[0];
+  const base = root ?? (rootOverride ? resolve(rootOverride) : resolveRoot(env));
   if (verb === "--help" || verb === "-h") {
     usage(console.log);
     return 0;
   }
   if (verb === "--write") {
-    const res = writeIndex(root ?? resolveRoot(env));
+    const res = writeIndex(base);
     if (res.error) {
       stderr(`state-index: ${res.error} in ${res.path}`);
       return 2;
@@ -173,12 +180,12 @@ export function runCli(argv, { env = process.env, stdout = console.log, stderr =
     return 0;
   }
   if (verb === "--check") {
-    const res = checkIndex(root ?? resolveRoot(env));
+    const res = checkIndex(base);
     (res.ok ? stdout : stderr)(res.ok ? res.message : `state-index: ${res.message}`);
     return res.ok ? 0 : 1;
   }
   if (verb === "render" || verb === undefined) {
-    stdout(render(root ?? resolveRoot(env)));
+    stdout(render(base));
     return 0;
   }
   stderr(`state-index: unknown argument "${verb}"`);

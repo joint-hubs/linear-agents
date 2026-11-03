@@ -14,7 +14,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -241,6 +241,61 @@ test("end to end: --root overrides the cwd's repository", () => {
   assert.equal(res.status, 0, res.stderr);
   assert.ok(existsSync(join(override, "docs", "state", "FOC-1211-R.md")), "--root was ignored");
   assert.equal(existsSync(join(worktree, "docs", "state", "FOC-1211-R.md")), false, "--root was not exclusive");
+});
+
+console.log("\nclose — one command after the merge (FOC-1224)");
+
+test("close sets Status=done and PR, appends a dated close entry, and regenerates the index", () => {
+  const root = tmpRoot();
+  cli(["init"], { root });
+  writeFileSync(
+    join(root, "docs", "STATE.md"),
+    "# STATE — fixture\n\n## 2026-10-01 10:00 — base entry\n\nbody.\n",
+    "utf8",
+  );
+  const res = cli(["close", "--pr", "#217", "--date", "2026-11-02 10:12"], { root });
+  assert.equal(res.code, 0, res.err.join("\n"));
+  const text = readFileSync(join(root, "docs", "state", "FOC-904.md"), "utf8");
+  assert.match(text, /^Status: done$/m);
+  assert.match(text, /^PR: #217$/m);
+  assert.match(text, /^## 2026-11-02 10:12 — closed: merged in #217$/m);
+  const state = readFileSync(join(root, "docs", "STATE.md"), "utf8");
+  assert.match(state, /- FOC-904 — done — last entry 2026-11-02 10:12 — - — #217/);
+});
+
+test("close stamps the close entry with now when --date is absent", () => {
+  const root = tmpRoot();
+  cli(["init"], { root });
+  const res = cli(["close", "--pr", "#1"], { root });
+  assert.equal(res.code, 0, res.err.join("\n"));
+  const text = readFileSync(join(root, "docs", "state", "FOC-904.md"), "utf8");
+  assert.match(text, /^## \d{4}-\d{2}-\d{2} \d{2}:\d{2} — closed: merged in #1$/m);
+});
+
+test("close without --pr is refused", () => {
+  const root = tmpRoot();
+  cli(["init"], { root });
+  const res = cli(["close"], { root });
+  assert.equal(res.code, 2, res.out.join("\n"));
+  assert.match(res.err.join("\n"), /--pr/);
+});
+
+test("close on a journal that does not exist exits 1", () => {
+  const res = cli(["close", "--task", "FOC-404", "--pr", "#1"], { root: tmpRoot() });
+  assert.equal(res.code, 1);
+  assert.match(res.err.join("\n"), /no journal for FOC-404/);
+});
+
+test("close reports a failed index regen and keeps the journal edits", () => {
+  const root = tmpRoot();
+  cli(["init"], { root });
+  const body = "# STATE\n\n## entry\n\n<!-- state-index:end -->\ndangling end marker.\n";
+  writeFileSync(join(root, "docs", "STATE.md"), body, "utf8");
+  const res = cli(["close", "--pr", "#217"], { root });
+  assert.equal(res.code, 1, res.out.join("\n"));
+  assert.match(res.err.join("\n"), /index regen failed/);
+  const text = readFileSync(join(root, "docs", "state", "FOC-904.md"), "utf8");
+  assert.match(text, /^Status: done$/m, "the journal edits must survive a failed regen");
 });
 
 console.log("\nsummary");

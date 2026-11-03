@@ -163,16 +163,53 @@ lint 903 plików / 0 naruszeń — wszystko zielone.
 <!-- state-index:start -->
 ## Task journals (generated)
 
-- FOC-977 — in review — last entry 2026-10-21 12:26 — foc-977-gh-cwd — -
-- FOC-964 — in review — last entry 2026-10-21 10:10 — model-routing-v2 — -
-- FOC-920 — in review — last entry 2026-10-20 23:06 — foc-920-parked-prompt — -
-- FOC-943 — in review — last entry 2026-10-20 22:24 — foc-943-fenix-mcp-writes — -
+- FOC-1222 — done — last entry 2026-11-03 21:13 — foc-1222-dev-8fcaefeaa54a — #208
+- FOC-1210 — done — last entry 2026-11-03 15:51 — foc-1210-dev-e92f54138086 — #206
+- FOC-1221 — done — last entry 2026-11-03 14:24 — foc-1221-dev-7fdb6c245e08 — #205
+- FOC-1220 — done — last entry 2026-11-03 12:55 — foc-1220-dev-5819fcd49dd8 — #204
+- FOC-1211 — done — last entry 2026-11-03 11:53 — foc-1211-dev-f92e8782f7ad — #203
+- FOC-1168 — done — last entry 2026-11-03 10:56 — foc-1168-dev-d7552550dcb9 — #202
+- FOC-1155 (verdict tool refuses the TEST verdict after a launcher restart splits the registry) — done — last entry 2026-11-03 07:43 — `foc-1155-dev-9675d3bdf690` (base d0ee916 — main after #193 / FOC-1146 merged) — #201
+- FOC-1194 (a backfilled delivery verdict carries the judged round's fingerprint: — done — last entry 2026-11-03 05:13 — `foc-1194-dev-3025e7276dfb` (base ee82310) — #199
+- FOC-1179 (role set for quality: one strong REVIEW pass, TEST with CI parity in the Fenix — done — last entry 2026-11-03 05:05 — `foc-1179-dev-10215d8fda17` (base 513aa54 — the FOC-1170 final candidate, stacked per plan §4) — #198
+- FOC-1170 (REVIEW evidence as code: a pass cites a command the reviewer ran; red-first — done — last entry 2026-11-02 22:16 — `foc-1170-dev-c7f0270eca5f` (base e9b5765 — the FOC-1169 final candidate, stacked per plan §2) — #197
+- FOC-1169 (delivery verdicts as labels: `--delivery` on supervisor-verdict, backfill, — done — last entry 2026-11-02 20:06 — `foc-1169-dev-9e7e8b5f593f` (base ca42643) — #196
+- FOC-1162 — done — last entry 2026-11-02 17:24 — foc-1162-dev-f1f10017d4d4 — #194
+- FOC-1166 — done — last entry 2026-11-02 11:29 — foc-1166-dev-0d99b755d20c — #195
+- FOC-1146 (review-loop progress guard refuses a pass→fail round on the same tree) — done — last entry 2026-11-02 10:12 — `foc-1146-dev-bf0ad234946a` (base 0922442) — #193
+- FOC-1145 — done — last entry 2026-11-02 09:07 — foc-1145-dev-e629a097bc34 — #191
+- FOC-1145-evidence — done — last entry 2026-11-02 09:07 — foc-1145-dev-e629a097bc34 — #191
+- FOC-1164 — done — last entry 2026-11-02 09:07 — foc-1164-dev-3d1898373c38 — #192
+- FOC-1151 (four hold-answer fixes: foreign optionLabel refused, CLI — done — last entry 2026-11-02 07:24 — `foc-1151-dev-32908616e393` (base 197bc00) — #188
+- FOC-1156 (FOC-1153 delivery-review residuals) — done — last entry 2026-11-02 07:24 — `foc-1156-dev-c9206b62e447` (base a13b54c) — #190
+- FOC-1148 — done — last entry 2026-11-02 04:40 — foc-1148-dev-cb6c965de984 — #189
+- FOC-1147 (auto-pickup owner scope resolves a Linear workspace name against repo dir names — never matches) — done — last entry 2026-11-02 04:31 — `foc-1147-dev-251f30405f2c` (base 65e5e4e) — #187
+- FOC-1086 — done — last entry 2026-11-02 02:22 — foc-1086-dev-63dbd3e17f60 — #186
+- FOC-1160 — done — last entry 2026-11-02 01:21 — foc-1160-dev-749777cfb4c2 — #185
+- FOC-1161 — done — last entry 2026-11-01 23:52 — foc-1161-dev-b5a1ca891ecf — #184
+- FOC-1056 (first Supervisor run on a fresh install opens a working-state hold — "keys missing" — a human must answer, but the hold never says where each value belongs) — done — last entry 2026-11-01 22:34 — `foc-1056-dev-f0ab8f50800b` (base 0e5d266) — #183
+- FOC-1154 (watcher reports a false stall for a turn that already emitted its terminal result) — done — last entry 2026-11-01 22:12 — `foc-1154-dev-8008af451c7f` (base 4ff9f36) — #181
+- FOC-1109 (working-state hold "Provide the values" submitted its own label; the values never reached the Supervisor) — done — last entry 2026-11-01 20:54 — `foc-1109-dev-8596c275864d` (base 404650c) — #178
+- FOC-1110 — done — last entry 2026-11-01 20:54 — foc-1110-dev-bec8976cb238 — #179
+- FOC-1153 (worktree provisioning + removal that never follows a reparse point) — done — last entry 2026-11-01 20:54 — `foc-1153-dev-f487faf88d98` (base 4ff9f36) — #180
+- FOC-1075 (`attach-link` broken — Linear removed the `attachmentLinkURL` mutation, `Linear API 400: Unknown type "AttachmentLinkURLInput"`) — done — last entry 2026-11-01 15:33 — `foc-1075-dev-f18b7ad67949` (base 257fdf5) — #177
+- FOC-1111 — done — last entry 2026-11-01 14:33 — foc-1111-dev-7ca6884dbbcd — #176
+- FOC-1066 — done — last entry 2026-11-01 14:06 — foc-1066-dev-95ba09a93636 — #175
+- FOC-1090 (family E flags ordinary kebab branch names) — done — last entry 2026-11-01 13:42 — `foc-1090-dev-2e4b7a0b405c` (base 009671a) — #173
+- FOC-1150 (team-routes fixture ages out of the server's real-clock 30d window) — done — last entry 2026-11-01 13:35 — `foc-1150-dev-1aee01e9cda5` (base 009671a) — #174
+- FOC-1088 (two small-ticket task sessions edit the same main checkout) — done — last entry 2026-11-01 11:01 — `foc-1088-dev-33a076795787` (base e7b8735) — #172
+- FOC-1107 (+ FOC-1065, S21/S40) — done — last entry 2026-11-01 06:54 — foc-1107-1065-fenix-settings-restart-a754b953aa06 — #170
+- FOC-977 — done — last entry 2026-10-21 12:28 — foc-977-gh-cwd — #134
+- FOC-964 — done — last entry 2026-10-21 10:25 — model-routing-v2 — #130
+- FOC-920 — done — last entry 2026-10-21 08:20 — foc-920-parked-prompt — #127
+- FOC-943 — done — last entry 2026-10-20 22:32 — foc-943-fenix-mcp-writes — #124
 - FOC-775 — done — last entry 2026-10-20 21:13 — foc-775-ghcr — #116
 - FOC-777 — merged — AC1 pending (FOC-789) — last entry 2026-10-20 21:13 — foc-777-pinned-image — #117
 - FOC-918 — done — last entry 2026-10-19 21:10 — foc-918-unattended-prompts — #115
 - FOC-914 — done — last entry 2026-10-19 17:41 — foc-914-team-group-filters — #114
 - FOC-915 — done — last entry 2026-10-19 17:12 — foc-915-insights-task-table — #112
 - FOC-523 — done — last entry 2026-10-19 15:51 — foc-523-merge-deps — #111
+- FOC-1157 — `scripts/telemetry-idle-tick.test.mjs`, case "idle ticks write — done — last entry - — `foc-1157-dev-8af5c2311ae3` (base 0e5d266) — #182
 - FOC-921 — done — last entry - — foc-921-prompt-hygiene — #118
 <!-- state-index:end -->
 

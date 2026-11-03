@@ -11,11 +11,13 @@
 // Run: node scripts/state-index.test.mjs
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { INDEX_START, INDEX_END, render, runCli, writeIndex, checkIndex } from "./state-index.mjs";
+import { INDEX_START, INDEX_END, render, resolveRoot, runCli, writeIndex, checkIndex } from "./state-index.mjs";
 
 let passed = 0;
 const failures = [];
@@ -220,6 +222,99 @@ test("--check compares CRLF-normalised", () => {
   const text = readFileSync(join(root, "docs", "STATE.md"), "utf8");
   writeFileSync(join(root, "docs", "STATE.md"), text.replace(/\n/g, "\r\n"), "utf8");
   assert.equal(checkIndex(root).ok, true);
+});
+
+console.log("\nresolveRoot — shared with state-journal, cwd-first (FOC-1224)");
+
+const ownRepo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** A throwaway git repository under tmpdir (the "worktree" side of the fixture). */
+function tmpGitRepo() {
+  const dir = mkdtempSync(join(tmpdir(), "la-index-git-"));
+  const res = spawnSync("git", ["init", "-q"], { cwd: dir, encoding: "utf8" });
+  assert.equal(res.status, 0, `git init failed: ${res.stderr}`);
+  mkdirSync(join(dir, "docs", "state"), { recursive: true });
+  return dir;
+}
+
+/** A throwaway NON-git directory — for the LA_ROOT fallback. */
+function tmpPlainDir() {
+  const dir = mkdtempSync(join(tmpdir(), "la-index-plain-"));
+  const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8" });
+  assert.notEqual(probe.status, 0, "tmpdir sits inside a git repository — this fixture is not a valid non-repo here");
+  return dir;
+}
+
+test("resolveRoot prefers the cwd's git repository over LA_ROOT", () => {
+  const main = tmpGitRepo();
+  const worktree = tmpGitRepo();
+  assert.equal(resolveRoot({ LA_ROOT: main }, worktree), resolve(worktree));
+});
+
+test("resolveRoot keeps the cwd's repo when LA_ROOT names the same repository", () => {
+  const main = tmpGitRepo();
+  assert.equal(resolveRoot({ LA_ROOT: main }, main), resolve(main));
+});
+
+test("resolveRoot falls back to LA_ROOT when cwd is not a git repository", () => {
+  const plain = tmpPlainDir();
+  const main = tmpGitRepo();
+  assert.equal(resolveRoot({ LA_ROOT: main }, plain), resolve(main));
+});
+
+test("--write from a worktree cwd touches only that worktree, never LA_ROOT", () => {
+  const main = tmpGitRepo();
+  const worktree = tmpGitRepo();
+  const stateBody = STATE_HEADER + "## 2026-10-01 10:00 — base entry\n\nbody.\n";
+  writeFileSync(join(main, "docs", "STATE.md"), stateBody, "utf8");
+  writeFileSync(join(worktree, "docs", "STATE.md"), stateBody, "utf8");
+  const prevCwd = process.cwd();
+  try {
+    process.chdir(worktree);
+    const out = [];
+    const err = [];
+    const code = runCli(["--write"], {
+      env: { LA_ROOT: main },
+      stdout: (l) => out.push(l),
+      stderr: (l) => err.push(l),
+    });
+    assert.equal(code, 0, err.join("\n"));
+  } finally {
+    process.chdir(prevCwd);
+  }
+  assert.match(
+    readFileSync(join(worktree, "docs", "STATE.md"), "utf8"),
+    /state-index:start/,
+    "the worktree's STATE.md was not written",
+  );
+  assert.equal(
+    readFileSync(join(main, "docs", "STATE.md"), "utf8"),
+    stateBody,
+    "LA_ROOT's STATE.md was rewritten",
+  );
+});
+
+test("--root overrides the cwd resolution", () => {
+  const main = tmpGitRepo();
+  const override = tmpGitRepo();
+  writeFileSync(join(override, "docs", "STATE.md"), STATE_HEADER + "## entry\n\nbody.\n", "utf8");
+  const prevCwd = process.cwd();
+  try {
+    process.chdir(main);
+    const res = cli(["--root", override, "--write"]);
+    assert.equal(res.code, 0, res.err);
+  } finally {
+    process.chdir(prevCwd);
+  }
+  assert.match(readFileSync(join(override, "docs", "STATE.md"), "utf8"), /state-index:start/);
+  assert.equal(existsSync(join(main, "docs", "STATE.md")), false, "--root was not exclusive");
+});
+
+console.log("\nCI wiring (FOC-1224)");
+
+test("the CI lint job gates on state-index --check", () => {
+  const sh = readFileSync(join(ownRepo, "docker", "test-in-container.sh"), "utf8");
+  assert.match(sh, /node scripts\/state-index\.mjs --check/, "the lint job must run state-index --check next to lint.mjs");
 });
 
 console.log("\nsummary");

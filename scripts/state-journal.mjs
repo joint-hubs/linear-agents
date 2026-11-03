@@ -4,6 +4,7 @@
 //   node scripts/state-journal.mjs init [--task <id>]
 //   node scripts/state-journal.mjs add --text "<entry>" [--task <id>]
 //   node scripts/state-journal.mjs set --field PR=<value> [--field Status=<value>] [--task <id>]
+//   node scripts/state-journal.mjs close --pr "<#N>" [--date "<YYYY-MM-DD HH:MM>"] [--task <id>]
 //   (--root <path> overrides the journal root on every verb — see resolveRoot.)
 //
 // WHY per task: docs/STATE.md is one shared, hand-written journal — two
@@ -22,31 +23,16 @@
 // in the header block. Docs: docs/task-journals.md.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
-const METADATA_KEYS = ["Task", "Session", "Run", "Branch", "PR", "Status"];
+import { resolveRoot } from "./state-root.mjs";
+import { writeIndex } from "./state-index.mjs";
 
-/**
- * The root whose docs/ the journals live under, in order: an explicit --root
- * (handled by the CLI layer), the git repository of the current working
- * directory, LA_ROOT, this repo. cwd-first because a Supervisor child runs
- * inside its own worktree while LA_ROOT still points at the operator's main
- * checkout — LA_ROOT-first misrouted the child's journal into the main
- * checkout's untracked docs/state/ (FOC-1155 r4 had to re-record it by hand).
- */
-export function resolveRoot(env = process.env, cwd = process.cwd()) {
-  try {
-    const res = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" });
-    const top = (res.stdout || "").trim();
-    if (res.status === 0 && top) return resolve(top);
-  } catch {
-    // git missing or unusable — fall through to LA_ROOT below.
-  }
-  if (env.LA_ROOT) return resolve(env.LA_ROOT);
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
-}
+export { resolveRoot };
+
+const METADATA_KEYS = ["Task", "Session", "Run", "Branch", "PR", "Status"];
 
 /** A task id is also a filename — refuse anything that could climb out of docs/state/. */
 export function sanitizeTaskId(id) {
@@ -165,19 +151,43 @@ export function setFields({ root, taskId, fields }) {
   return { path, applied };
 }
 
+/**
+ * Close a merged task's journal in one command (FOC-1224): Status=done,
+ * PR=<pr>, a close entry stamped with the PR's merge date (--date; now when
+ * omitted), then the index block regenerated in the same root. The journal
+ * edits land first — a failed index regen leaves them in place and is
+ * reported, never silently swallowed.
+ */
+export function closeJournal({ root, taskId, pr, date = null }) {
+  if (!pr) throw new Error('close needs a PR ("#N") — read it from `git log` on main');
+  if (date !== null && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(date)) {
+    throw new Error('--date must be "YYYY-MM-DD HH:MM" (the PR merge date)');
+  }
+  const applied = setFields({ root, taskId, fields: ["Status=done", `PR=${pr}`] }).applied;
+  const entry = addEntry({ root, taskId, text: `closed: merged in ${pr}`, stamp: date ?? formatStamp() });
+  const index = writeIndex(root);
+  if (index.error) {
+    throw new Error(
+      `journal closed, but the index regen failed: ${index.error} in ${index.path} — run state-index.mjs --write`,
+    );
+  }
+  return { path: journalPath(root, taskId), applied, entry, index };
+}
+
 function usage(stream) {
   stream(
     "Usage: node scripts/state-journal.mjs init [--task <id>]\n" +
       "       node scripts/state-journal.mjs add --text \"<entry>\" [--task <id>]\n" +
       "       node scripts/state-journal.mjs set --field <Key>=<value> [--task <id>]\n" +
+      "       node scripts/state-journal.mjs close --pr \"<#N>\" [--date \"<YYYY-MM-DD HH:MM>\"] [--task <id>]\n" +
       "  Task id: --task, else LA_TASK_ID. Session/run: FENIX_SUPERVISOR_SESSION_ID / LA_SUPERVISOR_RUN.\n" +
       "  Root: --root <path> overrides; else the cwd's git repository; else LA_ROOT; else this repo.",
   );
 }
 
-/** Parse the hand-rolled argv shared by all three verbs. Returns null on a usage error (already reported). */
+/** Parse the hand-rolled argv shared by all four verbs. Returns null on a usage error (already reported). */
 export function parseArgv(argv, { stderr = console.error } = {}) {
-  const opts = { verb: null, task: null, text: null, fields: [], root: null };
+  const opts = { verb: null, task: null, text: null, fields: [], pr: null, date: null, root: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
@@ -191,7 +201,11 @@ export function parseArgv(argv, { stderr = console.error } = {}) {
       opts.text = argv[++i];
     } else if (a === "--field" && i + 1 < argv.length) {
       opts.fields.push(argv[++i]);
-    } else if (a === "init" || a === "add" || a === "set") {
+    } else if (a === "--pr" && i + 1 < argv.length) {
+      opts.pr = argv[++i];
+    } else if (a === "--date" && i + 1 < argv.length) {
+      opts.date = argv[++i];
+    } else if (a === "init" || a === "add" || a === "set" || a === "close") {
       opts.verb = a;
     } else {
       stderr(`state-journal: unknown argument "${a}"`);
@@ -200,7 +214,7 @@ export function parseArgv(argv, { stderr = console.error } = {}) {
     }
   }
   if (!opts.verb) {
-    stderr("state-journal: a verb is required (init | add | set)");
+    stderr("state-journal: a verb is required (init | add | set | close)");
     usage(stderr);
     return null;
   }
@@ -210,6 +224,10 @@ export function parseArgv(argv, { stderr = console.error } = {}) {
   }
   if (opts.verb === "set" && !opts.fields.length) {
     stderr("state-journal: set needs at least one --field <Key>=<value>");
+    return null;
+  }
+  if (opts.verb === "close" && opts.pr === null) {
+    stderr('state-journal: close needs --pr "#N"');
     return null;
   }
   return opts;
@@ -245,6 +263,17 @@ export function runCli(argv, { env = process.env, stdout = console.log, stderr =
     if (opts.verb === "add") {
       const res = addEntry({ root: base, taskId, text: opts.text });
       stdout(`journal: ${res.path} appended "${res.heading}"`);
+      return 0;
+    }
+    if (opts.verb === "close") {
+      const res = closeJournal({ root: base, taskId, pr: opts.pr, date: opts.date });
+      for (const f of res.applied) stdout(`journal: ${res.path} ${f.key}: ${f.value}`);
+      stdout(`journal: ${res.path} appended "${res.entry.heading}"`);
+      stdout(
+        res.index.changed
+          ? `state-index: ${res.index.path} updated`
+          : `state-index: ${res.index.path} up to date${res.index.reason ? ` (${res.index.reason})` : ""}`,
+      );
       return 0;
     }
     const res = setFields({ root: base, taskId, fields: opts.fields });
