@@ -335,6 +335,10 @@ export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 3
           // failing-test axis, which a delivery fail always declares — matching
           // on combined would make the CI-red-after-READY case uncountable.
           fingerprintDiff: record.unreadable ? null : record.fingerprint?.diff ?? null,
+          // FOC-1194: the round a backfilled delivery record CONTRADICTS
+          // (fingerprint.source "round-N"). null on every other record — the
+          // quality signal pairs this with the named review round.
+          fingerprintSource: record.unreadable ? null : record.fingerprint?.source ?? null,
           reason: record.unreadable ? null : record.reason ?? null,
           at: record.recordedAt ?? null,
           path: useLib

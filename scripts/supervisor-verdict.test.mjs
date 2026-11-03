@@ -1412,6 +1412,109 @@ test("a --recorded-at offset is bounded to ISO 8601 (±14:00 exactly), a real of
   assert.equal(out.recordedAt, "2026-11-01T09:30:00.000Z");
 });
 
+// ── 5d. backfilled delivery fingerprints name the round they contradict (FOC-1194) ──
+console.log("\nbackfill --contradicts-round — osadzony w tej samej twarzy co wyrok");
+
+test("--contradicts-round without --backfill is refused", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--contradicts-round/);
+  assert.match(out.error, /--backfill/);
+});
+
+test("a backfilled delivery fail with --contradicts-round carries the judged round's fingerprint, source round-N", () => {
+  // The motivating case: the dev worktree is GONE by the time the baseline is
+  // backfilled (FOC-1147, 1151, 1156, …) — recomputing reads diff: null and the
+  // reviewFalsePass pair is uncountable. --contradicts-round N copies the
+  // fingerprint round N judged, so the record means "the tree as that round
+  // saw it", not "the tree now".
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  const passRecord = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  assert.ok(passRecord.fingerprint.diff, "the review pass round 1 fingerprinted a real tree");
+
+  rmSync(s.worktree, { recursive: true, force: true });
+
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.round, 2);
+  assert.equal(out.fingerprint.diff, passRecord.fingerprint.diff);
+  assert.equal(out.fingerprint.combined, passRecord.fingerprint.combined);
+  assert.equal(out.fingerprint.source, "round-1");
+  assert.equal(out.fingerprint.error, undefined, "a copied fingerprint is not UNKNOWN");
+  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 2), "utf8"));
+  assert.equal(onDisk.fingerprint.source, "round-1");
+});
+
+test("backfill without --contradicts-round still recomputes (UNKNOWN warning on a removed tree)", () => {
+  // Item 3 of the ticket: without the flag, backfill behaves exactly as today.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  rmSync(s.worktree, { recursive: true, force: true });
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.fingerprint.diff, null);
+  assert.ok(out.fingerprint.error, "the recomputed fingerprint on a removed tree is UNKNOWN");
+  assert.ok(!("source" in out.fingerprint), "no source key on a recomputed fingerprint");
+});
+
+test("--contradicts-round naming a round that does not exist is refused", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "3",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /round 3 of FOC-123/);
+});
+
+test("--contradicts-round naming a round without a diff is refused", () => {
+  // A round whose tree was already unreadable carries diff: null — there is
+  // nothing to copy, and a null diff would silently match nothing.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  rmSync(s.worktree, { recursive: true, force: true });
+  const first = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--recorded-at", "2026-11-02T09:00:00.000Z", "--backfill",
+  ]);
+  assert.equal(first.ok, true, first.error);
+  assert.equal(first.fingerprint.diff, null);
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "design", "--failing-test", "suite/design",
+    "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /round 1 of FOC-123/);
+});
+
 // ── 6. the two stall conditions stay distinct ────────────────────────────────
 console.log("\ndwa warunki zastoju, osobno raportowane");
 
