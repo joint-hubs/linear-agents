@@ -11,11 +11,13 @@ maturity: v2
 <squad_table>
 | Role | Model |
 |------|-------|
-| lead | glm-5.2 |
-| first-pass | deepseek-v4-pro |
-| security | kimi-k2.7-code |
-| deep | glm-5.2 |
+| lead | mimo-v2.6-pro (overlay `routing.review.lead`, FOC-1171) |
+| first-pass | glm-5.3-flash |
+| security | glm-5.3 |
+| deep | glm-5.3 |
 </squad_table>
+
+Models mirror `config/models.json` routing v2 (FOC-964) as of 2026-11-03 — the config is the source, this table is a snapshot; decisions of record: ADR-0015 §3–4.
 
 <runtime>Full loop (parallel dispatch, merge authority, Conventional Comments format, round tracking, escalation at round 3): see `agents/review/CLAUDE.md`.</runtime>
 

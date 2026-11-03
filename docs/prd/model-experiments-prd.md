@@ -1,6 +1,6 @@
 # PRD — Model experiments: per-ticket model arms for the Supervisor and the squad leads
 
-Status: **draft, awaiting Mateusz's acceptance** (2026-10-21). Linear: FOC-967 (mechanism), FOC-965 (the campaign it serves). Overview page: `docs/ui/model-routing.html`. Analysis: `docs/research/model-routing-2026-10-21.md`.
+Status: **draft, awaiting Mateusz's acceptance** (2026-10-21); the arm list below was fixed on 2026-11-03 (ADR-0015 §5). Linear: FOC-967 (mechanism), FOC-965 (the campaign it serves). Overview page: `docs/ui/model-routing.html`. Analysis: `docs/research/model-routing-2026-10-21.md`.
 
 ## 1. Problem / goal
 
@@ -10,7 +10,7 @@ FOC-965 compares models on real tickets: 6 arms for the Supervisor, 3 for each o
 
 ## 2. User journey (Mateusz)
 
-1. Dashboard → Settings → **Experiments** → "New experiment": slot `supervisor`, arms `mimo-v2.6-pro, glm-5.3-flash, muse-spark-1.3, gemini-4-argon, gpt-6.1-sol, claude-sonnet-5.5`, 5 tickets per arm, cost cap $300 → Start.
+1. Dashboard → Settings → **Experiments** → "New experiment": slot `supervisor`, arms `glm-5.3-flash, mimo-v2.6-pro, claude-haiku-5.5, gemini-4-argon, muse-spark-1.3, claude-sonnet-5.5`, 5 tickets per arm, cost cap $300 → Start.
 2. He keeps working normally: picks tickets on the Work board. Each new ticket shows a badge `exp: supervisor · gemini-4-argon`. The ticket's Supervisor session starts on that model.
 3. The Experiments card shows `gemini-4-argon 3/5 · $31 · first-time-right 2/3`. He can pause, stop, or exclude a ticket (e.g. a trivial one) — the excluded ticket's slot is re-issued.
 4. When every arm has 5 tickets (or the cap is hit), the experiment completes, new tickets go back to the default model, and the report is ready: per arm p20/p50/p80 of $ per ticket, time to landed branch, interventions, rounds.

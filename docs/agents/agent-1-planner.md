@@ -22,7 +22,7 @@ Launcher: `bin/plan.bat` (`CLAUDE_CONFIG_DIR=configs/plan`). Trigger: `planning/
 |------|-------|---------|
 | discovery | minimax | inbox echo-back + brief ≤1 page |
 | dor_gate | deepseek_flash | DoR checklist (Why/AC/scope/dependencies/outcome) |
-| spec | glm-5.2 | spec + ADR (if arch decision) |
+| spec | mimo-v2.6-pro | spec + ADR (if arch decision) |
 | spec_review | minimax | skeptic pass, ≤2 loops |
 | decompose | minimax | vertical slices (t-shirt S/M/L/XL); 3–15 subtasks; `slice:N` |
 | push | deepseek_flash | idempotent Linear create + rollback |

@@ -134,15 +134,15 @@ FOC-957 remote control epic, phases C–E (remote transport, gateway + on-demand
   later ones never run.
 * **Release an rc:**
   1. A small PR bumps `VERSION` (the launcher pulls the image named there).
-  2. Mateusz merges it.
+  2. The delivery owner merges it after green CI (ADR-0015 §1).
   3. Wait for green `main` CI.
   4. Push an annotated tag `v1.0.0-rc.N` on the merge commit. Tag pushes need Mateusz's explicit OK.
   5. The `publish-image` workflow builds `ghcr.io/joint-hubs/fenix:<VERSION>`.
-* **Merging:** Mateusz merges PRs to `main` himself. Call a PR merge-ready only after its CI is green.
+* **Merging:** the delivery owner merges PRs to `main` after green CI (Mateusz's authorisation of 2026-10-17, ADR-0015 §1); the Supervisor never merges. Call a PR merge-ready only after its CI is green.
 
 ## 6. Gotchas learned the hard way
 
-* **The Supervisor (mimo-v2.6-pro) works around tooling errors instead of reporting them.** It patched
+* **The Supervisor (mimo-v2.6-pro at the time; glm-5.3-flash since 2026-11-02, ADR-0015 §3) works around tooling errors instead of reporting them.** It patched
   `/opt/fenix`, set `safe.directory`, and tried CronCreate and background polls. Read its transcript, not only
   its chat summary: `/data/agents/supervisor/projects/<slug>/<session>.jsonl` in the supervisor container. The
   rule "a failing Fenix script → hold with the full error" was given in chat; FOC-988 makes it permanent.
@@ -172,7 +172,7 @@ FOC-957 remote control epic, phases C–E (remote transport, gateway + on-demand
 
 * He writes in Polish, often dictated. Answer in Polish; code, commits and docs are in English.
 * Commits: no `Co-Authored-By` trailer; specific messages in the repo's style.
-* He merges to `main` and approves tag pushes. Anything destructive, security-boundary or money-related needs
+* He answers gates and approves tag pushes; the delivery owner merges to `main` (ADR-0015 §1). Anything destructive, security-boundary or money-related needs
   his explicit OK.
 * Prefer delegating implementation to cheap workers (Atlas `agent_spawn`, `z-ai/glm-5.3-flash`, reviews on
   `z-ai/glm-5.3`). If Atlas is down, ask; do not substitute another model. Verify every worker result yourself.

@@ -11,11 +11,13 @@ maturity: v2
 <squad_table>
 | Role | Model |
 |------|-------|
-| lead | minimax-m3 |
-| collector | minimax-m3 |
-| retro | glm-5.2 |
-| digest | deepseek-v4-pro |
+| lead | glm-5.3-flash |
+| collector | glm-5.3-flash |
+| retro | mimo-v2.6-pro |
+| digest | glm-5.3-flash |
 </squad_table>
+
+Models mirror `config/models.json` routing v2 (FOC-964) as of 2026-11-03 — the config is the source, this table is a snapshot; decisions of record: ADR-0015 §3–4.
 
 <runtime>Full loop (orchestration, dispatch rules, HITL policy, safety constraints, gate rules): see `agents/cadence/CLAUDE.md`.</runtime>
 

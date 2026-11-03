@@ -114,7 +114,7 @@ comment-replace|attach-link`, `fenix-github.pr-create|pr-edit|pr-comment`.
   ≈ $5/month (paid either way).
 - Cloud Run gateway: scale to zero, requests far inside the free tier → ≈ $0. Direct VPC egress: no connector fee.
 - No load balancer, no static IP, no tunnel service.
-- Model cost unchanged (Supervisor on x-ai/grok-4.7, children per routing).
+- Model cost unchanged (Supervisor per routing — `z-ai/glm-5.3-flash` since 2026-11-02, ADR-0015 §3 — children per routing).
 
 ## 8. Phases and tasks
 

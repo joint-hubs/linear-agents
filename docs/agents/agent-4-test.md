@@ -20,13 +20,13 @@ Launcher: `bin/test.bat` (`CLAUDE_CONFIG_DIR=configs/test`). Trigger: task `stag
 <squad>
 | role | model | routing |
 |------|-------|---------|
-| deploy | deepseek-v4-pro | orchestration (fast tool-call, multimodal UI shots) |
-| scenarios | deepseek-v4-flash | test case gen (bulk cheapest) |
+| deploy | glm-5.3-flash | orchestration (fast tool-call, multimodal UI shots) |
+| scenarios | glm-5.3-flash | test case gen (bulk cheapest) |
 | run | minimax | E2E smoke + critical-path (multimodal: UI screenshots) |
-| root_cause | glm-5.2 | hard debug of failures |
+| root_cause | glm-5.3 | hard debug of failures |
 | terminal_debug | gpt-5.5 | terminal-heavy issues (optional) |
 | worker | minimax | summary / observability check |
-| flash | deepseek-v4-flash | flaky-fix suggestions |
+| flash | glm-5.3-flash | flaky-fix suggestions |
 </squad>
 
 <delegation_policy>

@@ -11,12 +11,14 @@ maturity: v2
 <squad_table>
 | Role | Model |
 |------|-------|
-| lead | minimax-m3 |
-| deploy | deepseek-v4-pro |
-| scenario_gen | deepseek-v4-flash |
-| runner | minimax-m3 |
-| root_cause | glm-5.2 |
+| lead | glm-5.3-flash |
+| deploy | glm-5.3-flash |
+| scenario_gen | glm-5.3-flash |
+| runner | glm-5.3-flash |
+| root_cause | glm-5.3 |
 </squad_table>
+
+Models mirror `config/models.json` routing v2 (FOC-964) as of 2026-11-03 — the config is the source, this table is a snapshot; decisions of record: ADR-0015 §3–4.
 
 <runtime>Full loop (deploy→health→E2E→verdict, synthetic data policy, flaky rules, loop-limit, rollback behavior): see `agents/test/CLAUDE.md`.</runtime>
 
@@ -25,7 +27,7 @@ maturity: v2
 - Health-check: mandatory before E2E; fail → auto-rollback, abort, report FAIL.
 - Scenarios: synthetic data only (no prod PII, RODO compliant); happy + 3–5 edge cases per AC.
 - Runner: assertions on VALUES (not `toBeDefined`); flaky → diagnose root cause (no blind-retry); observability (logs/metrics post-deploy).
-- Root-cause: GLM-5.2 on E2E failures; post findings, return to DEV In Progress.
+- Root-cause: GLM-5.3 on E2E failures; post findings, return to DEV In Progress.
 </scope>
 
 <build>

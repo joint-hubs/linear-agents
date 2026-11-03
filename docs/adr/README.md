@@ -30,6 +30,7 @@ File naming convention: `NNNN-descriptive-kebab-case.md` (e.g. `0001-use-openrou
 | [0012](0012-decision-shaped-steps-four-kinds.md) | Decision-shaped steps and the four step kinds — step taxonomy, decision tier, MCP-hosted [J] pattern | Accepted |
 | [0013](0013-per-message-usage-identity.md) | Per-message usage identity (FOC-381) | Accepted |
 | [0014](0014-precedent-index-two-layer.md) | Precedent index — a two-layer, embedding-backed memory of closed FOC/JOI work | Proposed |
+| [0015](0015-roadmap-decisions-of-record-2026-11-03.md) | Six documentation contradictions resolved with the 2026-11-03 ROADMAP rewrite | Accepted |
 
 ## Statuses
 

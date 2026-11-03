@@ -1,6 +1,6 @@
 # Fenix 1.0.0 — release dossier
 
-Status: **skeleton (FOC-790)** — hand-written dossier, filled against `main` as of 2026-10-20.
+Status: **skeleton (FOC-790)** — hand-written dossier, filled against `main` as of 2026-10-20; this file is the 1.0 dossier, FOC-724 is the 1.1 generator (ADR-0015 §2). §3 fills after FOC-789 day 6 (rc.10, 2026-11-09 → 11-24).
 Structure follows FOC-790: scope (M8 children and their PRs), the FOC-789 acceptance record, the
 sizing (FOC-809), known limits and every open snag as a FOC id. No PRD prescribes a different
 structure (`docs/prd/fenix-1.0.0-release-prd.md` scopes the release; `docs/prd/release-dossier-prd.md`
@@ -22,7 +22,7 @@ and task workspaces with concurrent Supervisors on one repository.
 PR numbers resolved from git history on `origin/main` (merge-commit subjects and bodies);
 Linear statuses as of 2026-10-20. "—" = no merge commit found in git history.
 
-### Done (37)
+### Done (38)
 
 | Issue | Title | PR |
 |---|---|---|
@@ -43,6 +43,7 @@ Linear statuses as of 2026-10-20. "—" = no merge commit found in git history.
 | FOC-785 | Costs & quality | #70 |
 | FOC-786 | Settings — provider, key vault, repos, retention, routing screens | #71 |
 | FOC-787 | Insights — Tickets, Money and Outliers panels | #104 |
+| FOC-943 | Supervisor writes to Linear/GitHub through Fenix MCP servers; declared permission mode (closed after verification) | #124 |
 | FOC-788 | Push / Open PR button from the dashboard (human confirms) | #71 |
 | FOC-791 | Dashboard v2 Team — line-ups per lead, `GET /api/team` | #103 |
 | FOC-799 | Docker follow-ups — orphaned children marked `crashed`, CodeGraph approvals on the volume | #59 |
@@ -70,13 +71,12 @@ Linear statuses as of 2026-10-20. "—" = no merge commit found in git history.
 |---|---|---|---|
 | FOC-777 | `fenix up` / `update` pull the pinned image; `--source` builds from the clone | Merged (#117) — AC1 pending FOC-789 | #117 |
 | FOC-781 | Quickstart docs | In Review — needs a README run by someone other than Mateusz | — |
-| FOC-943 | Supervisor writes to Linear/GitHub through Fenix MCP servers; declared permission mode | Merged (#124) | #124 |
 
 ### Open
 
 | Issue | What it is | PR |
 |---|---|---|
-| FOC-789 | Fresh-machine acceptance run on a real Linear issue (release AC1) | — |
+| FOC-789 | Fresh-machine acceptance (release AC1): parts 1–2 and day 5 ran 2026-10-21 → 10-27 on rc.5 → rc.9; day 6 on rc.10 2026-11-09 → 11-24 | — |
 | FOC-790 | Release notes + dossier (this file) + tag `v1.0.0` | — |
 | FOC-878 | Per-run child identity — residual of FOC-802 | — |
 | FOC-920 | Parked-prompt policy (what happens to a Supervisor parked > 10 min) | — |
@@ -120,7 +120,7 @@ Quoted verbatim:
 - The Quickstart docs (FOC-781) have not been walked through by anyone other than Mateusz yet.
 - A Supervisor hitting a `Do you want to proceed?` prompt stops until a human answers —
   visibility exists (FOC-918), the parked-prompt policy does not (FOC-920).
-- The acceptance run (FOC-789) has not happened: the §3 record and the release metrics are
+- The acceptance run (FOC-789) is not finished (parts 1–2 and day 5 done; day 6 on rc.10 from 2026-11-09): the §3 record and the release metrics are
   placeholders, and `v1.0.0` is not tagged.
 
 ## 6. Upgrade from earlier builds
@@ -133,6 +133,6 @@ Includes the FOC-783 Cockpit-hooks merge note.
 
 - Provider: OpenRouter as the shipped default, pluggable (FOC-773).
 - Image published publicly on GHCR (FOC-775, 2026-10-19).
-- Supervisor model: `xiaomi/mimo-v2.6-pro` (grok-4.7 tried 2026-10-20, ~12× the cost at equal AA intelligence; A/B candidates FOC-965).
+- Supervisor model: `z-ai/glm-5.3-flash` since 2026-11-02 (ADR-0015 §3); `xiaomi/mimo-v2.6-pro` was the lead 2026-10-21 → 11-02 and is the REVIEW lead (FOC-1171); grok-4.7 tried 2026-10-20, ~12× the cost at equal AA intelligence; A/B arms FOC-965.
 - Permission mode `auto` declared at the Supervisor launch (FOC-943).
 - Task workspaces as a 1.0 pillar (2026-10-15, FOC-839 hardening).

@@ -16,13 +16,15 @@ with recon, implementer, refactorer, debugger. One WIP at a time (enforced).
 | Sub-agent | Model | Routing | Responsibility |
 |---|---|---|---|
 | **lead** | — | orchestrator | Pick (Backlog+dor-ok), delegate phases, hand-off to In Review |
-| **recon** | minimax-m3 | context packet | Analyze task + code → files, patterns, risks |
-| **implementer** | glm-5.2 | standard code | ENTIRE edit→build→test→commit cycle (one delegation) |
-| **refactorer** | kimi-k2.7-code | multi-file / MCP | Multi-file, complex refactoring, tool-intensive |
-| **debugger** | deepseek-v4-pro | hard / arch decision | Failed builds, architecture issues, escalations |
-| **worker** | minimax-m3 | simple | Single-file, boilerplate (fallback for simple changes) |
-| **flash** | deepseek-v4-flash | mechanical | Extraction, formatting, checklists (fallback) |
+| **recon** | glm-5.3-flash | context packet | Analyze task + code → files, patterns, risks |
+| **implementer** | glm-5.3-flash | standard code | ENTIRE edit→build→test→commit cycle (one delegation) |
+| **refactorer** | glm-5.3 | multi-file / MCP | Multi-file, complex refactoring, tool-intensive |
+| **debugger** | glm-5.3 | hard / arch decision | Failed builds, architecture issues, escalations |
+| **worker** | glm-5.3-flash | simple | Single-file, boilerplate (fallback for simple changes) |
+| **flash** | glm-5.3-flash | mechanical | Extraction, formatting, checklists (fallback) |
 </squad_table>
+
+Models mirror `config/models.json` routing v2 (FOC-964) as of 2026-11-03 — the config is the source, this table is a snapshot; decisions of record: ADR-0015 §3–4.
 
 <runtime>
 Full loop spec: [`agents/dev/CLAUDE.md`](../../agents/dev/CLAUDE.md) (runtime source of truth).
