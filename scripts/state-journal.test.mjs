@@ -13,11 +13,13 @@
 // Run: node scripts/state-journal.test.mjs
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { initJournal, addEntry, setFields, runCli } from "./state-journal.mjs";
+import { initJournal, addEntry, setFields, resolveRoot, runCli } from "./state-journal.mjs";
 
 let passed = 0;
 const failures = [];
@@ -169,6 +171,76 @@ test("set stores $-patterns in the value literally, not as replacement backrefer
   const res = cli(["set", "--field", "PR=$& $1 X"], { root });
   assert.equal(res.code, 0, res.err.join("\n"));
   assert.match(readFileSync(join(root, "docs", "state", "FOC-904.md"), "utf8"), /^PR: \$& \$1 X$/m);
+});
+
+console.log("\nresolveRoot — which root wins (FOC-1211)");
+
+const scriptPath = fileURLToPath(new URL("./state-journal.mjs", import.meta.url));
+const ownRepo = resolve(dirname(scriptPath), "..");
+
+/** A throwaway git repository under tmpdir, with docs/state/ pre-created for init. */
+function tmpGitRepo() {
+  const dir = mkdtempSync(join(tmpdir(), "la-journal-git-"));
+  const res = spawnSync("git", ["init", "-q"], { cwd: dir, encoding: "utf8" });
+  assert.equal(res.status, 0, `git init failed: ${res.stderr}`);
+  mkdirSync(join(dir, "docs", "state"), { recursive: true });
+  return dir;
+}
+
+/** A throwaway NON-git directory — for the LA_ROOT / own-repo fallbacks. */
+function tmpPlainDir() {
+  const dir = mkdtempSync(join(tmpdir(), "la-journal-plain-"));
+  const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8" });
+  assert.notEqual(probe.status, 0, "tmpdir sits inside a git repository — this fixture is not a valid non-repo here");
+  return dir;
+}
+
+test("resolveRoot prefers the cwd's git repository over LA_ROOT", () => {
+  const main = tmpGitRepo();
+  const worktree = tmpGitRepo();
+  assert.equal(resolveRoot({ LA_ROOT: main }, worktree), resolve(worktree));
+});
+
+test("resolveRoot keeps the cwd's repo when LA_ROOT names the same repository", () => {
+  const main = tmpGitRepo();
+  assert.equal(resolveRoot({ LA_ROOT: main }, main), resolve(main));
+});
+
+test("resolveRoot falls back to LA_ROOT when cwd is not a git repository", () => {
+  const plain = tmpPlainDir();
+  const main = tmpGitRepo();
+  assert.equal(resolveRoot({ LA_ROOT: main }, plain), resolve(main));
+});
+
+test("resolveRoot falls back to the script's own repo when neither cwd nor LA_ROOT applies", () => {
+  const plain = tmpPlainDir();
+  assert.equal(resolveRoot({}, plain), ownRepo);
+});
+
+test("end to end: the CLI journals into the cwd's repository, not LA_ROOT", () => {
+  const main = tmpGitRepo();
+  const worktree = tmpGitRepo();
+  const res = spawnSync(process.execPath, [scriptPath, "init", "--task", "FOC-1211"], {
+    cwd: worktree,
+    env: { ...process.env, LA_ROOT: main },
+    encoding: "utf8",
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(existsSync(join(worktree, "docs", "state", "FOC-1211.md")), "journal missing in the cwd's repository");
+  assert.equal(existsSync(join(main, "docs", "state", "FOC-1211.md")), false, "journal leaked into LA_ROOT");
+});
+
+test("end to end: --root overrides the cwd's repository", () => {
+  const worktree = tmpGitRepo();
+  const override = tmpGitRepo();
+  const res = spawnSync(
+    process.execPath,
+    [scriptPath, "init", "--task", "FOC-1211-R", "--root", override],
+    { cwd: worktree, env: { ...process.env }, encoding: "utf8" },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(existsSync(join(override, "docs", "state", "FOC-1211-R.md")), "--root was ignored");
+  assert.equal(existsSync(join(worktree, "docs", "state", "FOC-1211-R.md")), false, "--root was not exclusive");
 });
 
 console.log("\nsummary");
