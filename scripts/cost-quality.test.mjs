@@ -746,6 +746,93 @@ test("quality: the named pairing is scoped to the record's run — round N of AN
   assert.deepEqual(signal.evidence, []);
 });
 
+test("quality: reviewFalsePass counts the pair a LIVE delivery fail names via contradicts (FOC-1210 base-merge)", () => {
+  // FOC-1210: a live delivery read made AFTER main was merged into the work
+  // branch keeps its own (merged-tree) fingerprint and carries the pass's
+  // fingerprint in `contradicts`. The pairing reads the COPY's diff axis —
+  // the row's own fingerprintDiff is the merged tree and must never pair.
+  const facts = [
+    fact({
+      taskId: "FP10",
+      verdicts: [
+        // the live delivery fail: own fingerprintDiff is the MERGED tree,
+        // contradicts carries round 2's diff — the copy pairs
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-fail-10", fingerprintDiff: "d-merged-10",
+          contradictsRound: 2, contradictsDiff: "d-pass-2",
+          reason: "ci", at: "2026-11-01T10:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // names the round but the COPY's diff does not match the pass — no pair
+    fact({
+      taskId: "FP11",
+      verdicts: [
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-fail-11", fingerprintDiff: "d-now-11",
+          contradictsRound: 2, contradictsDiff: "d-other-11",
+          reason: "design", at: "2026-11-01T10:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-11", fingerprintDiff: "d-pass-11", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+    // contradicts names round 4, which does not exist beside it — the row is
+    // still `later` for round 2, but its OWN diff axis is the merged tree and
+    // does not pair positionally either
+    fact({
+      taskId: "FP12",
+      verdicts: [
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-fail-12", fingerprintDiff: "d-now-12",
+          contradictsRound: 4, contradictsDiff: "d-pass-2",
+          reason: "ci", at: "2026-11-01T10:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-12", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, 1 / 3);
+  assert.equal(signal.numerator, 1);
+  assert.equal(signal.denominator, 3);
+  assert.deepEqual(signal.evidence, ["FP10"]);
+});
+
+test("quality: a contradicts row that is both later and named counts once (dedup)", () => {
+  // The r2 dedup rule, FOC-1210 edition: the live contradicts row IS later
+  // (recorded after the pass) and named (contradictsRound matches) — the round
+  // is counted once, and the falsification comes from the COPY's diff.
+  const facts = [
+    fact({
+      taskId: "FP13",
+      verdicts: [
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3,
+          fingerprint: "c-fail-13", fingerprintDiff: "d-merged-13",
+          contradictsRound: 2, contradictsDiff: "d-pass-2",
+          reason: "ci", at: "2026-11-01T10:00:00Z",
+        }),
+        vRow({ round: 2, fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, 1);
+  assert.equal(signal.numerator, 1);
+  assert.equal(signal.denominator, 1);
+  assert.deepEqual(signal.evidence, ["FP13"]);
+});
+
 test("quality: ciRedAfterReady counts delivery fails citing reason ci", () => {
   const facts = [
     fact({

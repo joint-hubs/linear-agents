@@ -282,6 +282,49 @@ test("collectTicketFacts: verdict rows carry squad, fingerprint and reason (FOC-
   );
 });
 
+test("collectTicketFacts: verdict rows carry contradictsRound/contradictsDiff (FOC-1210 live base-merge)", () => {
+  // FOC-1210: a live delivery record that proves merge-only keeps its own
+  // fingerprint and carries the contradicted pass's fingerprint in
+  // `contradicts`. reviewFalsePass pairs on the COPY's diff axis, so the rows
+  // must surface both — a record without the block reads null on both, exactly
+  // like the pre-existing optional fields.
+  const run = fixtureRun("runv3");
+  writeRegistry(run, { d1: childEntry("d1", { taskId: "FOC-121", squad: "dev", status: "exited" }) });
+  writeVerdict(run, "FOC-121", 1, {
+    taskId: "FOC-121",
+    runId: run,
+    childId: null,
+    squad: "delivery",
+    round: 1,
+    verdict: "fail",
+    reason: "ci",
+    recordedAt: iso(30),
+    fingerprint: { combined: "fp-now-1", diff: "fp-diff-now", tests: "y", failingTests: ["suite/ci"], changedFiles: 0, error: null },
+    contradicts: { round: 2, reason: "base-merge", fingerprint: { combined: "fp-pass-2", diff: "fp-diff-pass" } },
+  });
+  writeVerdict(run, "FOC-121", 2, {
+    taskId: "FOC-121",
+    runId: run,
+    round: 2,
+    verdict: "pass",
+    squad: "review",
+    fingerprint: { combined: "fp-pass-2", diff: "fp-diff-pass" },
+    reason: null,
+    recordedAt: iso(20),
+  });
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  const f121 = factsByTask(facts, "FOC-121");
+  assert.deepEqual(
+    f121.verdicts.map((v) => [v.squad, v.fingerprintDiff, v.contradictsRound, v.contradictsDiff]),
+    [
+      // the delivery row keeps its own (merged-tree) diff AND carries the copy
+      ["delivery", "fp-diff-now", 2, "fp-diff-pass"],
+      // a record without the block reads null on both
+      ["review", "fp-diff-pass", null, null],
+    ],
+  );
+});
+
 test("collectTicketFacts: children without startedAt take it from their turns", () => {
   // The registry's real shape: no child.startedAt/endedAt, turns only. The
   // effective start must make review-2 the latest child — on the acceptance

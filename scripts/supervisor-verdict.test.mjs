@@ -176,6 +176,18 @@ function advance(s, name) {
   gitIn(s.worktree, "commit", "-m", name);
 }
 
+/**
+ * The supervisor's normal mid-task step (plan §4b): move main, merge it into
+ * the work branch. Different files, so the merge is clean — the point is the
+ * merge COMMIT on the branch, not a conflict.
+ */
+function mergeMain(s, name) {
+  writeFileSync(join(s.repo, name), `main ${name}\n`);
+  gitIn(s.repo, "add", "-A");
+  gitIn(s.repo, "commit", "-m", `main: ${name}`);
+  gitIn(s.worktree, "merge", "main", "--no-edit");
+}
+
 const record = (s, extra = []) =>
   parse(verdict(["record", "--run", s.runId, "--child", "review-1", ...extra]), fail);
 
@@ -1972,16 +1984,131 @@ test("a --recorded-at offset is bounded to ISO 8601 (±14:00 exactly), a real of
 // ── 5d. backfilled delivery fingerprints name the round they contradict (FOC-1194) ──
 console.log("\nbackfill --contradicts-round — osadzony w tej samej twarzy co wyrok");
 
-test("--contradicts-round without --backfill is refused", () => {
+test("a LIVE delivery fail with --contradicts-round is accepted when only a merge of the base branch followed the pass (FOC-1210)", () => {
+  // The FOC-1179 shape: REVIEW r2 passed, then the supervisor merged main into
+  // the work branch, then the delivery read fingerprinted the MERGED tree —
+  // its diff axis no longer equals the pass's and reviewFalsePass cannot pair
+  // them. A live record keeps its OWN recomputed fingerprint (the tree as it
+  // is NOW) and additionally carries the pass's fingerprint in `contradicts`.
   const s = scenario();
   advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  const passRecord = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  assert.ok(passRecord.fingerprint.diff, "the review pass round 1 fingerprinted a real tree");
+
+  mergeMain(s, "main-move.txt");
+
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, true, out.error);
+  // The record's own fingerprint is the tree as it is NOW — recomputed, no
+  // source marker (that stays the backfill copy's marker).
+  assert.notEqual(out.fingerprint.diff, passRecord.fingerprint.diff, "the merged tree is not the tree the pass judged");
+  assert.equal(out.fingerprint.source, undefined, "a live record's fingerprint is its own, not a round-N copy");
+  // The contradicts block carries the pass's fingerprint verbatim.
+  assert.equal(out.contradicts.round, 1);
+  assert.equal(out.contradicts.reason, "base-merge");
+  assert.equal(out.contradicts.fingerprint.diff, passRecord.fingerprint.diff);
+  assert.equal(out.contradicts.fingerprint.combined, passRecord.fingerprint.combined);
+  assert.equal(out.contradicts.fingerprint.tests, passRecord.fingerprint.tests);
+  assert.equal(out.contradicts.fingerprint.changedFiles, passRecord.fingerprint.changedFiles);
+  assert.deepEqual(out.contradicts.fingerprint.failingTests, passRecord.fingerprint.failingTests);
+  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 2), "utf8"));
+  assert.equal(onDisk.contradicts.round, 1);
+  assert.equal(onDisk.contradicts.reason, "base-merge");
+});
+
+test("a LIVE --contradicts-round is refused when a non-merge commit landed after the pass", () => {
+  // The work itself changed after the pass — the copy would mislabel the
+  // defect's owner (a later DEV round's fix, not the reviewer's miss).
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  mergeMain(s, "main-move.txt");
+  advance(s, "fix.txt");
   const out = deliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--contradicts-round", "1",
   ]);
   assert.equal(out.ok, false);
   assert.match(out.error, /--contradicts-round/);
-  assert.match(out.error, /--backfill/);
+  assert.match(out.error, /non-merge/);
+});
+
+test("a LIVE --contradicts-round is refused when rework (a non-merge commit) followed the pass with no merge at all", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  advance(s, "rework.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /non-merge/);
+});
+
+test("a LIVE --contradicts-round is refused when the pass tree was dirty — merge-only cannot be proven from history", () => {
+  // The pass's fingerprint folded uncommitted state in; a commit tree cannot
+  // reproduce that, so the check fails closed rather than guess.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  writeFileSync(join(s.worktree, "uncommitted.txt"), "dirty\n");
+  record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--ran", ranFlag(s),
+  ]);
+  mergeMain(s, "main-move.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /--contradicts-round/);
+  assert.match(out.error, /uncommitted/);
+});
+
+test("a LIVE --contradicts-round naming a round that does not exist is refused", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--contradicts-round", "3",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /round 3 of FOC-123/);
+});
+
+test("a LIVE --contradicts-round naming a delivery round is refused — the copy must come from the REVIEW pass", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const first = deliveryRecord(s, ["--verdict", "pass"]);
+  assert.equal(first.ok, true, first.error);
+  const out = deliveryRecord(s, [
+    "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
+    "--contradicts-round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /not a REVIEW pass/);
 });
 
 test("a backfilled delivery fail with --contradicts-round carries the judged round's fingerprint, source round-N", () => {
