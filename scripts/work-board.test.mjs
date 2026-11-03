@@ -254,6 +254,7 @@ test("collectTicketFacts: verdict rows carry squad, fingerprint and reason (FOC-
   });
   writeVerdict(run, "FOC-116", 2, {
     taskId: "FOC-116",
+    runId: run,
     round: 2,
     verdict: "pass",
     squad: "review",
@@ -264,12 +265,12 @@ test("collectTicketFacts: verdict rows carry squad, fingerprint and reason (FOC-
   const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
   const f116 = factsByTask(facts, "FOC-116");
   assert.deepEqual(
-    f116.verdicts.map((v) => [v.squad, v.verdict, v.reason, v.fingerprint, v.fingerprintDiff, v.fingerprintSource]),
+    f116.verdicts.map((v) => [v.squad, v.verdict, v.reason, v.fingerprint, v.fingerprintDiff, v.fingerprintSource, v.runId]),
     [
-      ["delivery", "FAIL", "ci", "fp-combined-1", "fp-diff-1", "round-2"],
+      ["delivery", "FAIL", "ci", "fp-combined-1", "fp-diff-1", "round-2", run],
       // a record without fingerprint.diff reads null — UNKNOWN, never a match;
       // one without fingerprint.source (the normal path) reads null too
-      ["review", "PASS", null, "fp-combined-2", null, null],
+      ["review", "PASS", null, "fp-combined-2", null, null, run],
     ],
   );
   assert.ok(f116.verdicts[0].path.endsWith("foc-116-round1.json"));

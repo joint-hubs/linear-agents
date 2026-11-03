@@ -531,6 +531,8 @@ const vRow = (over = {}) => ({
   squad: "review",
   fingerprint: "fp1",
   fingerprintDiff: "d1",
+  fingerprintSource: null,
+  runId: "run-fixture",
   reason: null,
   at: "2026-11-01T10:00:00.000Z",
   path: "p",
@@ -711,6 +713,37 @@ test("quality: reviewFalsePass counts the pair a backfilled delivery fail names 
   assert.equal(signal.numerator, 1);
   assert.equal(signal.denominator, 2);
   assert.deepEqual(signal.evidence, ["FP7"]);
+});
+
+test("quality: the named pairing is scoped to the record's run — round N of ANOTHER run never pairs", () => {
+  // r2 finding 1: facts.verdicts merges a task's rounds across every run in the
+  // window. A bare round number would pair a backfilled delivery with
+  // same-numbered review rounds of OTHER runs — the denominator inflates
+  // systematically in the multi-run backfill baseline. The named match needs
+  // the same runId; a row without one (legacy/unreadable) pairs positionally
+  // only.
+  const facts = [
+    fact({
+      taskId: "FP9",
+      verdicts: [
+        // the backfilled delivery fail — names round 2, but of run-other
+        vRow({
+          squad: "delivery", verdict: "FAIL", round: 3, runId: "run-other",
+          fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", fingerprintSource: "round-2",
+          reason: "ci", at: "2026-11-01T08:00:00Z",
+        }),
+        // review pass round 2 — a DIFFERENT run's chain
+        vRow({ round: 2, runId: "run-fixture", fingerprint: "c-pass-2", fingerprintDiff: "d-pass-2", at: "2026-11-01T09:00:00Z" }),
+      ],
+      lastActivityAt: NOW - DAY,
+    }),
+  ];
+  const payload = buildQualityPayload({ snapshot: snapshot(), facts, linearStates: {}, period: "all", now: NOW });
+  const signal = payload.signals.find((s) => s.key === "reviewFalsePass");
+  assert.equal(signal.value, null, "a cross-run same-numbered round is not the pass this record contradicts");
+  assert.equal(signal.numerator, 0);
+  assert.equal(signal.denominator, 0);
+  assert.deepEqual(signal.evidence, []);
 });
 
 test("quality: ciRedAfterReady counts delivery fails citing reason ci", () => {

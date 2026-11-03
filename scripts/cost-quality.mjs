@@ -386,7 +386,19 @@ export function buildQualityPayload({
     rows.forEach((row, i) => {
       if (row.squad !== "review" || row.verdict !== "PASS") return;
       const named = row.round != null
-        ? rows.filter((v) => v.squad === "delivery" && v.fingerprintSource === `round-${row.round}`)
+        ? // r2 nit 9: row.round is always numeric (work-board emits a 0
+          // fallback) — the guard documents the contract, it is not a check.
+          rows.filter(
+            (v) =>
+              v.squad === "delivery" &&
+              v.fingerprintSource === `round-${row.round}` &&
+              // r2 finding 1: the source names a round WITHIN the record's own
+              // run — one task's rows merge across every run in the window, so
+              // a bare round number would pair same-numbered review rounds of
+              // OTHER runs too. Null runIds (legacy/unreadable) pair
+              // positionally only.
+              v.runId != null && v.runId === row.runId,
+          )
         : [];
       const later = rows.slice(i + 1).filter((v) => v.squad === "delivery");
       // later and named can hold the same row — the union, deduped by identity.

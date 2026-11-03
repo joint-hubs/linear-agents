@@ -339,6 +339,10 @@ export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 3
           // (fingerprint.source "round-N"). null on every other record — the
           // quality signal pairs this with the named review round.
           fingerprintSource: record.unreadable ? null : record.fingerprint?.source ?? null,
+          // FOC-1194 r2: the record's run — the named pairing scopes "round-N"
+          // to this run, so cross-run same-numbered rounds never pair. null
+          // (legacy/unreadable) pairs positionally only.
+          runId: record.unreadable ? null : record.runId ?? null,
           reason: record.unreadable ? null : record.reason ?? null,
           at: record.recordedAt ?? null,
           path: useLib
