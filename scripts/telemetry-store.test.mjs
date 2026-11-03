@@ -1,6 +1,7 @@
 // Contract test for the central telemetry store.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -32,6 +33,8 @@ import {
   SCHEMA_VERSION,
   MIGRATION_VERSIONS,
   CANONICAL_USAGE_SQL,
+  setGitFactsDeps,
+  warmGitFacts,
 } from "./telemetry-store.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1189,6 +1192,34 @@ test("FOC-808 idle open: a stale canonical view forces the recreate on reopen", 
   assert(body != null, "canonical_usage view missing after reopen");
   assert(norm(body.sql) === norm(CANONICAL_USAGE_SQL),
     `the view body was not restored to the current definition: ${body.sql.slice(0, 80)}`);
+});
+
+// FOC-1207: a child-stdio socket 'error' on warmGitFacts' piped streams must
+// resolve null (the exec error path's outcome), never escape as an uncaught
+// event. The fake child's callback NEVER fires — only the stream-error
+// listener can settle the promise.
+test("FOC-1207 warmGitFacts: stdout stream error resolves null, not uncaught", async () => {
+  const { EventEmitter } = await import("node:events");
+  const fakeChild = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+  let calls = 0;
+  setGitFactsDeps({
+    execFile: (cmd, args, opts, cb) => {
+      calls++;
+      setImmediate(() => fakeChild.stdout.emit(
+        "error",
+        Object.assign(new Error("read ENOTCONN"), { code: "ENOTCONN", errno: -4053, syscall: "read" }),
+      ));
+      return fakeChild;
+    },
+  });
+  try {
+    let settled = false;
+    await warmGitFacts(["X:\\nonexistent-cwd"]).then(() => { settled = true; });
+    assert(settled, "warmGitFacts must resolve when the stdout stream errors");
+    assert(calls > 0, "the fake execFile must have been used (test cannot pass vacuously)");
+  } finally {
+    setGitFactsDeps({ execFile });
+  }
 });
 
 // FOC-351: await the async pair before exit so their pass/fail is counted.

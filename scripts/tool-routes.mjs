@@ -50,7 +50,9 @@ const PROBE_MAX_BUFFER = 1024 * 1024;
 // Injectable dependency (tests)
 // ---------------------------------------------------------------------------
 
-const deps = { probe: probeThoughtmap };
+// FOC-1207: `spawn` is a seam too — the stream-guard test swaps in a fake
+// child whose stdio emits 'error'.
+const deps = { probe: probeThoughtmap, spawn };
 
 /** Swap dependencies for tests — e.g. { probe: async () => ({ ok: true, ... }) }. */
 export function setToolRoutesDeps(overrides = {}) {
@@ -116,7 +118,7 @@ export function probeThoughtmap(cfg, { timeoutMs = PROBE_TIMEOUT_MS, pythonPath,
     });
 
     try {
-      child = spawn(python, [scriptPath], {
+      child = deps.spawn(python, [scriptPath], {
         env: {
           ...process.env,
           THOUGHTMAP_API_URL: cfg.baseUrl,
@@ -131,6 +133,15 @@ export function probeThoughtmap(cfg, { timeoutMs = PROBE_TIMEOUT_MS, pythonPath,
       finish(unavailable(err));
       return;
     }
+
+    // FOC-1207: a stdio pipe can emit 'error' (win32 read ENOTCONN on the
+    // socket) without the child itself failing; without a listener it escapes
+    // as an uncaught event that kills the server. Route it through the
+    // single-resolution finish() — the same guarantee every other outcome has.
+    const onStreamError = (err) => finish(unavailable(err));
+    child.stdout.on("error", onStreamError);
+    child.stderr.on("error", onStreamError);
+    child.stdin.on("error", onStreamError);
 
     // One request is in flight at a time; each answered stage sends the next.
     let nextId = 1;

@@ -3037,22 +3037,80 @@ export function comparableProgress(a, b) {
  * reads it too, and a CLI script is the wrong thing for another script to import.
  * Same rule the registry and the gate paths already follow.
  */
+// Where a run id becomes a PATH SEGMENT — `--work-run` on the CLI, and
+// `workRun` / `verdictRuns` read back from disk (FOC-1155) — this is the only
+// shape accepted. Permissive on purpose: legacy `test-*` and `run-*` ids are
+// legal dir names and the strict launcher shape (RUN_ID_RE in utils.mjs)
+// would reject them; but path separators are refused, so a provenance value
+// can never climb out of the state home. `.` and `..` are refused too — as a
+// lone segment each names the parent dir.
+const PATH_SAFE_RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
+export function isPathSafeRunId(id) {
+  return typeof id === "string" && PATH_SAFE_RUN_ID_RE.test(id) && id !== "." && id !== "..";
+}
+
 export function roundsFor(runId, taskId) {
-  const dir = verdictsDir(runId);
-  if (!existsSync(dir)) return [];
   const prefix = `${String(taskId).toLowerCase()}-round`;
-  return readdirSync(dir)
-    .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
-    .map((f) => {
+  // FOC-1155: a launcher restart mid-task splits one task's verdict chain
+  // across run dirs — the pre-restart rounds sit in the old run's verdicts dir,
+  // the post-restart ones in the new run's. Records written after the restart
+  // carry the work child's run as `workRun` provenance; following it
+  // (transitively, each run read once) is what lets this chain view — and
+  // through it the FOC-1146 progress guard in supervisor-followup — see a
+  // repeated round that sits on the other side of the split. Without
+  // provenance nothing is followed: single-run behaviour is identical to
+  // before. Records are keyed by "<runId>/<file>" so a record can never be
+  // counted twice when two views of the chain are merged.
+  //
+  // A workRun value that is not a path-safe run id is never followed — it
+  // would become a path, and an unvalidated disk value must not.
+  const merged = new Map();
+  const queue = [runId];
+  const seen = new Set(queue);
+  while (queue.length) {
+    const rid = queue.shift();
+    const dir = verdictsDir(rid);
+    if (!existsSync(dir)) continue;
+    const known = new Set(merged.keys());
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
       try {
-        return JSON.parse(readFileSync(join(dir, f), "utf8"));
+        merged.set(`${rid}/${f}`, JSON.parse(readFileSync(join(dir, f), "utf8")));
       } catch {
         // Unreadable is not absent. A verdict nobody can parse must not make the
         // round before it look like the latest one.
-        return { round: Number(f.slice(prefix.length, -5)) || 0, unreadable: true };
+        merged.set(`${rid}/${f}`, { round: Number(f.slice(prefix.length, -5)) || 0, unreadable: true });
       }
-    })
-    .sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
+    }
+    for (const [key, rec] of merged) {
+      if (known.has(key) || !rec?.workRun || seen.has(rec.workRun) || !isPathSafeRunId(rec.workRun)) continue;
+      seen.add(rec.workRun);
+      queue.push(rec.workRun);
+    }
+  }
+  return [...merged.values()].sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
+}
+
+/**
+ * One task's verdict chain across SEVERAL runs, oldest first (FOC-1155).
+ *
+ * Each run is read through roundsFor — which itself follows workRun
+ * provenance — and records seen in overlapping chains dedupe on
+ * round+recordedAt: a record lives in exactly one run's dir, so equal
+ * round+recordedAt is the same record seen twice, never two records.
+ */
+export function roundsAcross(runIds, taskId) {
+  const seen = new Set();
+  const chain = [];
+  for (const rid of runIds) {
+    for (const r of roundsFor(rid, taskId)) {
+      const key = `${r.round ?? "?"}@${r.recordedAt ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      chain.push(r);
+    }
+  }
+  return chain.sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
 }
 
 export function latestVerdict(runId, taskId) {
