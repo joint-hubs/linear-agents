@@ -717,16 +717,17 @@ scanner.unref(); // the child's pipes own this process's lifetime, not the timer
 // node --test suite; a dead codegraph server between it and its serve
 // grandchild). While the child is alive the watcher snapshots the table —
 // once shortly after the spawn, then once per LINEAGE_TICK_MS — and remembers
-// the verified descendants as pid → creation. finalizeTurn hands the map to
-// the reap, which accepts a row its identity saw before, or one born to a
-// remembered (now dead) parent inside the child's spawn window. An
-// intermediate that died between two ticks — alive in no snapshot — stays a
-// documented safe miss. Enumeration is sync and bounded (execFileSync with a
-// timeout, windowsHide), runs on a timer and never on the child's stdout
-// path, and a failure is a note, never a crash.
+// the verified descendants as pid → {creation, seenMs}. finalizeTurn hands
+// the map to the reap, which accepts a row its identity saw before, or one
+// born to a remembered (now dead) parent at or before the parent's
+// last-seen-alive moment and inside the child's spawn window. An intermediate
+// that died between two ticks — alive in no snapshot — stays a documented
+// safe miss. Enumeration is sync and bounded (execFileSync with a timeout,
+// windowsHide), runs on a timer and never on the child's stdout path, and a
+// failure is a note, never a crash.
 const LINEAGE_FIRST_TICK_MS = 1_200;
 const LINEAGE_TICK_MS = 60_000;
-const lineageRemembered = new Map(); // pid → creation, verified while the child lived
+const lineageRemembered = new Map(); // pid → {creation, seenMs}, verified while the child lived
 let lineageChildCreation = null; // the child row's creation stamp, from its first snapshot
 let lineageScanBusy = false; // the enumeration is sync; never overlap ticks
 function scanLineage() {
@@ -735,6 +736,9 @@ function scanLineage() {
   if (lineageScanBusy) return;
   lineageScanBusy = true;
   try {
+    // seenMs is captured BEFORE the enumeration: the snapshot moment is later
+    // than this, never earlier, so "born at or before seenMs" stays provable.
+    const seenMs = Date.now();
     const table = enumerateWin32Processes();
     if (table.skipped) {
       note({
@@ -747,7 +751,12 @@ function scanLineage() {
       table.entries.filter((e) => e.pid !== process.pid),
       child.pid,
       lineageRemembered,
-      { minCreationMs: childSpawnAt, maxCreationMs: Date.now(), childCreation: lineageChildCreation },
+      {
+        minCreationMs: childSpawnAt,
+        maxCreationMs: Date.now(),
+        seenMs,
+        childCreation: lineageChildCreation,
+      },
     );
   } catch (err) {
     note({

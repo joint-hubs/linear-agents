@@ -1375,7 +1375,7 @@ test("FOC-1168: a remembered row joins by identity even when its parent chain di
   const desc = descendantsInProcessTable(rows, 100, {
     minCreationMs: 800,
     maxCreationMs: 1000,
-    remembered: new Map([[301, 950]]),
+    remembered: new Map([[301, { creation: 950, seenMs: 1000 }]]),
   });
   assert.deepEqual(desc.map((d) => d.pid), [301]);
 });
@@ -1393,23 +1393,47 @@ test("FOC-1168: a reused pid fails the identity, and its child is born by the st
   const desc = descendantsInProcessTable(rows, 100, {
     minCreationMs: 800,
     maxCreationMs: 1000,
-    remembered: new Map([[201, 900]]),
+    remembered: new Map([[201, { creation: 900, seenMs: 1000 }]]),
   });
   assert.deepEqual(desc, []);
 });
 
+test("FOC-1168 r2: the bridge refuses a row born after the parent's last-seen-alive tick", () => {
+  // 201 was last PROVEN alive by the tick whose snapshot ran at 1000. A row
+  // born at 1500 claims pid 201 as its parent — but by then 201 may long have
+  // been dead, its pid transiently held by a stranger that spawned the row
+  // and exited. Nothing proves the parentage, so the band is refused; a row
+  // born AT the last-seen-alive moment is the inclusive boundary and joins.
+  const rows = TABLE([
+    [301, 201, 1500], // born after 201's last proven-alive moment — refused
+    [302, 201, 1000], // born exactly at it — the inclusive boundary, joins
+  ]);
+  const desc = descendantsInProcessTable(rows, 100, {
+    minCreationMs: 800,
+    maxCreationMs: 2000,
+    remembered: new Map([[201, { creation: 900, seenMs: 1000 }]]),
+  });
+  assert.deepEqual(
+    desc.map((d) => d.pid),
+    [302],
+    "a row born after the parent's last proven-alive moment has unprovable parentage",
+  );
+});
+
 test("FOC-1168: an orphan born BEFORE the reuse took the parent's pid still joins", () => {
-  // The remembered intermediate (pid 201, creation 900) died; pid 201 was
-  // then reused (born 950). The orphan born at 940 predates the reuse —
-  // whoever held the pid at 940 was our intermediate, so the row joins.
+  // The remembered intermediate (pid 201, creation 900) was last PROVEN
+  // alive by the tick whose snapshot ran at 945; the reuse now holding pid
+  // 201 was born at 950, after that tick. The orphan born at 940 is provably
+  // ours: born after our parent, at or before the parent's last proven-alive
+  // moment, and before the reuse existed to spawn anything.
   const rows = TABLE([
     [201, 500, 950], // the reuse, now in the table
-    [301, 201, 940], // born while our holder still held the pid
+    [301, 201, 940], // born at or before the parent's last proven-alive moment
   ]);
   const desc = descendantsInProcessTable(rows, 100, {
     minCreationMs: 800,
     maxCreationMs: 1000,
-    remembered: new Map([[201, 900]]),
+    remembered: new Map([[201, { creation: 900, seenMs: 945 }]]),
   });
   assert.deepEqual(desc.map((d) => d.pid), [301]);
 });
@@ -1422,7 +1446,7 @@ test("FOC-1168: the dead-intermediate bridge respects the child's spawn window",
   const desc = descendantsInProcessTable(rows, 100, {
     minCreationMs: 800,
     maxCreationMs: 1000,
-    remembered: new Map([[201, 900]]),
+    remembered: new Map([[201, { creation: 900, seenMs: 2000 }]]),
   });
   assert.deepEqual(desc, []);
 });
@@ -1438,7 +1462,7 @@ test("FOC-1168: a live remembered parent chains without the window bound on deep
   const desc = descendantsInProcessTable(rows, 100, {
     minCreationMs: 800,
     maxCreationMs: 1000,
-    remembered: new Map([[201, 900]]),
+    remembered: new Map([[201, { creation: 900, seenMs: 2000 }]]),
   });
   assert.deepEqual(
     desc.map((d) => d.pid).sort((a, b) => a - b),
@@ -1458,12 +1482,13 @@ test("FOC-1168: rememberChildLineage merges the tick's verified descendants", ()
   const cc = rememberChildLineage(rows, 100, remembered, {
     minCreationMs: 800,
     maxCreationMs: 1000,
+    seenMs: 1000,
     childCreation: null,
   });
   assert.equal(cc, 700, "the first tick establishes the child's creation stamp");
   assert.deepEqual(
     [...remembered.entries()].sort((a, b) => a[0] - b[0]),
-    [[201, 900], [301, 950]],
+    [[201, { creation: 900, seenMs: 1000 }], [301, { creation: 950, seenMs: 1000 }]],
   );
 });
 
@@ -1475,14 +1500,19 @@ test("FOC-1168: a snapshot whose child row carries a different creation proves n
     [100, 4, 1500], // the reused slot
     [401, 100, 1600], // the stranger's child
   ]);
-  const remembered = new Map([[201, 900]]);
+  const remembered = new Map([[201, { creation: 900, seenMs: 900 }]]);
   const cc = rememberChildLineage(rows, 100, remembered, {
     minCreationMs: 800,
     maxCreationMs: 2000,
+    seenMs: 2000,
     childCreation: 700,
   });
   assert.equal(cc, 700, "the carried creation stamp survives a proofless snapshot");
-  assert.deepEqual([...remembered.entries()], [[201, 900]], "nothing was merged");
+  assert.deepEqual(
+    [...remembered.entries()],
+    [[201, { creation: 900, seenMs: 900 }]],
+    "nothing was merged",
+  );
 });
 
 test("FOC-1168: a first tick with the child already gone merges nothing", () => {
@@ -1491,6 +1521,7 @@ test("FOC-1168: a first tick with the child already gone merges nothing", () => 
   const cc = rememberChildLineage(rows, 100, remembered, {
     minCreationMs: 800,
     maxCreationMs: 2000,
+    seenMs: 2000,
     childCreation: null,
   });
   assert.equal(cc, null, "no child row — no stamp to carry");
@@ -1509,6 +1540,7 @@ test("FOC-1168: remembered lineage accumulates across ticks", () => {
   let cc = rememberChildLineage(tick1, 100, remembered, {
     minCreationMs: 800,
     maxCreationMs: 1000,
+    seenMs: 1000,
     childCreation: null,
   });
   assert.equal(cc, 700);
@@ -1519,13 +1551,14 @@ test("FOC-1168: remembered lineage accumulates across ticks", () => {
   cc = rememberChildLineage(tick2, 100, remembered, {
     minCreationMs: 800,
     maxCreationMs: 1100,
+    seenMs: 1100,
     childCreation: cc,
   });
   assert.equal(cc, 700, "the child's row is unchanged across ticks");
   assert.deepEqual(
     [...remembered.entries()].sort((a, b) => a[0] - b[0]),
-    [[201, 900]],
-    "tick 2's unreachable rows merge nothing, remembered rows persist",
+    [[201, { creation: 900, seenMs: 1000 }]],
+    "tick 2's unreachable rows merge nothing, and the last-seen-alive stamp does not advance on a tick that could not re-verify the row",
   );
 });
 
@@ -1543,9 +1576,9 @@ test("FOC-1168: the ticket's real orphan shape — bash (dead) → env → node 
     minCreationMs: 800,
     maxCreationMs: 1000,
     remembered: new Map([
-      [201, 900], // bash — remembered by the ticks, dead at finalize
-      [301, 910], // env.exe — remembered by the ticks, dead at finalize
-      [401, 920], // node --test — remembered by the ticks, alive
+      [201, { creation: 900, seenMs: 1000 }], // bash — remembered by the ticks, dead at finalize
+      [301, { creation: 910, seenMs: 1000 }], // env.exe — remembered by the ticks, dead at finalize
+      [401, { creation: 920, seenMs: 1000 }], // node --test — remembered by the ticks, alive
     ]),
   });
   assert.deepEqual(desc.map((d) => d.pid), [401]);
@@ -1558,7 +1591,7 @@ test("FOC-1168: the reap kills the bridged orphan through the dead intermediate"
     rootPid: 100,
     exitAtMs: 1000,
     spawnAtMs: 800,
-    remembered: new Map([[201, 900]]),
+    remembered: new Map([[201, { creation: 900, seenMs: 1000 }]]),
     enumerate: () =>
       call++ === 0
         ? {
