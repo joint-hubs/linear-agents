@@ -4,6 +4,7 @@
 //   node scripts/state-journal.mjs init [--task <id>]
 //   node scripts/state-journal.mjs add --text "<entry>" [--task <id>]
 //   node scripts/state-journal.mjs set --field PR=<value> [--field Status=<value>] [--task <id>]
+//   (--root <path> overrides the journal root on every verb — see resolveRoot.)
 //
 // WHY per task: docs/STATE.md is one shared, hand-written journal — two
 // Supervisors working the same repo collide on it by construction. A journal
@@ -27,8 +28,22 @@ import { spawnSync } from "node:child_process";
 
 const METADATA_KEYS = ["Task", "Session", "Run", "Branch", "PR", "Status"];
 
-/** The root whose docs/ the journals live under: LA_ROOT, else this repo. */
-export function resolveRoot(env = process.env) {
+/**
+ * The root whose docs/ the journals live under, in order: an explicit --root
+ * (handled by the CLI layer), the git repository of the current working
+ * directory, LA_ROOT, this repo. cwd-first because a Supervisor child runs
+ * inside its own worktree while LA_ROOT still points at the operator's main
+ * checkout — LA_ROOT-first misrouted the child's journal into the main
+ * checkout's untracked docs/state/ (FOC-1155 r4 had to re-record it by hand).
+ */
+export function resolveRoot(env = process.env, cwd = process.cwd()) {
+  try {
+    const res = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" });
+    const top = (res.stdout || "").trim();
+    if (res.status === 0 && top) return resolve(top);
+  } catch {
+    // git missing or unusable — fall through to LA_ROOT below.
+  }
   if (env.LA_ROOT) return resolve(env.LA_ROOT);
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
@@ -155,13 +170,14 @@ function usage(stream) {
     "Usage: node scripts/state-journal.mjs init [--task <id>]\n" +
       "       node scripts/state-journal.mjs add --text \"<entry>\" [--task <id>]\n" +
       "       node scripts/state-journal.mjs set --field <Key>=<value> [--task <id>]\n" +
-      "  Task id: --task, else LA_TASK_ID. Session/run: FENIX_SUPERVISOR_SESSION_ID / LA_SUPERVISOR_RUN.",
+      "  Task id: --task, else LA_TASK_ID. Session/run: FENIX_SUPERVISOR_SESSION_ID / LA_SUPERVISOR_RUN.\n" +
+      "  Root: --root <path> overrides; else the cwd's git repository; else LA_ROOT; else this repo.",
   );
 }
 
 /** Parse the hand-rolled argv shared by all three verbs. Returns null on a usage error (already reported). */
 export function parseArgv(argv, { stderr = console.error } = {}) {
-  const opts = { verb: null, task: null, text: null, fields: [] };
+  const opts = { verb: null, task: null, text: null, fields: [], root: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
@@ -169,6 +185,8 @@ export function parseArgv(argv, { stderr = console.error } = {}) {
       return { help: true };
     } else if (a === "--task" && i + 1 < argv.length) {
       opts.task = argv[++i];
+    } else if (a === "--root" && i + 1 < argv.length) {
+      opts.root = argv[++i];
     } else if (a === "--text" && i + 1 < argv.length) {
       opts.text = argv[++i];
     } else if (a === "--field" && i + 1 < argv.length) {
@@ -211,7 +229,7 @@ export function runCli(argv, { env = process.env, stdout = console.log, stderr =
     stderr("state-journal: no task id — pass --task <id> or set LA_TASK_ID");
     return 2;
   }
-  const base = root ?? resolveRoot(env);
+  const base = root ?? (opts.root ? resolve(opts.root) : resolveRoot(env));
   try {
     if (opts.verb === "init") {
       const res = initJournal({

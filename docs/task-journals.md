@@ -16,6 +16,25 @@ node scripts/state-journal.mjs init [--task <id>]
 node scripts/state-journal.mjs add --text "<entry>" [--task <id>]
 node scripts/state-journal.mjs set --field Status=<value> [--field PR=<value>] [--task <id>]
 ```
+Every verb accepts `--root <path>` to override the journal root (see below).
+
+## Which root wins
+
+`resolveRoot` picks the tree whose `docs/state/` receives the journal, in order:
+
+1. `--root <path>` — an explicit override on any verb.
+2. The git repository of the current working directory
+   (`git rev-parse --show-toplevel` of cwd).
+3. `LA_ROOT` — only when cwd is not a git repository (a bare tooling checkout).
+4. The repository `scripts/state-journal.mjs` itself lives in.
+
+Why cwd-first: a Supervisor child runs inside its own worktree while `LA_ROOT`
+still points at the operator's main checkout — the old LA_ROOT-first resolution
+appended the child's journal to the main checkout's *untracked* `docs/state/`,
+outside the candidate branch (FOC-1100 … FOC-1207; FOC-1155 r4 needed its
+merge-round entry re-recorded by hand). Journaling into the cwd's repository
+keeps the journal in the candidate tree it belongs to. Running from the main
+checkout itself is unchanged there (cwd's repo = LA_ROOT).
 
 The journal file is created by `init` from the session env (`LA_TASK_ID`,
 `FENIX_SUPERVISOR_SESSION_ID`, `LA_SUPERVISOR_RUN`); a second `init` is a no-op.

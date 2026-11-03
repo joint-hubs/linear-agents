@@ -466,7 +466,7 @@
     },
     {
       "file": "state-journal.test.mjs",
-      "reason": "isolation audit FOC-904: mkdtemp/tmpdir fixtures only; writes only under the temp root's docs/state/; state-journal init runs `git rev-parse` read-only inside the temp root (never the real repo); no ports, no socket binds, no telemetry DB"
+      "reason": "isolation audit FOC-904: mkdtemp/tmpdir fixtures only; writes only under the temp root's docs/state/; state-journal init runs `git rev-parse` read-only inside the temp root (never the real repo); FOC-1211: `git init`s throwaway repos under tmpdir and spawnSync's the CLI with cwd inside them — still never the real repo; no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "supervisor-ask-guard.test.mjs",
