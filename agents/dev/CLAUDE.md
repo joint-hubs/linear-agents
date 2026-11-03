@@ -176,7 +176,7 @@ git add -- <explicit-task-paths>
 git diff --cached --stat
 git commit -m "<type>(<scope>): <subject> (<Linear-id>)" -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
-Commit authorization must be in the brief. A failed or skipped check remains visible in the handoff, never described as verified.
+Local commits on the child's own branch are the DEFAULT: every READY ends with the candidate COMMITTED on the work branch — a hand-off is a commit, not a dirty tree REVIEW could copy byte for byte (FOC-1222). Push stays separately gated (`push-approval`, unchanged). A brief may still WITHHOLD local commit authorisation, but then it must say so explicitly — the negative case, with what READY means instead stated in the brief. A brief that is silent on commits means local commits are authorised. A failed or skipped check remains visible in the handoff, never described as verified.
 
 Lint status is part of the completion report a dev child returns: the command run (`node scripts/lint.mjs` from the task worktree — the tool lints the tree it is invoked from — or the repo's own lint gate in a tree without `scripts/lint.mjs`), its exit code, and the scope/`not covered` lines the tool printed — so a skipped or failed lint is visible in the hand-off rather than implied. A lint that covers nothing is false evidence, not a pass; REVIEW records the same lint row in its verdict (`agents/review/CLAUDE.md`).
 ```

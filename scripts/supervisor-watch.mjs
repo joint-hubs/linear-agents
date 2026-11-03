@@ -44,6 +44,7 @@ import {
   appendWakeEvent,
   claudeCommand,
   costFromResult,
+  dirtyTreeReport,
   gatesDir,
   enumerateWin32Processes,
   hasPendingGate,
@@ -940,6 +941,37 @@ function finalizeTurn(code, signal) {
   const isolationRefused = isolated && code === 97;
   if (isolationRefused) status = "crashed";
 
+  // ── FOC-1222: a DEV child that ends READY on a dirty tree is flagged ────────
+  // Observed on run f43c (FOC-1100): a DEV brief withheld commit authorisation,
+  // the child finished READY with tracked changes, and REVIEW/TEST children
+  // copied the files from its worktree byte for byte — verdicts with no sha,
+  // and worktrees too dirty to reuse. The exit must carry the dirt on its face.
+  // Deliberately NOT a new status: the existing statuses are load-bearing
+  // (drain logic, quiescence waits, `waiting_gate` semantics), so the flag is a
+  // field on the entry plus a note on the exit wake row — the same shape the
+  // `sweptPids` audit note takes. Scope: dev only — REVIEW/TEST exit clean by
+  // contract. A missing or unreadable worktree records UNKNOWN rather than
+  // inventing dirt or staying silent — and so does a dev row with NO worktree
+  // field at all: the registry not naming a worktree is itself the finding
+  // (r2, FOC-1222), the guard must not filter it out before the check runs.
+  let dirtyExit = null;
+  if (status === "exited" && entry.squad === "dev") {
+    if (!entry.worktree) {
+      dirtyExit = { unknown: "no worktree recorded", at: endedAt };
+    } else if (!existsSync(entry.worktree)) {
+      dirtyExit = { unknown: "worktree missing", at: endedAt };
+    } else {
+      const dirtyFiles = dirtyTreeReport(entry.worktree);
+      if (dirtyFiles.length === 1 && dirtyFiles[0].startsWith("<git status failed")) {
+        dirtyExit = { unknown: dirtyFiles[0], at: endedAt };
+      } else if (dirtyFiles.length) {
+        // The list is capped so a child that left hundreds of files behind
+        // cannot bloat the registry row; `count` is the honest total.
+        dirtyExit = { files: dirtyFiles.slice(0, 20), count: dirtyFiles.length, at: endedAt };
+      }
+    }
+  }
+
   // ── FOC-808 (slice B): sweep the helpers the child left behind ─────────────
   // The group kill (the signal path above) reaches the child's own process
   // group; a helper that called setsid left it. Everything the child started
@@ -1198,6 +1230,8 @@ function finalizeTurn(code, signal) {
       : {}),
     ...turnEndCostPatch({ entry, transcriptCost, results: resultCosts }),
     turns,
+    // FOC-1222: the dirt the child left behind, visible on the entry itself.
+    ...(dirtyExit ? { dirtyExit } : {}),
     ...workingStatePrunedPatch,
   });
 
@@ -1228,6 +1262,9 @@ function finalizeTurn(code, signal) {
       // event class (the drain logic sees the `exit` row it always saw).
       ...(lingerReapShort ? { finishedLingeringShort: true } : {}),
       ...(lingerReapFailed ? { lingerReapFailed: true } : {}),
+      // FOC-1222: the wake-row note beside the entry flag — a drain reader
+      // sees the dirt without opening the registry.
+      ...(dirtyExit ? { dirtyExit } : {}),
     },
   });
 

@@ -45,7 +45,7 @@ import {
 } from "./agent-launch-profile.mjs";
 import { isRuntimeToken } from "./runtime-events.mjs";
 
-import { buildBranchName } from "./dev-branch.mjs";
+import { buildBranchName, parseIdentifier } from "./dev-branch.mjs";
 import { settingsPath, squadConfigDir } from "./fenix-paths.mjs";
 import { assertModelPolicy, childModelFor, childProviderEnv } from "./child-model.mjs";
 import { readSettings } from "./fenix-settings.mjs";
@@ -229,6 +229,21 @@ if (hasCandidate) {
   if (!String(args.candidate).trim()) {
     failJson(`--candidate value is empty — name the commit or branch to pin the worktree at`);
   }
+}
+
+// ── FOC-1222: a review/test spawn without a candidate is refused ─────────────
+// Observed on run f43c (FOC-1100): a DEV brief withheld commit authorisation,
+// the child finished READY with its candidate uncommitted, and REVIEW/TEST
+// were spawned with no --candidate — which silently fell back to the base
+// revision, in practice a byte-for-byte copy of the dirty worktree. REVIEW and
+// TEST verify a COMMITTED state, so for them the flag is not optional. DEV
+// spawns from base by design and is untouched by this gate.
+if (!hasCandidate && (squad === "review" || squad === "test")) {
+  failJson(
+    `a ${squad} spawn needs --candidate <sha|branch> — the worktree must start at the commit DEV produced, ` +
+      `never fall back silently to the base revision (a copy of a dirty tree) — refusing the spawn: candidate-required`,
+    { reason: "candidate-required", squad, taskId: taskId ?? null },
+  );
 }
 
 // ── FOC-607: the --model policy, judged before anything is created ───────────
@@ -484,6 +499,74 @@ const baseBranch = buildBranchName(taskId, args.slug || squad, undefined);
 const attemptHash = createHash("sha256").update(`${runId}:${childId}`).digest("hex").slice(0, 12);
 const branch = `${baseBranch}-${attemptHash}`;
 
+// ── FOC-1222: the candidate must exist ON THE DEV WORK BRANCH ────────────────
+// A sha that resolves is not enough — the pin must be a commit the DEV work
+// branch's history actually holds, never a foreign tip or a dangling commit
+// only a dirty worktree ever showed. Which branch is the dev one, most precise
+// first: an --after-child dependency names the child being verified, then this
+// run's dev children FOR THIS TASK (a multi-task run must not accept another
+// task's branch — round-1 finding), then the dev work branch by naming
+// convention (<issue>-dev, optionally with the per-attempt hash) when spawn
+// cannot know the branch at all (a fresh run, a fixture). Fail closed: no
+// recognizable work branch, no spawn.
+function assertCandidateOnWorkBranch({ registry, dependencyChildren, taskId, gitRoot, candidateSha }) {
+  const workBranches = (() => {
+    const sameTask = (c) => String(c.taskId ?? "").toLowerCase() === String(taskId).toLowerCase();
+    const fromDeps = dependencyChildren
+      .map((id) => registry.children[id])
+      .filter((c) => c?.squad === "dev" && sameTask(c) && typeof c.branch === "string" && c.branch)
+      .map((c) => c.branch);
+    if (fromDeps.length) return { branches: [...new Set(fromDeps)], source: "after-child" };
+    const fromRegistry = Object.values(registry.children)
+      .filter((c) => c.squad === "dev" && sameTask(c) && typeof c.branch === "string" && c.branch)
+      .map((c) => c.branch);
+    if (fromRegistry.length) return { branches: [...new Set(fromRegistry)], source: "registry" };
+    try {
+      const { key, number } = parseIdentifier(taskId);
+      const prefix = `${key.toLowerCase()}-${number}-`;
+      const local = git(["branch", "--format=%(refname:short)"], gitRoot).split(/\r?\n/).filter(Boolean);
+      return {
+        branches: local.filter(
+          (b) => b.startsWith(prefix) && /(^|-)dev(-[0-9a-f]{12})?$/.test(b.slice(prefix.length)),
+        ),
+        source: "branch-name",
+      };
+    } catch {
+      return { branches: [], source: "branch-name" };
+    }
+  })();
+  if (!workBranches.branches.length) {
+    failJson(
+      `no DEV work branch is known for ${taskId} — the candidate cannot be checked against the branch that ` +
+        `produced it, refusing the spawn: candidate-work-branch-unknown`,
+      { reason: "candidate-work-branch-unknown", taskId, candidate: candidateSha },
+    );
+  }
+  const onWorkBranch = workBranches.branches.some((branch) => {
+    // `merge-base --is-ancestor` answers by exit code (0 yes / 1 no), so it
+    // cannot go through the throwing git() helper.
+    return (
+      spawnSync("git", ["merge-base", "--is-ancestor", candidateSha, branch], {
+        cwd: gitRoot,
+        encoding: "utf8",
+      }).status === 0
+    );
+  });
+  if (!onWorkBranch) {
+    failJson(
+      `--candidate ${candidateSha.slice(0, 12)} is not on any DEV work branch ` +
+        `(${workBranches.branches.join(", ")}) — the pin must be a commit the work branch holds, ` +
+        `refusing the spawn: candidate-not-on-work-branch`,
+      {
+        reason: "candidate-not-on-work-branch",
+        candidate: candidateSha,
+        workBranches: workBranches.branches,
+        workBranchSource: workBranches.source,
+      },
+    );
+  }
+}
+
 // ── --candidate (FOC-406): pin the worktree at the DEV candidate ─────────────
 // REVIEW/TEST verify a candidate DEV produced; without this flag their worktree
 // starts at the base revision and the reviewer has to checkout the candidate by
@@ -506,6 +589,13 @@ if (hasCandidate) {
       `--candidate "${wanted}" does not resolve to a commit in ${gitRoot} — refusing the spawn: candidate-unresolved`,
       { reason: "candidate-unresolved", candidate: wanted, repo: gitRoot },
     );
+  }
+
+  // ── FOC-1222: the candidate must exist ON THE DEV WORK BRANCH (round-2 scope) ─
+  // Scoped to review/test — a DEV spawn that passes --candidate rides the
+  // FOC-406 mechanics unchanged; the gate itself is assertCandidateOnWorkBranch.
+  if (squad === "review" || squad === "test") {
+    assertCandidateOnWorkBranch({ registry, dependencyChildren, taskId, gitRoot, candidateSha });
   }
 
   // The flag wants its own branch to pin. Sharing a branch a recorded child

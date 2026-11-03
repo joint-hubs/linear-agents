@@ -12,6 +12,7 @@
       "Subagenci tylko czytają (recon); implementację, testy red-first i dziennik pisze lead sam w swoim drzewie — jeden kontekst, jedna zmiana (FOC-1179).",
       "Przypomnienie o dwóch rzeczach, na których najłatwiej się potknąć:",
       "niejasne AC → needs:answer + @Mateusz i STOP (nie zgaduj);",
+      "Kandydat ma być ZAKOMITOWANY na Twojej gałęzi (push osobno, za zgodą).",
       "NIE pushuj bez mojej zgody."
     ],
     "review": [
