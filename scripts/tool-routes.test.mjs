@@ -320,3 +320,35 @@ test("write routes require loopback too (isLocalOrigin false → 403)", async ()
     reg.restore();
   }
 });
+
+// ── FOC-1207: stream-error guard on the probe child ──────────────────────────
+
+test("probeThoughtmap: a stdout stream error resolves through finish(), not uncaught", async () => {
+  const { EventEmitter } = await import("node:events");
+  const { spawn } = await import("node:child_process");
+  const makeStream = () => Object.assign(new EventEmitter(), { write: () => true });
+  const fakeChild = Object.assign(new EventEmitter(), {
+    stdout: makeStream(),
+    stderr: makeStream(),
+    stdin: makeStream(),
+    kill: () => {},
+  });
+  setToolRoutesDeps({
+    spawn: () => {
+      setImmediate(() => fakeChild.stdout.emit(
+        "error",
+        Object.assign(new Error("read ENOTCONN"), { code: "ENOTCONN", errno: -4053, syscall: "read" }),
+      ));
+      return fakeChild;
+    },
+  });
+  try {
+    const cfg = { baseUrl: "http://127.0.0.1:1", clustersPath: "x", ollamaBaseUrl: "http://127.0.0.1:1", embeddingModel: "m" };
+    const result = await probeThoughtmap(cfg, { timeoutMs: 1000 });
+    assert.equal(result.ok, false, "a stream error must be a failed probe, not a crash");
+    assert.equal(result.code, "python-unavailable");
+    assert.match(result.error, /ENOTCONN/);
+  } finally {
+    setToolRoutesDeps({ spawn });
+  }
+});

@@ -472,6 +472,39 @@ test("telemetry-server: reconcile defers through the kernel, orphan path stays u
 // Report
 // ---------------------------------------------------------------------------
 
+// FOC-1207: a child-stdio socket 'error' on areProcessesAlive's piped streams
+// must REJECT — the same outcome the callers already map (listTerminalsAsync →
+// alive=false, reconcileLiveness → checkerError) — never escape as an uncaught
+// event. The fake's promise never settles on its own; only the stream-error
+// listener can settle the await.
+test("FOC-1207 areProcessesAlive: stdout stream error rejects, not uncaught", async () => {
+  const { EventEmitter } = await import("node:events");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const fakeChild = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+  const pending = new Promise(() => { /* never settles on its own */ });
+  pending.child = fakeChild;
+  terminals.setTerminalsDeps({
+    execFileP: () => {
+      // The stream error fires after the factory returns — the real one can
+      // only emit once the caller has had the chance to attach listeners.
+      setImmediate(() => fakeChild.stdout.emit(
+        "error",
+        Object.assign(new Error("read ENOTCONN"), { code: "ENOTCONN", errno: -4053, syscall: "read" }),
+      ));
+      return pending;
+    },
+  });
+  try {
+    let rejected = null;
+    await terminals.areProcessesAlive([123]).catch((err) => { rejected = err; });
+    assert(rejected, "areProcessesAlive must reject when the stdout stream errors");
+    assert(rejected.code === "ENOTCONN", `expected the stream error's code, got ${rejected.code}`);
+  } finally {
+    terminals.setTerminalsDeps({ execFileP: promisify(execFile) });
+  }
+});
+
 for (const { name, fn } of testQueue) {
   try {
     await fn();

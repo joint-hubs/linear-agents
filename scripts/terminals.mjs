@@ -32,6 +32,15 @@ import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
 
+// Test seam (FOC-1207): the stream-guard test swaps execFileP for a fake whose
+// promise carries a fake child; production keeps the real promisified execFile.
+const terminalsDeps = { execFileP };
+
+/** Swap areProcessesAlive's process dependency for tests. */
+export function setTerminalsDeps(overrides = {}) {
+  Object.assign(terminalsDeps, overrides);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -127,11 +136,23 @@ export async function areProcessesAlive(pids) {
       `Get-Process -Id ${unique.join(",")} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`,
       "utf8",
     );
-    const { stdout } = await execFileP(
-      "powershell",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file],
-      { timeout: 10000, windowsHide: true, encoding: "utf8" },
-    );
+    const { stdout } = await new Promise((resolve, reject) => {
+      const pending = terminalsDeps.execFileP(
+        "powershell",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file],
+        { timeout: 10000, windowsHide: true, encoding: "utf8" },
+      );
+      // FOC-1207: a child-stdio socket can emit 'error' while the child is
+      // still being constructed (win32 read ENOTCONN) — before any listener
+      // exists — and without one it escapes as an uncaught event that kills
+      // the server. Reject on it: the same rejection mapping the callers
+      // already handle (listTerminalsAsync → alive=false, reconcileLiveness →
+      // checkerError).
+      for (const stream of [pending.child?.stdout, pending.child?.stderr]) {
+        stream?.on("error", reject);
+      }
+      pending.then(resolve, reject);
+    });
     const alive = new Set(
       stdout.trim().split(/\r?\n/).map((line) => Number(line.trim())).filter(Number.isInteger),
     );

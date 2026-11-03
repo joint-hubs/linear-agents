@@ -811,6 +811,10 @@
       "reason": "spawns the real telemetry-server on fixed port 7391"
     },
     {
+      "file": "child-stdio-guard.test.mjs",
+      "reason": "FOC-1207: spawns the real telemetry-server twice (spawnTestServer, ephemeral ports) — the guard must keep it serving on a matching child-stdio socket error and still exit non-zero on a foreign one; conservative serial like the other telemetry-server spawns"
+    },
+    {
       "file": "telemetry-idle-tick.test.mjs",
       "reason": "spawns the real telemetry-server (LA_TELEMETRY_INGEST_MS=300) against a fixture store and polls sqlite file sizes — real server child on a port (spawnTestServer), conservative serial like the other telemetry-server spawns (FOC-808)"
     },

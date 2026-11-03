@@ -115,7 +115,7 @@ Sekrety nie edytowane w `models.json` ani w UI poza polem hasła (czyszczone po 
 - **Pierwszy start pustej bazy:** serwer wykonuje backfill automatycznie. Ręcznie: `node scripts/telemetry-ingest.mjs backfill --json`.
 - **Naprawa indeksu:** serwer automatycznie dokańcza backfill, gdy liczba runów jest mniejsza od liczby manifestów; pełne wymuszenie: `LA_TELEMETRY_FORCE_BACKFILL=1` przy starcie serwera.
 - **Eksport:** `node scripts/telemetry-export.mjs --format jsonl --output telemetry.jsonl` (formaty: `jsonl`, `csv`, `sqlite`).
-- **Health:** `http://127.0.0.1:7331/api/telemetry/health` pokazuje pending spool i nierozwiązane problemy jakości danych.
+- **Health:** `http://127.0.0.1:7331/api/telemetry/health` pokazuje pending spool i nierozwiązane problemy jakości danych; HTTP 200 na tym URL to znak, że serwer działa (FOC-1207: child-stdio socket error nie zabija procesu — serwer odpowiada dalej).
 - **Ceny:** API domyślnie zwraca estimate `as-run` według snapshotu cen; `?pricing=current` przelicza wyłącznie odczyt według bieżącego `config/models.json`.
 - **Niepełny koszt:** `costUSD:null` oznacza brak ceny co najmniej jednego modelu; `partialCostUSD` jest znanym minimum i UI pokazuje je jako `≥$...`.
 - **Nagrody / XP (FOC-225):** osobna baza append-only `%LOCALAPPDATA%\linear-agents\rewards\rewards.sqlite` (override: `LA_REWARDS_DB`; katalog: `LA_REWARDS_HOME`) — nigdy `telemetry.sqlite`. Ingest działa przy odczycie `GET /api/manager/rewards` (cache TTL 30 s obejmuje sam ingest; squad-y/ratingi/held czytane świeżo do każdego payloadu).
