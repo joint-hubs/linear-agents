@@ -3453,7 +3453,7 @@ export function parseWin32ProcessTable(text) {
  * The child's verified descendants inside one process-table snapshot.
  *
  * Pure — a table in, a set of entries out; every refusal is a NOT-killed,
- * never a kill. Two rules, both built on creation stamps:
+ * never a kill. Three rules, all built on creation stamps:
  *
  *  · The anchor's direct children are accepted only when they were born
  *    inside the window the watcher owned the child's pid-slot: after the
@@ -3468,35 +3468,79 @@ export function parseWin32ProcessTable(text) {
  *    holds it now), and only when it was born after that parent — everything
  *    born by the pid's CURRENT holder postdates the holder's own creation; a
  *    leftover child of a dead previous holder predates it.
+ *  · (FOC-1168) With `remembered` — the lineage map the watcher accumulated
+ *    from earlier ticks while the child was alive — a row joins by IDENTITY:
+ *    its `pid + creation` was already verified, so it needs no live parent in
+ *    this snapshot, however the chain above it died. Identity is exact, so a
+ *    reused pid fails it and is refused with everything that claims the pid
+ *    as a parent. And a row whose PARENT is remembered but no longer in the
+ *    snapshot (the intermediate died) joins when it was born after that
+ *    parent and inside the child's spawn window; when the parent's pid is now
+ *    held by a stranger (a reuse this snapshot CAN see), a row born after the
+ *    stranger's own creation was spawned by the stranger, not by our parent,
+ *    and is refused.
  *
- * What this costs is stated, not hidden: a descendant chain whose middle link
- * died AND whose dead pid was reused breaks at the reuse (a safe miss — the
- * orphan survives, never an innocent dies), and a great-grandchild spawned
- * after the anchor's exit by a still-live descendant is accepted through its
- * live parent and dies with that parent's taskkill /T walk.
+ * What this costs is stated, not hidden: an intermediate that died between two
+ * lineage ticks — alive in no snapshot the watcher ever took — is not
+ * remembered, and its subtree stays a safe miss (the orphan survives, never an
+ * innocent dies); a reuse that already left the table (stranger held the pid,
+ * spawned a child, and died between snapshots) is not provable either, only
+ * bounded by the spawn window; a great-grandchild spawned after the anchor's
+ * exit by a still-live descendant is accepted through its live parent and dies
+ * with that parent's taskkill /T walk.
  *
  * @param {Array<{pid: number, ppid: number, creation: number}>} entries
  * @param {number} rootPid the child's pid — never part of the result
- * @param {{ minCreationMs?: number, maxCreationMs?: number }} opts the child's
- *   spawn and exit times (epoch ms); without BOTH finite bounds no anchor
- *   child can be verified, so nothing is returned — fail-safe.
+ * @param {{ minCreationMs?: number, maxCreationMs?: number,
+ *     remembered?: Map<number, number>|null }} opts the child's spawn and exit
+ *   times (epoch ms), plus the remembered lineage (pid → creation) from the
+ *   watcher's earlier ticks; without BOTH finite bounds nothing is accepted —
+ *   fail-safe.
  * @returns {Array<{pid: number, ppid: number, creation: number, name: string}>}
  */
 export function descendantsInProcessTable(
   entries,
   rootPid,
-  { minCreationMs = Number.NaN, maxCreationMs = Number.NaN } = {},
+  { minCreationMs = Number.NaN, maxCreationMs = Number.NaN, remembered = null } = {},
 ) {
   const childrenOf = new Map();
+  const holders = new Map(); // pid → the row that holds it in THIS snapshot
+  const valid = [];
   for (const e of entries) {
     if (!Number.isInteger(e?.pid) || !Number.isInteger(e?.ppid) || !Number.isInteger(e?.creation)) continue;
+    valid.push(e);
     if (!childrenOf.has(e.ppid)) childrenOf.set(e.ppid, []);
     childrenOf.get(e.ppid).push(e);
+    holders.set(e.pid, e);
   }
   const accepted = new Map();
-  if (Number.isFinite(minCreationMs) && Number.isFinite(maxCreationMs)) {
+  const windowed = Number.isFinite(minCreationMs) && Number.isFinite(maxCreationMs);
+  if (windowed) {
     for (const c of childrenOf.get(rootPid) ?? []) {
       if (minCreationMs <= c.creation && c.creation <= maxCreationMs) accepted.set(c.pid, c);
+    }
+    if (remembered) {
+      // Identity first: a row a tick verified while the child was alive joins
+      // even though its own parent chain died since.
+      for (const e of valid) {
+        if (remembered.get(e.pid) === e.creation) accepted.set(e.pid, e);
+      }
+      // Then the dead-intermediate bridge: a child of a remembered parent the
+      // snapshot no longer holds. A live verified parent is left to the chain
+      // rule (which needs no window bound on deeper births); a reused pid
+      // vouches only for rows born before the reuse took it.
+      for (const e of valid) {
+        if (accepted.has(e.pid)) continue;
+        const parentCreation = remembered.get(e.ppid);
+        if (parentCreation === undefined || e.creation <= parentCreation) continue;
+        const holder = holders.get(e.ppid);
+        if (holder) {
+          if (holder.creation === parentCreation) continue; // live — the chain rule owns it
+          if (e.creation > holder.creation) continue; // born by the reuse, not by our parent
+        }
+        if (!(minCreationMs <= e.creation && e.creation <= maxCreationMs)) continue;
+        accepted.set(e.pid, e);
+      }
     }
   }
   // The frontier only ever holds LIVE table entries (every accepted pid came
@@ -3517,6 +3561,42 @@ export function descendantsInProcessTable(
 }
 
 /**
+ * Merge one lineage tick's verified descendants into the remembered map
+ * (FOC-1168). Called ONLY while the child is believed alive, and the snapshot
+ * must still contain the child's own row — a snapshot that does not is one
+ * taken after the child died, where a reuse of the child's pid could vouch
+ * for a stranger's children. Once the child's creation stamp is known, later
+ * ticks verify it, so a reuse between ticks stops the walk instead of
+ * poisoning the map. The map holds `pid → creation`: the exact identity the
+ * finalize-time reap re-verifies. Returns the child's creation stamp for the
+ * caller to carry into the next tick (unchanged when the snapshot proved
+ * nothing).
+ *
+ * Enumeration stays off the event path: the caller runs this from a timer,
+ * never from the child's stdout handlers, and a failed enumeration is a note
+ * upstream, never a crash.
+ *
+ * @param {Array<{pid: number, ppid: number, creation: number}>} entries a
+ *   single process-table snapshot, already filtered of the watcher's own pid
+ * @param {number} rootPid the child's pid
+ * @param {Map<number, number>} remembered accumulated across ticks, mutated
+ * @param {{ minCreationMs: number, maxCreationMs: number, childCreation?: number|null }} opts
+ *   the child's spawn time, the tick's upper bound (snapshot time), and the
+ *   creation stamp carried from earlier ticks (null on the first)
+ * @returns {number|null} the child's creation stamp, or the carried one when
+ *   this snapshot proved nothing
+ */
+export function rememberChildLineage(entries, rootPid, remembered, { minCreationMs, maxCreationMs, childCreation = null } = {}) {
+  const rootRow = entries.find((e) => e?.pid === rootPid && Number.isInteger(e?.creation));
+  if (!rootRow) return childCreation; // the child was already dead when this snapshot was taken
+  if (childCreation !== null && rootRow.creation !== childCreation) return childCreation; // pid reused
+  for (const e of descendantsInProcessTable(entries, rootPid, { minCreationMs, maxCreationMs })) {
+    remembered.set(e.pid, e.creation);
+  }
+  return childCreation ?? rootRow.creation;
+}
+
+/**
  * Reap the child's verified descendants through the NORMAL finalize path —
  * no new wake class, no second finalizer (the FOC-1154 shape).
  *
@@ -3533,7 +3613,14 @@ export function descendantsInProcessTable(
  * verified descendant must be gone, or it is named a survivor. The whole
  * call is best-effort — every failure mode returns a report, never a throw.
  *
- * @param {{ rootPid: number, exitAtMs: number, spawnAtMs: number, excludePids?: number[], graceMs?: number,
+ * `remembered` (FOC-1168) carries the lineage the watcher accumulated from
+ * its ticks while the child was alive, so the verification can bridge a DEAD
+ * intermediate: a row joins by `pid + creation` identity or through a
+ * remembered parent, not only through the live ppid walk that a dead link
+ * breaks.
+ *
+ * @param {{ rootPid: number, exitAtMs: number, spawnAtMs: number, remembered?: Map<number, number>|null,
+ *          excludePids?: number[], graceMs?: number,
  *          enumerate?: () => { entries: Array, skipped: string|null },
  *          kill?: (pid: number, mode: string) => boolean,
  *          alive?: (pid: number) => boolean }} opts
@@ -3545,6 +3632,7 @@ export function reapChildDescendants({
   rootPid,
   exitAtMs,
   spawnAtMs,
+  remembered = null,
   excludePids = [],
   enumerate = enumerateWin32Processes,
   kill = killTree,
@@ -3560,7 +3648,7 @@ export function reapChildDescendants({
   const desc = descendantsInProcessTable(
     table.entries.filter((e) => !exclude.has(e.pid)),
     rootPid,
-    { minCreationMs: spawnAtMs, maxCreationMs: exitAtMs },
+    { minCreationMs: spawnAtMs, maxCreationMs: exitAtMs, remembered },
   );
   if (!desc.length) return { killed: [], survivors: [], skipped: null, via: "table" };
   const inTree = new Set(desc.map((d) => d.pid));
