@@ -814,14 +814,29 @@ export function dockerAvailability(env = process.env) {
 }
 
 /**
+ * FOC-1231: is the repo the record is ABOUT a Fenix repo? The marker is the
+ * script CI runs — `docker/test-in-container.sh` at the target repo's root.
+ * Detection reads the TARGET worktree (the child's own checkout, from the run
+ * registry), never this script's ROOT: this file lives in linear-agents, but a
+ * verdict can be about a service repo (joint-flows) where the fenix:dev image
+ * and its script do not exist — the Fenix hint there names a remedy the repo
+ * cannot use (FOC-1181 blocked a verdict whose TEST parts had both passed).
+ */
+function isFenixRepo(targetWorktree) {
+  return Boolean(targetWorktree) && existsSync(join(targetWorktree, "docker", "test-in-container.sh"));
+}
+
+/**
  * Parse and shape-validate `--container-run` / `--container-unavailable`
  * (FOC-1179). One of each, at most — the record field is singular. Shape
  * errors and the contradiction are refused for ANY verdict: the container
  * either ran or it did not, and evidence that does not exist is not evidence
  * on a fail either. The outputRef existence/containment check runs later, in
  * checkOutputRef — the SAME path the review evidence uses, never a fork.
+ * `targetWorktree` decides whose example the malformed hint shows (FOC-1231):
+ * a service repo gets the Linux-container example, a Fenix repo fenix:dev.
  */
-function containerRunEvidence(args) {
+function containerRunEvidence(args, targetWorktree) {
   const runs = asArray(args["container-run"]).map((raw, i) => parseJsonFlag(raw, "container-run", i));
   const whys = asArray(args["container-unavailable"]);
   if (runs.length > 1) {
@@ -837,9 +852,12 @@ function containerRunEvidence(args) {
     if (!isEvidence(r.outputRef)) problems.push(`--container-run names no outputRef`);
   });
   if (problems.length) {
+    const malHint = isFenixRepo(targetWorktree)
+      ? `--container-run '{"cmd":"docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`
+      : `--container-run '{"cmd":"docker run --rm -v <checkout>:/src -w /src python:3.12-slim <the affected suites' test command>","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`;
     failJson(`the container-run flags are malformed`, {
       problems,
-      hint: `--container-run '{"cmd":"docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`,
+      hint: malHint,
     });
   }
   if (runs.length && whys.length) {
@@ -983,19 +1001,24 @@ function cmdRecord(args) {
   // Shape + outputRef checks for any verdict that cites them; the REQUIREMENT
   // is a test-pass gate only — a fail does not need a container run, and other
   // squads are not asked for one.
-  const { run: containerRun, unavailableWhy } = containerRunEvidence(args);
+  const { run: containerRun, unavailableWhy } = containerRunEvidence(args, entry.worktree);
+  const fenixTarget = isFenixRepo(entry.worktree);
   if (unavailableWhy) {
     // "Unavailable" while the daemon answers is a lie IN the record — the
     // why flag is the escape hatch for a host that cannot run the container,
     // not a skip button (REVIEW r1 probe P3b: seam=1 + a reason recorded
     // ok:true with containerRun: "unavailable: …"). Claim-level, so it
-    // protects a fail verdict citing it just the same.
+    // protects a fail verdict citing it just the same. The remedy is
+    // repo-shaped (FOC-1231): the Fenix container here, a Linux container
+    // for a service repo — the refusal itself is unchanged for both.
     const docker = dockerAvailability();
     if (docker.available) {
       failJson(
         `container-run-unavailable-while-docker-up: the record says the container could not run, ` +
-          `but the docker probe answers (${docker.detail}) — run the Fenix container and cite it, ` +
-          `or fix the record`,
+          `but the docker probe answers (${docker.detail}) — ` +
+          (fenixTarget
+            ? `run the Fenix container and cite it, or fix the record`
+            : `run the affected suites in a Linux container (e.g. python:3.12-slim) and cite it, or fix the record`),
         { dockerAvailable: true, hint: "delivery has to be able to see whether the container ran" },
       );
     }
@@ -1012,13 +1035,21 @@ function cmdRecord(args) {
   if (verdict === "pass" && entry.squad === "test") {
     if (!containerRunField) {
       const docker = dockerAvailability();
-      failJson(
-        `test-pass-without-container-run: a TEST pass must cite the Fenix-container run ` +
-          `(--container-run '{"cmd":"...","exit":0,"outputRef":"..."}' — docker/test-in-container.sh, as CI runs it; ` +
+      const gateHint = fenixTarget
+        ? `test-pass-without-container-run: a TEST pass must cite the Fenix-container run ` +
+          `(--container-run '{"cmd":"...","exit":0,"outputRef":"..."}' — docker/test-in-container.sh ` +
+          `on the fenix:dev image, as CI runs it; ` +
           `on Git Bash/MSYS prefix the command with MSYS_NO_PATHCONV=1 or the container-side path is rewritten) ` +
-          `or, when docker is not available, say why (--container-unavailable "<why>")`,
-        { dockerAvailable: docker.available, hint: "delivery has to be able to see whether the container ran" },
-      );
+          `or, when docker is not available, say why (--container-unavailable "<why>")`
+        : `test-pass-without-container-run: a TEST pass must cite a suite run in a Linux container ` +
+          `(--container-run '{"cmd":"...","exit":0,"outputRef":"..."}' — this repo has no Fenix image; ` +
+          `the affected suites on the verdict commit in e.g. python:3.12-slim, command + exit code + outputRef; ` +
+          `on Git Bash/MSYS prefix the command with MSYS_NO_PATHCONV=1 or the container-side path is rewritten) ` +
+          `or, when docker is not available, say why (--container-unavailable "<why>")`;
+      failJson(gateHint, {
+        dockerAvailable: docker.available,
+        hint: "delivery has to be able to see whether the container ran",
+      });
     }
     if (!containerRun) {
       const docker = dockerAvailability();

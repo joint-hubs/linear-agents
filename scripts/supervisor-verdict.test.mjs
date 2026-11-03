@@ -719,6 +719,86 @@ test("a --container-run cited on a fail keeps its exit verbatim — red evidence
   assert.equal(out.containerRun.exit, 125);
 });
 
+// ── 2c-bis. the service-repo variant of the same gate (FOC-1231) ────────────
+console.log("\ntest — wariant repo serwisowego (FOC-1231)");
+
+/**
+ * The fixture repo carries only a README, so every worktree above is ALREADY
+ * service-shaped (no docker/test-in-container.sh, no fenix:dev — the
+ * joint-flows shape that blocked FOC-1181's verdict). The marker is written
+ * explicitly where the Fenix shape is under test.
+ */
+const fenixMarker = (s) => {
+  mkdirSync(join(s.worktree, "docker"), { recursive: true });
+  writeFileSync(join(s.worktree, "docker", "test-in-container.sh"), "#!/bin/sh\n", "utf8");
+};
+
+test("a TEST pass in a SERVICE repo without a container run is refused, and the hint names the Linux container (FOC-1231)", () => {
+  // FOC-1181: the gate's hint told a service repo to "cite the Fenix-container
+  // run" — an image that repo does not have — and rejected
+  // --container-unavailable while the daemon answered, so both TEST parts had
+  // passed and NO verdict record could land. Mateusz's decision (2026-11-03,
+  // hold-30 option 1): a suite run in a Linux container (python:3.12-slim) IS
+  // the evidence for service repos — the hint has to say so.
+  const s = testScenario();
+  const out = testRecord(s, testPassArgs(s), { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /test-pass-without-container-run/);
+  assert.match(out.error, /python:3\.12-slim/, "the hint must name the Linux container a service repo can run");
+  assert.doesNotMatch(out.error, /fenix:dev/, "the Fenix image is not the remedy for a repo without it");
+});
+
+test("the Fenix repo keeps the Fenix hint — detection reads the TARGET repo, not the tooling checkout", () => {
+  // The variant branches on what the record's repo HAS. A repo carrying
+  // docker/test-in-container.sh still gets the fenix:dev hint byte-for-byte
+  // (AC3: behaviour for linear-agents does not change).
+  const s = testScenario();
+  fenixMarker(s);
+  const out = testRecord(s, testPassArgs(s), { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /test-pass-without-container-run/);
+  assert.match(out.error, /fenix:dev/, "a Fenix repo still cites the Fenix-container run");
+  assert.doesNotMatch(out.error, /python:3\.12-slim/);
+});
+
+test("a TEST pass in a service repo citing a Linux-container run (exit 0) is ACCEPTED (FOC-1231)", () => {
+  // The decision, in the tool: the affected suites on the verdict commit, in a
+  // Linux container, command + exit code + outputRef — passes the same gate
+  // the fenix:dev citation does. The rejection of a MISSING run while docker
+  // answers is unchanged.
+  const s = testScenario();
+  const out = join(s.worktree, "linux-container-run.txt");
+  writeFileSync(out, "312 passed, 0 failed\n", "utf8");
+  const ok = testRecord(s, [
+    ...testPassArgs(s),
+    "--container-run", JSON.stringify({
+      cmd: `docker run --rm -v ${s.worktree}:/src -w /src python:3.12-slim bash -lc "npm test"`,
+      exit: 0,
+      outputRef: out,
+    }),
+  ], { LA_DOCKER_AVAILABLE: "1" });
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.containerRun.exit, 0);
+  assert.match(ok.containerRun.cmd, /python:3\.12-slim/);
+});
+
+test("a malformed --container-run in a service repo shows the Linux-container example, not fenix:dev", () => {
+  // The flag-malformed hint carried ONLY the fenix:dev example — a service
+  // repo pasting it would cite a command that cannot exist there.
+  const s = testScenario();
+  const out = testRecord(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--container-run", JSON.stringify({ cmd: "", exit: 0, outputRef: "x" }),
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /the container-run flags are malformed/);
+  // failJson spreads the example into the `hint` key, not the error message.
+  assert.match(out.hint, /python:3\.12-slim/);
+  assert.doesNotMatch(out.hint, /fenix:dev/);
+});
+
 // ── 3. the fingerprint ───────────────────────────────────────────────────────
 console.log("\nodcisk postępu");
 

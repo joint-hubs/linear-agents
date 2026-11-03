@@ -115,6 +115,15 @@ When docker is NOT available, the record must still say why —
 field is refused either way, so delivery can always see whether the container ran. A fail verdict
 does not need it.
 
+**Service repo variant (FOC-1231).** A repo without the Fenix image — no
+`docker/test-in-container.sh` at the target repo's root (e.g. joint-flows) — cites the FOC-1179
+evidence differently: the affected suites on the verdict commit, run in a plain Linux container
+(e.g. `python:3.12-slim`), cited the same way (`--container-run` with command + exit code +
+outputRef). A stack run with live imports (Part B) stays SEPARATE evidence — it does not replace
+the suite run. The verdict tool detects this from the target repo and shows the matching hint;
+the refusal of a pass with no container run at all while docker answers is unchanged, as is
+`container-run-unavailable-while-docker-up`.
+
 ### 5. Verdict
 - PASS requires observed acceptance checks on the exact candidate, including negative cases. Report the local command/artifact or real deploy URL; no fabricated URL. In standalone mode → `Done` and result comment (`<test_comment_helper>`); supervised mode returns evidence for the Supervisor to publish.
 - Skipped checks, unavailable environments, dry-runs and mocks are not evidence for completing a real task. Missing required checks → blocked/unknown, not PASS.

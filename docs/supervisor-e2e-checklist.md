@@ -255,7 +255,12 @@ text pin in `scripts/config-drift.test.mjs`:
   `containerRun: "unavailable: <why>"`. The tool refuses `test-pass-without-container-run`
   either way a bare missing field appears; docker availability is probed by `docker info`, with
   `LA_DOCKER_AVAILABLE=1|0` as the test seam. `deployer`/`scenario-gen` are not part of the
-  CLI-repo flow.
+  CLI-repo flow. **Service-repo variant (FOC-1231):** a repo without `docker/test-in-container.sh`
+  at its root cites the same gate with the affected suites on the verdict commit run in a plain
+  Linux container (e.g. `python:3.12-slim`) — command + exit code + outputRef; a stack run with
+  live imports is separate evidence and does not replace the suite run. The verdict tool picks the
+  hint from the TARGET repo; the refusal of a missing container run while docker answers is
+  unchanged.
 - **DEV is one context for one change.** Subagents are for reading (recon) only; the
   implementation, the red-first tests and the journal are written by the lead in its own tree.
 

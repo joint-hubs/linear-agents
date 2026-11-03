@@ -524,7 +524,7 @@
       "budget": { "stage": "verification", "shareHint": 0.1 },
       "input": {
         "labels": ["stage:testing"],
-        "description": "Picked up after REVIEW approved and assigned a version. Runs lint, the count guard and the touched suites inside the Fenix image (docker/test-in-container.sh, as CI does) plus the full suite once on the host; the pass cites the container run (--container-run) or names why docker was unavailable (--container-unavailable) (FOC-1179)."
+        "description": "Picked up after REVIEW approved and assigned a version. Runs lint, the count guard and the touched suites inside the Fenix image (docker/test-in-container.sh, as CI does) plus the full suite once on the host; in a service repo without the Fenix image the evidence is the affected suites in a Linux container (e.g. python:3.12-slim, FOC-1231); the pass cites the container run (--container-run) or names why docker was unavailable (--container-unavailable) (FOC-1179)."
       },
       "output": {
         "pass": { "state": "Done" },
