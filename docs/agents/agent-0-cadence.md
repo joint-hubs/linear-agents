@@ -21,10 +21,10 @@ Launcher: `bin/cadence.bat` (or cron weekly). Writes: `.state/cadence/` + flow-d
 | role | model | routing |
 |------|-------|---------|
 | collector | minimax | throughput + drift signals from Linear |
-| retro | glm-5.2 | bounce/cost analysis + blameless retro |
-| digest | deepseek-v4-pro | Polish weekly output + action items |
+| retro | mimo-v2.6-pro | bounce/cost analysis + blameless retro |
+| digest | glm-5.3-flash | Polish weekly output + action items |
 | worker | minimax | summaries |
-| flash | deepseek-v4-flash | metrics/tables |
+| flash | glm-5.3-flash | metrics/tables |
 </squad>
 
 <delegation_policy>

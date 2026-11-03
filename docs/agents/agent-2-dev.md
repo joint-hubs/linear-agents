@@ -22,12 +22,12 @@ This doc is the readable spec for humans/LLMs. On conflict: flag to Mateusz inst
 <squad>
 | Role | Model | Routing | Responsibility |
 |------|-------|---------|---|
-| recon | minimax-m3 | context packet | Analyze task + code → files, patterns, risks |
-| implementer | glm-5.2 | standard code | ENTIRE edit→build→test→commit cycle |
-| refactorer | kimi-k2.7-code | multi-file / MCP | Multi-file refactoring, tool-heavy work |
-| debugger | deepseek-v4-pro | hard / arch decision | Hard bugs, architecture, escalated failures |
-| worker | minimax-m3 | simple | Single-file, boilerplate |
-| flash | deepseek-v4-flash | mechanical | Extraction, formatting, checklists |
+| recon | glm-5.3-flash | context packet | Analyze task + code → files, patterns, risks |
+| implementer | glm-5.3-flash | standard code | ENTIRE edit→build→test→commit cycle |
+| refactorer | glm-5.3 | multi-file / MCP | Multi-file refactoring, tool-heavy work |
+| debugger | glm-5.3 | hard / arch decision | Hard bugs, architecture, escalated failures |
+| worker | glm-5.3-flash | simple | Single-file, boilerplate |
+| flash | glm-5.3-flash | mechanical | Extraction, formatting, checklists |
 </squad>
 
 <delegation_policy>

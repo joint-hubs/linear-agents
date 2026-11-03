@@ -20,12 +20,12 @@ Launcher: `bin/review.bat` (`CLAUDE_CONFIG_DIR=configs/review`). Trigger: task e
 <squad>
 | role | model | routing |
 |------|-------|---------|
-| first_pass | deepseek-v4-pro | lint/style/obvious bugs, missing tests |
+| first_pass | glm-5.3-flash | lint/style/obvious bugs, missing tests |
 | security | SAST/SCA/secrets | Semgrep/Snyk/Trivy/GitGuardian |
-| deep | glm-5.2 | correctness, arch, edge-cases, business logic |
+| deep | glm-5.3 | correctness, arch, edge-cases, business logic |
 | pl | minimax | explanations to Mateusz (if needed) |
 | worker | minimax | summary / DoD check |
-| flash | deepseek-v4-flash | Conventional Comments formatting |
+| flash | glm-5.3-flash | Conventional Comments formatting |
 </squad>
 
 <delegation_policy>

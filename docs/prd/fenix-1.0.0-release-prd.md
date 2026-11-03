@@ -153,7 +153,7 @@ goes through an explicit confirm.
 
 **In:** P0–P4 below. **Out of 1.0:** Atlas / `jointhubs.os` integration, multi-user / auth beyond
 localhost, managed cloud hosting, providers beyond OpenRouter as shipped defaults (switching stays possible),
-autonomous pickup of Linear issues without a human (D2), the FOC-477 go/no-go (1.0 does not wait
+autonomous pickup of Linear issues without a human (D2; FOC-902's opt-in exists, off by default — ADR-0015 §6), the FOC-477 go/no-go (1.0 does not wait
 for it).
 
 ## 8. Phases and tasks
@@ -164,7 +164,7 @@ for it).
 | **P1 Portability** | FOC-770 paths/config module · FOC-771 Node entry points replace `.bat` · FOC-772 Atlas/Nebul/pisi optional · FOC-762 child model from routing · FOC-773 pluggable provider · FOC-774 Linux CI for the full suite | `git grep` finds no user path / `LOCALAPPDATA` in runtime code; suite green on Linux |
 | **P2 Docker quick start** | FOC-775 image · FOC-776 compose (2 services, volumes, healthchecks, restart, resume) · FOC-777 `fenix` CLI (up/stop/update/logs/doctor/keys/attach) · FOC-778 key wizard with live validation + Compose secrets · FOC-779 generated artifacts regenerated on start · FOC-780 retention (keep all by default) · FOC-781 Quickstart docs | fresh VM with only Docker: `./fenix up` → dashboard in ≤ 10 min |
 | **P3 Dashboard v2** | FOC-782 UX spec + mockups (first) · FOC-783 Cockpit (Supervisor chat + web terminal + Needs-you inbox) · FOC-784 Work board · FOC-785 Costs & quality · FOC-786 Settings · FOC-787 Insights (2–3 notebook analyses) · FOC-788 human push / PR button | journey §4 steps 6–7 done in the browser only |
-| **P4 Release** | FOC-724 release dossier for 1.0.0 (retargeted from 1.1) · FOC-789 fresh-machine acceptance run on a real Linear issue · FOC-790 release notes + tag `v1.0.0` | acceptance run green; tag pushed by Mateusz |
+| **P4 Release** | FOC-790's hand-written dossier `docs/releases/1.0.0/README.md` (FOC-724, the dossier generator, stays in 1.1 — ADR-0015 §2) · FOC-789 fresh-machine acceptance run on a real Linear issue · FOC-790 release notes + tag `v1.0.0` | acceptance run green; tag pushed by Mateusz |
 
 Blocking relations in Linear: FOC-782 blocks the P3 screens; FOC-770 → FOC-775 → FOC-776 / FOC-777;
 FOC-789 waits for the CLI, the wizard, the Cockpit, the push button, the cost fixes and the docs.
@@ -183,7 +183,7 @@ FOC-789 waits for the CLI, the wizard, the Cockpit, the push button, the cost fi
 
 - **D1** Talking to the Supervisor from the dashboard: **both** — chat backed by headless turns and a
   web terminal.
-- **D2** The Supervisor does **not** pick tickets on its own; a human steers it.
+- **D2** The Supervisor does **not** pick tickets on its own; a human steers it. That is the default: FOC-902's opt-in `taskSessions.autoPickup` (off by default) is an owner-scope setting outside the 1.0 acceptance (ADR-0015 §6).
 - **D3** Provider: **OpenRouter now, switchable to anything else** (pluggable provider, FOC-773).
 - **D4** Repositories cloned into a volume; bind-mount from the host as an advanced option.
 - **D5** DrawIO and other generated artifacts: **gitignored, generated on a fresh start, freshness

@@ -186,5 +186,5 @@ Warianty pomocnicze (cała flota, 30 dni): wszystko na glm-5.3-flash, łącznie 
 1. **Przed przebiegiem akceptacyjnym FOC-789:** Supervisor → `xiaomi/mimo-v2.6-pro` (cofnięcie zmiany z PR #122 w `config/models.json` `defaultModel`, `SUPERVISOR_FALLBACK_MODEL` w `squad-start.mjs` / `squad-config.mjs` / `entrypoint.sh`, testy). Inaczej koszt na ticket w dossier 1.0 będzie ~15× zawyżony.
 2. Aliasy `routing.supervisor.*` i `routing.cadence.*` na nowe modele; frontmatter `model:` w `agents/cadence/agents/*.md`. Pin w `config-drift`.
 3. Wariant B (PLAN lead/spec/spec-review → mimo; trudne role → glm-5.3) — jako jedna zmiana routingu, mierzona przez 2 tygodnie na koszt i *first-time-right* (Dashboard → Costs & quality).
-4. Test A/B Supervisora: mimo vs claude-haiku-5.5 na kilku prawdziwych ticketach (koszt, liczba interwencji, jakość raportów).
+4. Test A/B Supervisora: mimo vs claude-haiku-5.5 na kilku prawdziwych ticketach (koszt, liczba interwencji, jakość raportów). Lista ramion ustalona 2026-11-03 w ADR-0015 §5 (sześć ramion, baseline glm-5.3-flash).
 5. Odświeżać snapshot (`python -I docs/ui/refresh-model-data.py --out docs/ui/model-explorer.html`) co ~2 tygodnie — pięć kandydatów z listy nie ma jeszcze pomiarów AA.

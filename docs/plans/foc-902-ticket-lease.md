@@ -3,6 +3,8 @@
 Parent FOC-898 (P3-D). PRD `docs/prd/multi-supervisor-isolation-prd.md` §6.1 (collision 1), decision Q3. Branch
 `foc-902-ticket-lease` stacked on `foc-901-scoped-only` (uses `readActiveSessions` and the `taskSessions` overlay key).
 
+Decision of record (ADR-0015 §6, 2026-11-03): autonomous pickup is off by default, an owner-scope opt-in, and not part of the 1.0 acceptance (1.0 PRD D2).
+
 ## Facts (recon 2026-10-16)
 
 - There is NO "pick the next ticket" mechanism on `main`: a managed session is created per ticket by the host

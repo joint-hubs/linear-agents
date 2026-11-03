@@ -11,14 +11,16 @@ maturity: v2
 <squad_table>
 | Role | Model |
 |------|-------|
-| lead | opus |
-| discovery | minimax-m3 |
-| dor_gate | deepseek-v4-flash |
-| spec | glm-5.2 |
-| spec_review | minimax-m3 |
-| decompose | minimax-m3 |
-| push | deepseek-v4-flash |
+| lead | mimo-v2.6-pro |
+| discovery | glm-5.3-flash |
+| dor_gate | glm-5.3-flash |
+| spec | mimo-v2.6-pro |
+| spec_review | mimo-v2.6-pro |
+| decompose | glm-5.3-flash |
+| push | glm-5.3-flash |
 </squad_table>
+
+Models mirror `config/models.json` routing v2 (FOC-964) as of 2026-11-03 — the config is the source, this table is a snapshot; decisions of record: ADR-0015 §3–4.
 
 <runtime>Full loop (gates, dispatch, idempotence, rollback policy, DRY-RUN auto-approve): see `agents/plan/CLAUDE.md`.</runtime>
 
