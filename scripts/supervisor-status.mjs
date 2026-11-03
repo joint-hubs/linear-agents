@@ -762,6 +762,20 @@ try {
       break;
     }
   }
+
+  // FOC-1221: the loop can miss a gate written right at the deadline. The
+  // final iteration samples the gate dir mid-`snapshot` (line ~355: after the
+  // children and the focus, before the tail work), so a gate file landing in
+  // that tail is invisible to the last poll — and if the deadline expires
+  // while the loop is between that read and the next check, the wait exits
+  // `timeout` for a gate that already existed. One final scan, deliberately
+  // cheap (a single gate-dir read, no loop change), catches it: the wait is
+  // still blocked and has not returned, so the gate is mid-wait by any honest
+  // definition. Runs inside the `try` so the armed marker's `finally` records
+  // the real outcome, not an interim `timeout`.
+  if (reason === "timeout" && pendingGates(runId).some((g) => !gatesBefore.has(g.gateId))) {
+    reason = "gate";
+  }
 } finally {
   // The wait is over. Erase nothing: record the outcome instead, so the guard
   // can tell "a wait is running now" from "a wait already ran in this turn".
