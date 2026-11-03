@@ -478,7 +478,7 @@ test("a --ran cited on a fail still has to point at real output", () => {
 });
 
 // ── 2c. a TEST pass ran the suite the way CI runs it (FOC-1179) ─────────────
-console.log("\ntest — parzystość z CI: werdykt cykuje przebieg w kontenerze");
+console.log("\ntest — parzystość z CI: werdykt cytuje przebieg w kontenerze");
 
 /**
  * A TEST child and the review child, each with a REAL worktree — the same

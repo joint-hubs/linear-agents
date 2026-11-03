@@ -101,10 +101,13 @@ For a deployed service, `deploy` checks health first; failure → the authorized
 For a local CLI/library repo: run lint, the docs count guard and the touched suites INSIDE the
 Fenix image, as CI does —
 ```bash
-docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh
+MSYS_NO_PATHCONV=1 docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh
 ```
-(the script runs lint + the full suite in a throwaway clone of HEAD with uncommitted work laid on
-top) — plus the full suite once on the host. The verdict cites the container run:
+On Git Bash/MSYS the container-side path (`/src/docker/...`) is rewritten to a host path without
+the `MSYS_NO_PATHCONV=1` prefix — `sh: cannot open C:/Program Files/Git/src/...`, exit 2; the
+repo's `fenix` wrapper exports the same guard. On PowerShell/cmd the plain form works.
+The script runs lint + the full suite in a throwaway clone of HEAD with uncommitted work laid on
+top — plus the full suite once on the host. The verdict cites the container run:
 `supervisor-verdict.mjs record --container-run '{"cmd":"...","exit":0,"outputRef":"<path under the run's scratch or this worktree>"}'`.
 The tool refuses `test-pass-without-container-run` when docker is available and nothing is cited.
 When docker is NOT available, the record must still say why —

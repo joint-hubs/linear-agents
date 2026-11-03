@@ -759,6 +759,24 @@ test("instrukcje TEST trzymają parzystość z CI — przebieg w kontenerze Feni
   }
 });
 
+test("komenda kontenerowa CI-parity niesie guard MSYS (FOC-1179, runda 4)", () => {
+  // REVIEW r5 (blokujący 1): na Git Bash/MSYS argument kontenerowy
+  // /src/docker/test-in-container.sh jest przepisywany na ścieżkę hosta
+  // (C:/Program Files/Git/src/...) → `sh: cannot open` → exit 2 — recenzent
+  // uruchomił to na żywo. Z MSYS_NO_PATHCONV=1 ten sam przebieg jest zielony
+  // (216/216, exit 0). Dokumentowana komenda musi nieść ten sam guard, który
+  // eksportuje wrapper fenix — inaczej każdy, kto skopiuje ją do Git Bash,
+  // uruchamia nieistniejącą ścieżkę.
+  const testLead = read("agents/test/CLAUDE.md");
+  if (!/MSYS_NO_PATHCONV=1 docker run --rm/.test(testLead)) {
+    fail("agents/test/CLAUDE.md §4b ma komendę kontenerową bez prefiksu MSYS_NO_PATHCONV=1");
+  }
+  const verdictSrc = read("scripts/supervisor-verdict.mjs");
+  if (!verdictSrc.includes("MSYS_NO_PATHCONV=1")) {
+    fail("scripts/supervisor-verdict.mjs: hint test-pass-without-container-run nie wspomina prefiksu MSYS dla Git Bash");
+  }
+});
+
 test("graph trzyma limit rund i liczenie werdyktów delivery (FOC-1179)", () => {
   // Limit dwóch cykli dev↔review zostaje; werdykty delivery (FOC-1169) liczą
   // się jako rundy — to musi być prawdą w tekście, który rządzi, nie tylko w

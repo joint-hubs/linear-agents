@@ -1006,7 +1006,8 @@ function cmdRecord(args) {
       const docker = dockerAvailability();
       failJson(
         `test-pass-without-container-run: a TEST pass must cite the Fenix-container run ` +
-          `(--container-run '{"cmd":"...","exit":0,"outputRef":"..."}' — docker/test-in-container.sh, as CI runs it) ` +
+          `(--container-run '{"cmd":"...","exit":0,"outputRef":"..."}' — docker/test-in-container.sh, as CI runs it; ` +
+          `on Git Bash/MSYS prefix the command with MSYS_NO_PATHCONV=1 or the container-side path is rewritten) ` +
           `or, when docker is not available, say why (--container-unavailable "<why>")`,
         { dockerAvailable: docker.available, hint: "delivery has to be able to see whether the container ran" },
       );

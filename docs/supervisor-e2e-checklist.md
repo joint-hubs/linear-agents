@@ -246,8 +246,10 @@ text pin in `scripts/config-drift.test.mjs`:
   `node scripts/security-scan.test.mjs` and `node scripts/egress-screen.mjs check --body-file <round
   file>` run as commands with their output cited, not an LLM role. `first-pass`/`security`/`deep`
   are folded into the lead; `worker`/`flash` stay for read-only lookups.
-- **TEST has CI parity.** A TEST pass cites the Fenix-container run — `docker run --rm -v
-  <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh` (what CI runs) — via
+- **TEST has CI parity.** A TEST pass cites the Fenix-container run — `MSYS_NO_PATHCONV=1 docker
+  run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh` (what CI runs; on
+  Git Bash/MSYS the prefix keeps the container-side path from being rewritten to a host path —
+  exit 2 without it; the repo's `fenix` wrapper exports the same guard) — via
   `--container-run '{"cmd","exit","outputRef"}'`, plus the full suite once on the host. When docker
   is not available the record still names why: `--container-unavailable "<why>"` lands as
   `containerRun: "unavailable: <why>"`. The tool refuses `test-pass-without-container-run`
