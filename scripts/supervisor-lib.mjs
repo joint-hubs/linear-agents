@@ -3022,6 +3022,30 @@ export function progressFingerprint({ worktree, baseRevision, failingTests = [] 
 }
 
 /**
+ * FOC-1222: the commit a verdict's fingerprint covers — HEAD of the judged
+ * tree, read with the same child-tree sanitisation the diff itself uses.
+ * `sha: null` with an `error` is honest UNKNOWN: the verdict still records, it
+ * just cannot name a reproducible commit.
+ */
+export function worktreeHead(worktree) {
+  try {
+    const r = spawnSync("git", childTreeGitArgs(["rev-parse", "HEAD"], worktree), {
+      cwd: worktree,
+      encoding: "utf8",
+    });
+    if (r.status !== 0) {
+      return {
+        sha: null,
+        error: (r.stderr || "").trim().split("\n")[0] || `git rev-parse HEAD exited ${r.status}`,
+      };
+    }
+    return { sha: r.stdout.trim() || null, error: null };
+  } catch (err) {
+    return { sha: null, error: err.message.split("\n")[0] };
+  }
+}
+
+/**
  * Did this round move? `null` means UNKNOWN — one of the two could not be read —
  * and callers must treat that as "cannot tell", never as "no progress".
  */

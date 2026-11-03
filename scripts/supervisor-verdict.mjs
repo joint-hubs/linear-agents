@@ -100,6 +100,7 @@ import {
   runDir,
   updateChild,
   verdictPath,
+  worktreeHead,
   verdictsDir,
 } from "./supervisor-lib.mjs";
 import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
@@ -1098,6 +1099,19 @@ function cmdRecord(args) {
   if (workChild.childId !== entry.childId) {
     warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under review`);
   }
+  // FOC-1222: the sha the verdict covers — HEAD of the judged tree. A dirty
+  // tree does not block the record (the fingerprint already folds the
+  // porcelain in), but the dirt is named: a bare sha would claim a
+  // reproducibility the tree does not have.
+  const candidate = worktreeHead(workChild.worktree);
+  if (candidate.error) {
+    warnings.push(`candidate sha is UNKNOWN: ${candidate.error}`);
+  } else if (fingerprint.changedFiles > 0 && !warnings.some((w) => /uncommitted|dirty|porcelain/i.test(w))) {
+    warnings.push(
+      `fingerprinted a tree with ${fingerprint.changedFiles} uncommitted change(s) — ` +
+        `the candidate sha covers the tree as it stands, the dirt is folded into the diff hash`,
+    );
+  }
 
   // Round numbering continues across the split (roundsAcross reads the work
   // run's chain when --work-run was given) — a restart mid-task must not make
@@ -1129,6 +1143,9 @@ function cmdRecord(args) {
     ...(containerRunField !== undefined ? { containerRun: containerRunField } : {}),
     declaredAcs: declared,
     fingerprint,
+    // FOC-1222: the commit this record covers — the work child's HEAD. null is
+    // honest UNKNOWN (an unreadable tree), never a guess.
+    candidate: candidate.sha ?? null,
     // FOC-220: present only when the fail DECLARED an empty test axis, carrying
     // the reason that earned it. A fail record with an empty
     // fingerprint.failingTests and no such field is a pre-enforcement record,
@@ -1472,6 +1489,21 @@ function cmdRecordDelivery(args) {
     warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under delivery review`);
   }
 
+  // FOC-1222: the sha the delivery record covers. Live routes read the tree's
+  // HEAD now; a backfill copies round N's fingerprint and cannot name the sha
+  // that tree stood at — null is the honest answer, never this tree's HEAD.
+  const candidate = backfill ? { sha: null } : worktreeHead(workChild.worktree);
+  if (backfill) {
+    warnings.push(`candidate is null — a backfilled record copies an earlier round's fingerprint; the sha that tree stood at is not recorded`);
+  } else if (candidate.error) {
+    warnings.push(`candidate sha is UNKNOWN: ${candidate.error}`);
+  } else if (fingerprint.changedFiles > 0 && !warnings.some((w) => /uncommitted|dirty|porcelain/i.test(w))) {
+    warnings.push(
+      `fingerprinted a tree with ${fingerprint.changedFiles} uncommitted change(s) — ` +
+        `the candidate sha covers the tree as it stands, the dirt is folded into the diff hash`,
+    );
+  }
+
   const prior = latestVerdict(runId, taskId);
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);
 
@@ -1488,6 +1520,9 @@ function cmdRecordDelivery(args) {
     // the issue's criteria list. null is honest UNKNOWN, never a count.
     declaredAcs: null,
     fingerprint,
+    // FOC-1222: the commit this record covers — the work child's HEAD on a
+    // live record; null on a backfill (the judged tree predates this read).
+    candidate: candidate.sha ?? null,
     // FOC-1169: the label. reason is required on a fail; null on a pass that
     // carried none. recordedBy separates this record's author from the
     // (absent) recording child.

@@ -590,7 +590,8 @@ test("a test pass with a cited container run is recorded, keys in shape order", 
   const rec = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
   assert.equal(
     Object.keys(rec).join(","),
-    "taskId,runId,childId,squad,round,verdict,findings,acMapping,containerRun,declaredAcs,fingerprint,recordedAt,linearEffects",
+    // FOC-1222: `candidate` sits next to `fingerprint` in every record shape.
+    "taskId,runId,childId,squad,round,verdict,findings,acMapping,containerRun,declaredAcs,fingerprint,candidate,recordedAt,linearEffects",
   );
 });
 
@@ -808,6 +809,34 @@ test("an unreadable tree is UNKNOWN, not empty", () => {
   const fp = progressFingerprint({ worktree: join(ROOT, "no-such-tree"), baseRevision: "HEAD" });
   assert.equal(fp.combined, null);
   assert.ok(fp.error);
+});
+
+// ── 3a. the candidate sha the verdict covers (FOC-1222) ──────────────────────
+console.log("\nverdykt niesie sha, który pokrywa (FOC-1222)");
+
+test("a verdict record carries the candidate sha it covers (FOC-1222)", () => {
+  const s = scenario();
+  advance(s, "dev-work.txt"); // the judged tree's HEAD moves past the base
+  const r = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(
+    r.candidate,
+    gitIn(s.worktree, "rev-parse", "HEAD"),
+    "the record carries no candidate sha (or the wrong one) — the round covers an unreproducible tree",
+  );
+});
+
+test("a dirty work tree still records the HEAD it covers, and names the dirt (FOC-1222)", () => {
+  const s = scenario();
+  advance(s, "dev-committed.txt");
+  writeFileSync(join(s.worktree, "uncommitted.txt"), "dirt\n"); // untracked dirt
+  const r = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.candidate, gitIn(s.worktree, "rev-parse", "HEAD"));
+  assert.ok(
+    r.warnings.some((w) => /uncommitted/i.test(w)),
+    `no warning names the dirt: ${JSON.stringify(r.warnings)}`,
+  );
 });
 
 // ── 3b. a launcher restart split the registry: --work-run (FOC-1155) ─────────
@@ -1618,6 +1647,14 @@ console.log("\ndelivery verdykty — etykiety bez dziecka");
 const deliveryRecord = (s, extra = []) =>
   parse(verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", ...extra]), fail);
 
+test("a delivery verdict carries the candidate sha it covers (FOC-1222)", () => {
+  const s = scenario();
+  advance(s, "delivery-work.txt");
+  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.candidate, gitIn(s.worktree, "rev-parse", "HEAD"));
+});
+
 // The byte-level pin of a NORMAL record, captured from the pre-FOC-1169 tool
 // (the recordedAt, runId and fingerprint hashes are the only dynamic parts —
 // normalized to "<ts>", "<run>" and "<hash>"). It is a regression guard, not an
@@ -1649,6 +1686,7 @@ const GOLDEN_NORMAL_RECORD = `{
     ],
     "error": null
   },
+  "candidate": "<sha>",
   "recordedAt": "<ts>",
   "linearEffects": {
     "dryRun": true,
@@ -1673,12 +1711,15 @@ test("the record shape without --delivery is unchanged (byte-level pin)", () => 
     ...rec,
     runId: "<run>",
     recordedAt: "<ts>",
+    // FOC-1222: `candidate` joined the shape after `fingerprint` — normalized
+    // here like the hashes, its own test pins it against the work child's HEAD.
+    candidate: "<sha>",
     fingerprint: { ...rec.fingerprint, diff: "<hash>", tests: "<hash>", combined: "<hash>" },
   };
   // Key ORDER is part of the shape: a key appended later shifts every byte after it.
   assert.equal(
     Object.keys(rec).join(","),
-    "taskId,runId,childId,squad,round,verdict,findings,acMapping,declaredAcs,fingerprint,recordedAt,linearEffects",
+    "taskId,runId,childId,squad,round,verdict,findings,acMapping,declaredAcs,fingerprint,candidate,recordedAt,linearEffects",
   );
   assert.equal(JSON.stringify(norm, null, 2), GOLDEN_NORMAL_RECORD);
   // The delivery-only keys must not leak into a normal record.
