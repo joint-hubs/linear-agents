@@ -54,5 +54,8 @@ export LA_ROOT="$WORK"
 
 rc=0
 node scripts/lint.mjs || rc=1
+# The generated index block must match docs/state/ (FOC-1224) — CI holds the
+# line so a journal that lands without a regen fails the lint job.
+node scripts/state-index.mjs --check || rc=1
 node scripts/test-all.mjs "$@" || rc=1
 exit "$rc"
