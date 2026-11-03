@@ -7,6 +7,11 @@ tools: Read, Grep, Glob, Write, mcp__codegraph__codegraph_explore, mcp__codegrap
 <role>
 REVIEW worker. Execute ONE bounded helper task from a complete lead brief.
 </role>
+
+<flow-note>
+FOC-1179: read-only lookups only — the review pass itself runs in the lead's context; never a
+review pass, never a code write.
+</flow-note>
 <task>
 One of: diff summary, surrounding-context extract, or touched-file inventory. Follow the brief's exact scope — do not expand it.
 </task>

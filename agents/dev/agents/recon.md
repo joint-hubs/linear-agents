@@ -7,6 +7,11 @@ tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore, mcp__codegraph
 <role>
 DEV recon. Produce a concise context packet so the lead plans from summary, not raw code.
 </role>
+
+<flow-note>
+FOC-1179: in the supervised DEV flow this role is read-only — lookups and command runs;
+never code, test or journal writes. The lead writes.
+</flow-note>
 <input>
 Task (description + comments + checklist) + repo.
 </input>

@@ -236,6 +236,31 @@ in `agents/review/CLAUDE.md` §5 Verdict and `agents/review/agents/first-pass.md
 
 ---
 
+## The role set for quality (FOC-1179) — one pass, CI parity, lead-writes
+
+Three rules the role docs now carry (cross-squad table: `docs/agents/role-set.md`), each with a
+text pin in `scripts/config-drift.test.mjs`:
+
+- **REVIEW is one strong pass.** The lead reads the diff and the DEV journal itself, re-runs the
+  cited evidence (`--ran`), and the security step is DETERMINISTIC — `node scripts/security-scan.mjs`,
+  `node scripts/security-scan.test.mjs` and `node scripts/egress-screen.mjs check --body-file <round
+  file>` run as commands with their output cited, not an LLM role. `first-pass`/`security`/`deep`
+  are folded into the lead; `worker`/`flash` stay for read-only lookups.
+- **TEST has CI parity.** A TEST pass cites the Fenix-container run — `MSYS_NO_PATHCONV=1 docker
+  run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh` (what CI runs; on
+  Git Bash/MSYS the prefix keeps the container-side path from being rewritten to a host path —
+  exit 2 without it; the repo's `fenix` wrapper exports the same guard) — via
+  `--container-run '{"cmd","exit","outputRef"}'`, plus the full suite once on the host. When docker
+  is not available the record still names why: `--container-unavailable "<why>"` lands as
+  `containerRun: "unavailable: <why>"`. The tool refuses `test-pass-without-container-run`
+  either way a bare missing field appears; docker availability is probed by `docker info`, with
+  `LA_DOCKER_AVAILABLE=1|0` as the test seam. `deployer`/`scenario-gen` are not part of the
+  CLI-repo flow.
+- **DEV is one context for one change.** Subagents are for reading (recon) only; the
+  implementation, the red-first tests and the journal are written by the lead in its own tree.
+
+---
+
 ## What to do with a failed box
 
 Do not fix it inside the walk. Note the box, the command, and what actually happened, then finish

@@ -93,6 +93,19 @@ delivery observed. Quality first; cost is a later pass.
 - The graph's round limit (two dev↔review cycles, then escalate) stays, and delivery verdicts
   count as rounds.
 
+### 4b. The exact container command TEST cites (FOC-1179)
+
+```bash
+docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh
+```
+
+`test-in-container.sh` runs lint, the count guard and the touched suites in a throwaway clone of
+HEAD with the uncommitted work on top — what CI runs. A TEST verdict cites it through
+`--container-run '{"cmd","exit","outputRef"}'`, or names why it could not run through
+`--container-unavailable` (`containerRun: "unavailable: <why>"`); the tool refuses a pass with
+neither (`test-pass-without-container-run`). The full contract lives in `agents/test/CLAUDE.md`
+§4b — the canonical rule sentence; this section is the plan-side pointer.
+
 ## What this does not do
 
 - No training, no automatic prompt edits. The labels are the input the later reflector

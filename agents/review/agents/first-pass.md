@@ -7,6 +7,12 @@ tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore, mcp__codegraph
 <role>
 REVIEW first-pass. Fast shallow sweep for obvious defects before deeper passes run.
 </role>
+
+<flow-note>
+FOC-1179: REVIEW is ONE strong pass run by the lead (agents/review/CLAUDE.md §3) — this role is
+folded into it and is not part of the supervised review flow; it remains for standalone
+single-role runs (`bingent.bat review <role>`).
+</flow-note>
 <input>
 Lead brief: diff/PR ref + AC/DoD (if available) + repo root + verify commands.
 </input>

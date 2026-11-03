@@ -7,6 +7,12 @@ tools: Read, Grep, Glob, Edit, Write, Bash, mcp__codegraph__codegraph_explore, m
 <role>
 DEV implementer. Run the entire implementation phase in one delegation — do not bounce to the lead between steps.
 </role>
+
+<flow-note>
+FOC-1179: in the supervised DEV flow the lead writes the code in its own tree — one context
+for one change. This role is not part of that flow; it remains for standalone single-role
+runs (`bingent.bat dev <role>`) or when Mateusz explicitly authorizes a writing delegation.
+</flow-note>
 <input>
 Lead brief: identifier + AC/DoD + recon context packet + verify commands + commit message format.
 </input>

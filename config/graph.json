@@ -484,7 +484,7 @@
       "input": {
         "state": "Todo",
         "labels": ["dor-ok"],
-        "description": "Exactly one issue, dependency-aware: anything with unfinished blockers is skipped. Prefer the smallest estimate."
+        "description": "Exactly one issue, dependency-aware: anything with unfinished blockers is skipped. Prefer the smallest estimate. Subagents are for reading (recon) only — the implementation, the red-first tests and the journal are written by the lead in its own tree (FOC-1179, one context for one change)."
       },
       "output": {
         "git": "branch off main, commits on that branch — never pushed",
@@ -506,7 +506,7 @@
       "input": {
         "state": "In Review",
         "labels": ["coded"],
-        "description": "Reads the branch diff. Three passes run concurrently: first-pass, security, deep."
+        "description": "One strong pass by the review lead: reads the branch diff and the DEV journal itself, re-runs the cited evidence (--ran), and runs the deterministic security step (security-scan + security-scan.test.mjs + egress screen) with its output cited. No first-pass/security/deep subagent passes (FOC-1179)."
       },
       "output": {
         "pass": { "labels": ["ai:reviewed", "dod-ok", "stage:testing"], "state": "In Review (unchanged — hands to TEST without a transition)", "note": "ai:reviewed REPLACES coded — the Linear `ai` group (planned/coded/reviewed) is exclusive, the two cannot coexist; remove `coded` before stamping" },
@@ -514,7 +514,7 @@
         "artifacts": [".state/reviews/<ID>-round<N>.md (Conventional Comments)"]
       },
       "completion": "A verdict is posted. Clean = every AC and DoD item passes with zero blocking `issue:` findings.",
-      "failure": "round > 2 (third attempt) → label `escalated`, post the final verdict, STOP and notify Mateusz. Max 2 dev↔review cycles.",
+      "failure": "round > 2 (third attempt) → label `escalated`, post the final verdict, STOP and notify Mateusz. Max 2 dev↔review cycles. Delivery verdicts (FOC-1169) count as rounds.",
       "gates": []
     },
 
@@ -524,7 +524,7 @@
       "budget": { "stage": "verification", "shareHint": 0.1 },
       "input": {
         "labels": ["stage:testing"],
-        "description": "Picked up after REVIEW approved and assigned a version."
+        "description": "Picked up after REVIEW approved and assigned a version. Runs lint, the count guard and the touched suites inside the Fenix image (docker/test-in-container.sh, as CI does) plus the full suite once on the host; the pass cites the container run (--container-run) or names why docker was unavailable (--container-unavailable) (FOC-1179)."
       },
       "output": {
         "pass": { "state": "Done" },
@@ -649,7 +649,7 @@
       "order": 8,
       "routable": false,
       "when": { "labels": ["escalated"] },
-      "why": "round > 2, i.e. a third dev↔review attempt. Declared so the escalation path is visible in the topology; routing is handled by the order-1 gate edge. FOC-163 replaces the round counter with a diff+failure fingerprint, which will change this edge's condition."
+      "why": "round > 2, i.e. a third dev↔review attempt. Declared so the escalation path is visible in the topology; routing is handled by the order-1 gate edge. FOC-163 replaces the round counter with a diff+failure fingerprint, which will change this edge's condition. Delivery verdicts (FOC-1169) count as rounds."
     },
     {
       "id": "test-to-human-escalate",
@@ -696,7 +696,7 @@
       "id": "decide-review-depth", "from": "review", "to": "review", "type": "decide",
       "registry": "review.depth",
       "when": { "state": "In Review" },
-      "why": "MAP #14: first-pass/deep/security. Today fixed config. from/to name the decision's scope, not a routable target."
+      "why": "MAP #14: first-pass/deep/security — folded into the review lead's one strong pass by FOC-1179; the routing keys remain in config/models.json until the cost pass (plan §4: quality first). from/to name the decision's scope, not a routable target."
     },
     {
       "id": "decide-next-step", "from": "*", "to": "*", "type": "decide",

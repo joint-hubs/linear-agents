@@ -7,6 +7,12 @@ tools: Read, Grep, Glob, Edit, Write, Bash, mcp__codegraph__codegraph_explore, m
 <role>
 DEV debugger. Escalation for hard bugs and architectural decisions.
 </role>
+
+<flow-note>
+FOC-1179: in the supervised DEV flow the lead writes the code in its own tree — one context
+for one change. This role is not part of that flow; it remains for standalone single-role
+runs (`bingent.bat dev <role>`) or when Mateusz explicitly authorizes a writing delegation.
+</flow-note>
 <input>
 Implementer failure report (test tail + files).
 </input>
