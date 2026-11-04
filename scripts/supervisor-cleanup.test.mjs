@@ -405,6 +405,74 @@ test("a dirty tree is removed only because those exact paths were approved", () 
   assert.ok(!existsSync(s.worktree));
 });
 
+test("a nested fixture git repository under .state/scratch does not kill the removal", () => {
+  // FOC-1227, the c0cd/FOC-1210 shape: a child's red-first fixture is a throwaway
+  // git repo under .state/scratch, and `git ls-files --others` cannot descend
+  // into a nested repository — the whole repo arrives at the archive step as
+  // ONE DIRECTORY entry. copyFileSync on a directory is EPERM, which used to
+  // failJson the whole removal away and leave a gated tree standing until
+  // someone deleted the fixture by hand. The walk now descends into directory
+  // entries, copies the real files, and skips the nested .git BY NAME with a
+  // named warning — a fixture repo's objects are noise, but never silent noise.
+  const s = scenario();
+  const fixture = join(s.worktree, ".state", "scratch", "foc-1210", "fixture", "repo");
+  mkdirSync(fixture, { recursive: true });
+  gitIn(fixture, "init", "-b", "main");
+  gitIn(fixture, "config", "user.email", "test@example.com");
+  gitIn(fixture, "config", "user.name", "test");
+  writeFileSync(join(fixture, "fixture.txt"), "red-first fixture content\n");
+  gitIn(fixture, "add", "-A");
+  gitIn(fixture, "commit", "-m", "fixture");
+  writeFileSync(join(s.worktree, ".state", "scratch", "notes.txt"), "scratch notes\n");
+
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.removed, s.worktree);
+  assert.ok(!existsSync(s.worktree), "the directory is still there");
+
+  // Skipping is fine; skipping silently is not: the nested .git is named.
+  assert.ok(
+    (out.skippedGitDirs ?? []).some((l) => l.includes(".state/scratch/foc-1210/fixture/repo/.git")),
+    `the report does not name the skipped nested .git: ${JSON.stringify(out.skippedGitDirs)}`,
+  );
+
+  // The fixture's real content and the plain scratch file were archived.
+  const archiveDir = join(supervisorStateHome(), s.runId, "test-artifacts", "dev-1");
+  assert.ok(
+    existsSync(join(archiveDir, ".state", "scratch", "notes.txt")),
+    "the scratch note was not archived",
+  );
+  assert.ok(
+    existsSync(join(archiveDir, ".state", "scratch", "foc-1210", "fixture", "repo", "fixture.txt")),
+    "the fixture's content file was not archived",
+  );
+});
+
+test("one scratch entry that cannot be archived is reported, not blocking", () => {
+  // FOC-1227 policy: a failure to archive ONE scratch entry does not stop the
+  // removal of a tree whose gate was answered — the report names every entry it
+  // could not archive and why, the tree still goes, exit stays 0. Forced here
+  // without platform tricks: a plain scratch file whose destination path in the
+  // archive dir is already taken by a directory makes copyFileSync fail — the
+  // same per-entry error the EPERM used to abort the whole removal on.
+  const s = scenario();
+  mkdirSync(join(s.worktree, ".state", "scratch"), { recursive: true });
+  writeFileSync(join(s.worktree, ".state", "scratch", "collide.txt"), "cannot land in the archive\n");
+  const archiveDir = join(supervisorStateHome(), s.runId, "test-artifacts", "dev-1");
+  mkdirSync(join(archiveDir, ".state", "scratch", "collide.txt"), { recursive: true });
+
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.removed, s.worktree);
+  assert.ok(!existsSync(s.worktree), "a gated tree was left standing over one scratch entry");
+  assert.ok(
+    (out.archiveFailures ?? []).some((l) => l.includes(".state/scratch/collide.txt")),
+    `the report does not name the unarchivable entry: ${JSON.stringify(out.archiveFailures)}`,
+  );
+});
+
 test("the report names both keys it turned", () => {
   // An audit trail that says "removed" and nothing else cannot be checked later.
   const s = scenario();
