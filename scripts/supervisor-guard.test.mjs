@@ -182,15 +182,21 @@ test("blocks (exit 2) with a held spawn, even with no live child", () => {
   if (!r.stderr.includes("held-7")) fail(`reason does not name the held spawn: ${r.stderr}`);
 });
 
-test("blocks (exit 2) with a pending gate, even with no live child", () => {
+test("allows (exit 0) with a pending gate, even with no live child — the gate IS the hand-over (FOC-1159)", () => {
+  // A child that emits a gate and ends its turn is handing over cleanly, not
+  // abandoning work: the gate record is the delivery to the Supervisor, who
+  // relays it to Mateusz. Blocking on it contradicted the supervised contract
+  // ("a gate is one turn: emit, then exit") and wedged the child in a
+  // stop-restart loop until the alarm fired. The gate is named on stderr so
+  // the tee shows what was handed over.
   const runId = fixtureRun();
   writeFileSync(
     join(runDir(runId), "gates", "g-9.json"),
     JSON.stringify({ gateId: "g-9", status: "pending", kind: "question", summary: "need an answer", questions: [] }),
   );
   const r = guard(runId);
-  if (r.status !== 2) fail(`expected exit 2, got ${r.status}`);
-  if (!r.stderr.includes("g-9")) fail(`reason does not name the pending gate: ${r.stderr}`);
+  if (r.status !== 0) fail(`expected exit 0 (clean hand-over), got ${r.status}`);
+  if (!r.stderr.includes("g-9")) fail(`the allowance does not name the handed-over gate: ${r.stderr}`);
 });
 
 test("an answered gate no longer blocks", () => {
@@ -336,7 +342,12 @@ test("an EXPIRED spent marker grants nothing", () => {
   if (r.status !== 2) fail(`an expired spent marker allowed the stop (exit ${r.status})`);
 });
 
-test("a pending gate still blocks — waiting on a child discharges no human question", () => {
+test("a spent timeout allows the turn end with a live child AND a pending gate (FOC-1159)", () => {
+  // The wait covers the live child (one timeout, one turn end); the gate needs
+  // no covering at all — it is the hand-over, and it rides the same exit.
+  // The pre-FOC-1159 guard refused this shape ("waiting on a child discharges
+  // no human question"), which meant a child could never end its turn on the
+  // gate it had just emitted.
   const runId = fixtureRun();
   seedChild(runId, { childId: "dev-gateowed" });
   seedSpentWait(runId, "timeout");
@@ -345,8 +356,9 @@ test("a pending gate still blocks — waiting on a child discharges no human que
     JSON.stringify({ gateId: "g-owed", status: "pending", kind: "question", summary: "need an answer", questions: [] }),
   );
   const r = guard(runId);
-  if (r.status !== 2) fail(`a pending gate was waved past by a spent wait (exit ${r.status})`);
-  if (!r.stderr.includes("g-owed")) fail(`the refusal does not name the gate: ${r.stderr}`);
+  if (r.status !== 0) fail(`a pending gate still blocked alongside a spent wait (exit ${r.status})`);
+  if (!r.stderr.includes("dev-gateowed")) fail(`the allowance does not name the child it covers: ${r.stderr}`);
+  if (!r.stderr.includes("g-owed")) fail(`the allowance does not name the handed-over gate: ${r.stderr}`);
 });
 
 test("a held spawn still blocks alongside a spent wait", () => {
