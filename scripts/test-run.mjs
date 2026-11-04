@@ -32,8 +32,10 @@
 //
 // Usage: node scripts/test-run.mjs [pattern] [--jobs N] [--max-wall-ms X] [--prove-isolation] [--affected [file …]]
 //   pattern            substring to filter test file names (e.g. "telemetry")
-//   --jobs N           max concurrency for the parallel lane (default 8);
-//                      the serial lane is always concurrency 1
+//   --jobs N           max concurrency for the parallel lane (default:
+//                      os.availableParallelism() capped at 16; an explicit
+//                      --jobs always wins); the serial lane is always
+//                      concurrency 1
 //   --max-wall-ms X    wall-clock budget for the whole run. On exceed: stop
 //                      admitting new files, kill in-flight files, report the
 //                      three buckets (finished / cut short / never started),
@@ -55,7 +57,7 @@
 import './spawn-windows-hide.mjs';
 import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { killTree } from './supervisor-lib.mjs';
@@ -63,7 +65,11 @@ import { probePid, openRegistryRows } from './test-spawn.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const LANES_FILE = join(SCRIPTS_DIR, 'test-lanes.json');
-const DEFAULT_JOBS = 8;
+// FOC-1074: the default follows the machine instead of a fixed 8 — every core
+// the host actually has, capped at 16 (beyond that the lane is IO-bound around
+// the spawn cost, and a runaway host no longer floods the suite). An explicit
+// --jobs always wins.
+const DEFAULT_JOBS = Math.min(availableParallelism(), 16);
 
 // ── args ─────────────────────────────────────────────────────────────────────
 
@@ -72,7 +78,8 @@ if (args.includes('--help')) {
   console.log(`Usage: node scripts/test-run.mjs [pattern] [--jobs N] [--max-wall-ms X] [--prove-isolation]
 
 Runs every scripts/*.test.mjs in two lanes from scripts/test-lanes.json:
-parallel (isolated files, concurrency --jobs) and serial (shared-resource
+parallel (isolated files, concurrency --jobs, default
+os.availableParallelism() capped at 16) and serial (shared-resource
 files, concurrency 1). Both lanes run at the same time; the serial lane
 never runs two files at once.
 

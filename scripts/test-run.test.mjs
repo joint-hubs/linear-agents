@@ -25,7 +25,7 @@
 
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
@@ -408,6 +408,26 @@ test("an affected answer that maps to no known test files exits 1, never a silen
   });
   if (r.status !== 1) fail(`an empty affected answer exited ${r.status}, expected 1`);
   if (!r.stderr.includes("no test files")) fail(`the empty answer was not explained:\n${r.stderr}`);
+});
+
+// ── default --jobs (FOC-1074) ─────────────────────────────────────────────────
+
+test("the default --jobs is availableParallelism() capped at 16, and an explicit --jobs still wins", () => {
+  // The mode line names the concurrency the run actually used, so the default
+  // is observable from the outside without importing anything.
+  const root = sandbox(
+    { parallel: [lane("a.test.mjs"), lane("b.test.mjs")], serial: [lane("c.test.mjs")] },
+    { "a.test.mjs": OK, "b.test.mjs": OK, "c.test.mjs": OK },
+  );
+  const expected = Math.min(availableParallelism(), 16);
+  const r = run(root);
+  if (r.status !== 0) fail(`the run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes(`@ jobs ${expected}`)) {
+    fail(`the default concurrency was not min(availableParallelism(), 16) = ${expected}:\n${r.stdout}`);
+  }
+  const explicit = run(root, ["--jobs", "3"]);
+  if (explicit.status !== 0) fail(`the explicit run failed:\n${explicit.stdout}\n${explicit.stderr}`);
+  if (!explicit.stdout.includes("@ jobs 3")) fail(`an explicit --jobs did not win over the default:\n${explicit.stdout}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
