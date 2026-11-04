@@ -52,6 +52,9 @@ import {
   queryRatingsForRuns,
   queryHeldAwards,
 } from "./reward-ledger.mjs";
+// FOC-1245: the probe predicate lives in supervisor-lib — one spelling for
+// every round-bookkeeping skip (roundsFor, supervisor-verdict's list, this ingest).
+import { isProbe } from "./supervisor-lib.mjs";
 
 export const REWARDS_INGEST_TTL_MS = 30_000; // single-flight cache window
 
@@ -220,7 +223,7 @@ export async function ingestRewards(deps = {}) {
       }
       // FOC-1236: a --dry-run verdict is a probe, not a round — no award reads
       // it, the same skip roundsFor applies to the round bookkeeping.
-      if (record?.linearEffects?.dryRun === true) continue;
+      if (isProbe(record)) continue;
       const taskId = typeof record?.taskId === "string" ? record.taskId.trim().toUpperCase() : "";
       const round = Number(record?.round);
       const verdict = typeof record?.verdict === "string" ? record.verdict.trim().toLowerCase() : "";

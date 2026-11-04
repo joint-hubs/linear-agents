@@ -31,6 +31,7 @@ import {
 import {
   comparableProgress,
   gatesDir,
+  isProbe,
   progressFingerprint,
   readRegistry,
   roundsFor,
@@ -1161,7 +1162,9 @@ test("the verdict chain continues across the split — and the progress guard ca
 
 test("a cross-run fail stamps the work child's registry entry (in run A) with workRun provenance", () => {
   const s = splitRunScenario();
-  const out = recordIn(s, [
+  // FOC-1245: a REAL record — a dry probe stamps nothing, and this test pins
+  // the stamp.
+  const out = realRecordIn(s, [
     "--child", "recorder-1", "--verdict", "fail",
     "--finding", CITED, "--failing-test", "suite/a",
     "--work-run", s.runA, "--work-child", "dev-1",
@@ -1245,7 +1248,9 @@ test("a cross-run fail stamps verdictRuns on the work child's entry on a PASS to
   mkdirSync(join(runDir(s.runB), "scratch"), { recursive: true });
   const containerOut = join(runDir(s.runB), "scratch", "container-output.txt");
   writeFileSync(containerOut, "74 passed, 0 failed\n", "utf8");
-  const out = recordIn(s, [
+  // FOC-1245: a REAL record — a dry probe stamps nothing, and this test pins
+  // the stamp.
+  const out = realRecordIn(s, [
     "--child", "recorder-1", "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
@@ -1260,7 +1265,9 @@ test("verdictRuns is deduplicated across repeated cross-run records", () => {
   const s = splitRunScenario();
   for (const n of [1, 2]) {
     advance(s, `move-${n}.txt`);
-    const out = recordIn(s, [
+    // FOC-1245: REAL records — a dry probe stamps nothing, and this test
+    // pins the dedup of real stamps.
+    const out = realRecordIn(s, [
       "--child", "recorder-1", "--verdict", "fail",
       "--finding", CITED, "--failing-test", `suite/${n}`,
       "--work-run", s.runA, "--work-child", "dev-1",
@@ -1657,6 +1664,20 @@ test("a --dry-run probe stamps nothing: no verdictRuns, no auto-join, no pending
     false,
     "the probe auto-joined a decision event with the outcome of a round that never happened",
   );
+});
+
+test("isProbe is the one probe predicate: true only on the content flag (FOC-1245)", () => {
+  // The predicate roundsFor, cmdList and the reward ingest all share — pinned
+  // here so the three skips can never drift apart again.
+  assert.equal(isProbe({ linearEffects: { dryRun: true } }), true);
+  assert.equal(isProbe({ linearEffects: { dryRun: false } }), false);
+  assert.equal(isProbe({ linearEffects: {} }), false);
+  assert.equal(isProbe({}), false);
+  // A pre-FOC-1236 record in the round namespace — no linearEffects at all —
+  // is a REAL round that predates the flag, never a probe.
+  assert.equal(isProbe({ round: 1 }), false);
+  assert.equal(isProbe(null), false);
+  assert.equal(isProbe(undefined), false);
 });
 
 test("a pass followed by a fail on the same tree is a new opinion, not a reproduced round", () => {
