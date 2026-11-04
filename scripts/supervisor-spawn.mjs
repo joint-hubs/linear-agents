@@ -229,6 +229,19 @@ if (hasCandidate) {
   if (!String(args.candidate).trim()) {
     failJson(`--candidate value is empty — name the commit or branch to pin the worktree at`);
   }
+  // FOC-1159: `ref@sha` (e.g. `foc-123-dev@a1b2…`) is a kickoff idiom from other
+  // tooling, not a git revision. It used to die inside rev-parse as a bare
+  // `candidate-unresolved` that never named the refused shape nor what IS
+  // accepted — so the same input was retried blind. Refuse it HERE, naming
+  // both. Git's own `ref@{…}` reflog forms stay valid: only the bare `@`
+  // (`ref@sha`, `user@host`) is not a revision anyone can resolve.
+  if (/@(?!{)/.test(String(args.candidate))) {
+    failJson(
+      `--candidate does not accept "ref@sha" (${JSON.stringify(String(args.candidate))}) — name the commit directly: ` +
+        `a full sha, a short sha, or a branch/tag name (git reflog forms like ref@{1} stay valid) — refusing the spawn: candidate-ref-at-sha`,
+      { reason: "candidate-ref-at-sha", candidate: String(args.candidate) },
+    );
+  }
 }
 
 // ── FOC-1222: a review/test spawn without a candidate is refused ─────────────

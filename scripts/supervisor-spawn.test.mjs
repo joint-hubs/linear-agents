@@ -954,6 +954,23 @@ test("a --candidate branch name resolves to its commit (FOC-406)", () => {
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
+test('a --candidate "ref@sha" is refused, naming the accepted forms (FOC-1159)', () => {
+  // The kickoff passed `foc-123-dev@<sha>` — a `ref@sha` idiom, not a git
+  // revision. It used to die in rev-parse as a bare `candidate-unresolved`
+  // that never said WHAT is accepted, so the same input was retried blind.
+  const { repo } = fixtureRepo();
+  const candidate = fixtureCandidate(repo);
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--squad", "review", "--child", "review-1", "--candidate", `foc-123-dev@${candidate}`]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (out.ok !== false) fail(`expected ok:false, got ${JSON.stringify(out)}`);
+  if (!/candidate-ref-at-sha/.test(out.error)) fail(`error carries no stable reason slug: ${out.error}`);
+  if (!/full sha/.test(out.error)) fail(`error does not name the accepted form: ${out.error}`);
+  if (!/ref@sha/.test(out.error)) fail(`error does not name the refused shape: ${out.error}`);
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered anyway");
+});
+
 test("an unresolvable --candidate refuses and names the input (FOC-406)", () => {
   const { repo } = fixtureRepo();
   const runId = fixtureRun();

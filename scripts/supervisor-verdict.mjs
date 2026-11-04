@@ -902,6 +902,25 @@ function cmdRecord(args) {
     failJson(`no child "${childId}" in run ${runId}`, { known: Object.keys(registry.children) });
   }
 
+  // ── FOC-1159: a verdict is recorded by the child that produced it ──────────
+  // Run 3f52's incident: `record --child review-2` was invoked by a session
+  // that was NOT review-2, writing a FAIL for work the named child never
+  // looked at — recorded, attributed to "the owner", and applied Linear
+  // effects. A session running AS one child cannot speak for another: the
+  // recorder's own identity (LA_SUPERVISOR_CHILD, set by spawn) must match the
+  // child the verdict names. Refuse the mismatch before anything is written.
+  // (An unset identity — the Supervisor recording on behalf of a child — is a
+  // separate path: that one is the followup/gate-answer route, not a bare
+  // record; see FOC-1159 for the design note.)
+  const selfChild = process.env.LA_SUPERVISOR_CHILD;
+  if (selfChild && selfChild !== childId) {
+    failJson(
+      `child "${selfChild}" cannot record a verdict as child "${childId}" — ` +
+        `a verdict is recorded by the child that produced it`,
+      { recorder: selfChild, namedChild: childId },
+    );
+  }
+
   const verdict = args.verdict;
   if (!VERDICTS.includes(verdict)) failJson(`--verdict must be one of ${VERDICTS.join(" | ")}`);
 
@@ -1147,7 +1166,8 @@ function cmdRecord(args) {
   // Round numbering continues across the split (roundsAcross reads the work
   // run's chain when --work-run was given) — a restart mid-task must not make
   // round 3 of a loop think it is round 1.
-  const prior = roundsAcross([runId, ...(workRunId ? [workRunId] : [])], taskId).slice(-1)[0] ?? null;
+  const chain = roundsAcross([runId, ...(workRunId ? [workRunId] : [])], taskId);
+  const prior = chain[chain.length - 1] ?? null;
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);
 
   const record = {
@@ -1194,6 +1214,56 @@ function cmdRecord(args) {
       path,
       hint: "record the next round, or pass --force if this is deliberately a correction",
     });
+  }
+
+  // ── FOC-1159: idempotent per child + fingerprint ────────────────────────────
+  // Run ff22's incident: review-4 recorded the SAME verdict twice ~7s apart —
+  // round 4 and round 5, one fingerprint, one findings set — because a
+  // re-record with no --round simply took the next round number. The counter
+  // moved 4→5 for ONE review, and the followup guard then refused "round 5
+  // reproduced round 4", so the FAIL's findings never reached DEV. A re-record
+  // of the SAME verdict — same child, same fingerprint, same verdict, same
+  // findings (the followup guard's own definition of "reproduced", applied
+  // here at record time) — is the same record, not a new round: refused.
+  // The newest record FROM THIS CHILD is the comparison base — a record from
+  // another child in between does not make this child's verdict new again.
+  // Deliberately NOT refused: a changed verdict on the same tree (a new
+  // opinion, FOC-1146), a new finding on the same verdict (something to act
+  // on), a different fingerprint (the tree moved). --force stays the one
+  // correction path, same as the exists-once check above.
+  const priorSameChild =
+    [...chain].reverse().find((r) => r && r.childId === childId && !r.unreadable) ?? null;
+  // Both sides are findings ARRAYS here (the record's and the prior's), not
+  // record objects — unlike the followup guard, which reads whole records.
+  const findingTexts = (list) =>
+    new Set((Array.isArray(list) ? list : []).map((f) => String(f?.text ?? "").trim()).filter(Boolean));
+  const sameFindings = (a, b) => {
+    const ta = findingTexts(a);
+    const tb = findingTexts(b);
+    return ta.size === tb.size && [...ta].every((t) => tb.has(t));
+  };
+  if (
+    priorSameChild &&
+    priorSameChild.fingerprint?.combined === fingerprint.combined &&
+    priorSameChild.verdict === verdict &&
+    sameFindings(priorSameChild.findings, findings) &&
+    !args.force
+  ) {
+    failJson(
+      `round ${priorSameChild.round} of ${taskId} already carries this verdict ` +
+        `(child ${childId}, fingerprint ${fingerprint.combined}, same findings) — ` +
+        `a re-record of the same verdict is not a new round`,
+      {
+        childId,
+        taskId,
+        fingerprint: fingerprint.combined,
+        priorRound: priorSameChild.round,
+        priorPath: verdictPath(runId, taskId, priorSameChild.round),
+        hint:
+          "record the next round after real progress (a moved tree, a changed verdict, or a new finding), " +
+          "or pass --force if this is deliberately a correction",
+      },
+    );
   }
 
   // FOC-1155 round 2, the reverse half of the bridge: the record carries

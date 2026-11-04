@@ -303,6 +303,11 @@ what keeps AC-10 true while the squad prompts changed.
 
 ### Where reviews, review rounds and kickoff drafts live (FOC-903)
 
+`<stateHome>` below is the RUNTIME's state home (FOC-1159): the launcher pins
+`LA_SUPERVISOR_STATE_HOME` to the linear-agents checkout's absolute `.state/supervisor`, because
+the session's cwd is the TARGET repo — a relative `.state/supervisor/...` from that cwd writes
+into the target checkout, which is the isolation rule broken.
+
 In a supervised run (`LA_SUPERVISOR_RUN` set) the scratch a run produces lives under its own run
 dir — `<stateHome>/<runId>/` — not in the shared `.state/`:
 

@@ -4,10 +4,13 @@
 //   node scripts/supervisor-guard.mjs [--run <id>]     (Stop hook: payload on stdin)
 //
 // The Supervisor session must not end a turn while it still owes work: a child
-// running, a spawn held for a slot, a gate awaiting an answer, an open hold
-// still owing its presentation (FOC-612 — presented-and-deferred holds stay
-// quiet until their `until`; run COMPLETION is the stricter rule and it lives
-// at the close point in graph-runner.mjs). The harness calls this script when
+// running, a spawn held for a slot, an open hold still owing its presentation
+// (FOC-612 — presented-and-deferred holds stay quiet until their `until`; run
+// COMPLETION is the stricter rule and it lives at the close point in
+// graph-runner.mjs). A gate awaiting an answer owes NOTHING (FOC-1159): it is
+// the hand-over itself — the child emits, ends its turn, and the Supervisor
+// carries the question to Mateusz — so a pending gate never blocks the stop;
+// it is named on stderr as handed over. The harness calls this script when
 // the session tries to stop:
 //
 //   · exit 0  — allow the stop (nothing owed, or a --wait is armed, or the
@@ -127,19 +130,31 @@ const live = liveChildren(readRegistry(runId));
 const held = readHeld(runId);
 const pending = pendingGateRefs(runId);
 const wait = readWaitArmed(runId);
-// FOC-612: open holds that still owe work block the turn end, exactly like
-// pending gates. Deliberately NOT every open hold: a hold deferred into the
-// future must not wedge every turn end for 30 days — only un-presented (or
-// resurfaced) holds are owed RIGHT NOW. Run COMPLETION is the stricter rule
-// and it lives at the close point (graph-runner.mjs), not here.
+// FOC-612: open holds that still owe work block the turn end. Deliberately NOT
+// every open hold: a hold deferred into the future must not wedge every turn
+// end for 30 days — only un-presented (or resurfaced) holds are owed RIGHT
+// NOW. Run COMPLETION is the stricter rule and it lives at the close point
+// (graph-runner.mjs), not here. (Pending gates are the contrast, FOC-1159:
+// they block nothing — they hand over.)
 // Fail-closed: a holds store nobody can parse is a block naming the parse
 // error, never a silent "nothing owed".
 const owedHolds = holdsOwingTurnEnd(runId);
 
-if (!live.length && !held.length && !pending.length && !owedHolds.error && !owedHolds.blocking.length) {
+// FOC-1159: pending gates never block — one is the hand-over, several ride the
+// same exit. Named on stderr wherever the turn ends with them outstanding, so
+// the tee shows what was carried to the Supervisor (ids and KINDS only,
+// FOC-220 — never gate summaries or question text).
+const handover = () =>
+  pending.length
+    ? ` ${pending.length} pending gate(s) hand over to the Supervisor: ${pending.map((g) => `${g.gateId}${g.kind ? ` [${g.kind}]` : ""}`).join(", ")}.`
+    : "";
+
+if (!live.length && !held.length && !owedHolds.error && !owedHolds.blocking.length) {
   // Nothing owed. An expired marker may still be on disk — it is expired, so
   // the guard's answer does not depend on it and it is left for its owner.
-  allow(runId);
+  // Pending gates are not owed work (FOC-1159): they are handed over, and the
+  // turn ends.
+  allow(runId, pending.length ? `supervisor-guard: turn end allowed —${handover()}` : "");
 }
 
 // A `--wait` blocked in this turn is the one legitimate way to end a turn with
@@ -150,7 +165,8 @@ const describe = () => {
   const parts = [];
   if (live.length) parts.push(`${live.length} live child(ren): ${live.map((c) => `${c.childId} (${c.status})`).join(", ")}`);
   if (held.length) parts.push(`${held.length} held spawn(s): ${held.map((h) => h.heldId).join(", ")}`);
-  if (pending.length) parts.push(`${pending.length} pending gate(s): ${pending.map((g) => `${g.gateId}${g.kind ? ` [${g.kind}]` : ""}`).join(", ")}`);
+  // FOC-1159: pending gates are deliberately absent — they are the hand-over,
+  // not owed work, so they never belong in a "still owed" refusal.
   // FOC-620-style honesty in the refusal: say HOW the hold stops blocking.
   if (owedHolds.error) parts.push(`holds store unreadable — blocking fail-closed: ${owedHolds.error}`);
   else if (owedHolds.blocking.length) {
@@ -174,14 +190,14 @@ const describe = () => {
 // granularity it has — and CLAUDE.md §4's "do not re-issue the wait" is what
 // makes this one-per-turn in practice.
 //
-// Live children ONLY. A pending gate or an open hold is owed to Mateusz
-// personally and no amount of waiting discharges it; a held spawn is queued
-// work nobody has judged. Those still block, timeout or not.
+// Live children ONLY. An open hold is owed to Mateusz personally and no amount
+// of waiting discharges it; a held spawn is queued work nobody has judged.
+// Those still block, timeout or not. A pending gate blocks nothing at all
+// (FOC-1159) — it hands over with the exit the wait buys.
 if (
   wait.spent &&
   live.length &&
   !held.length &&
-  !pending.length &&
   !owedHolds.error &&
   !owedHolds.blocking.length &&
   readGuardState(runId).waitAllowanceUsedAt !== wait.spentAt
@@ -193,7 +209,7 @@ if (
   });
   console.error(
     `supervisor-guard: turn end allowed — a --wait already ran in this turn and returned timeout; ` +
-      `${describe()}. The wake queue carries the next event.`,
+      `${describe()}.${handover()} The wake queue carries the next event.`,
   );
   process.exit(0);
 }

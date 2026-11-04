@@ -382,6 +382,9 @@ const writeRound = (runId, round, over = {}) => {
   writeFileSync(
     join(dir, `foc-123-round${round}.json`),
     JSON.stringify({
+      // Default review-1; a round-2 from ANOTHER child (`childId: "review-2"`)
+      // keeps the repeated-round refusal REAL — two distinct reviews of the
+      // same tree (FOC-1159: one child recording twice is data noise now).
       taskId: "FOC-123", runId, childId: "review-1", squad: "review", round,
       verdict: "fail", fingerprint: { combined: "same" },
       ...over,
@@ -396,7 +399,7 @@ test("a FAIL verdict with no linearEffects audit warns before the dev round", ()
   // tool, the apply never ran, nothing warned, and the record says nothing.
   const runId = loopRun();
   writeRound(runId, 1);
-  writeRound(runId, 2); // no linearEffects key at all
+  writeRound(runId, 2, { childId: "review-2" }); // no linearEffects key at all
   const r = loopAttempt(runId);
   if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
   if (!/NO linearEffects audit/.test(r.stderr)) fail(`no incident warning on stderr:\n       ${r.stderr}`);
@@ -407,6 +410,7 @@ test("a FAIL verdict with a failed return label warns before the dev round", () 
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "failed", detail: "linear-ops label FOC-123 --add returned-by:review → refused" },
@@ -423,6 +427,7 @@ test("a landed (or skipped / not-applicable) return stays silent on the resume",
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: true,
       label: { status: "applied", detail: "" },
@@ -437,10 +442,61 @@ test("a landed (or skipped / not-applicable) return stays silent on the resume",
 test("a PASS verdict never trips the catcher", () => {
   const runId = loopRun();
   writeRound(runId, 1);
-  writeRound(runId, 2, { verdict: "pass" }); // no linearEffects — irrelevant on a pass
+  writeRound(runId, 2, { childId: "review-2", verdict: "pass" }); // no linearEffects — irrelevant on a pass
   const r = loopAttempt(runId);
   if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
   if (/linearEffects|probably missing/.test(r.stderr)) fail(`unexpected incident warning:\n       ${r.stderr}`);
+});
+
+test("an ANSWERED gate is a legitimate --review-loop source when no verdict is recorded (FOC-1159)", () => {
+  // A gate ruling that orders a repair has to have a path to DEV even when
+  // nothing was recorded to hand back (the last review passed, or no round
+  // exists yet). Refusing that resume is what pushed the runtime to the
+  // FOC-1159 incident: a FAIL bare-recorded for a child that never looked at
+  // the work. The answered gate IS the source — the loop proceeds, the turn
+  // is recorded, and the answer is delivered with it. A REAL spawned child
+  // (not the loopRun() stub): the resume reaches the launch path, and the
+  // stub's non-existent worktree would crash it on a spawn ENOENT.
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const child = spawnChild(runId, repo);
+  waitForStatus(runId, child.childId, ["exited", "crashed", "waiting_gate"]);
+
+  const gateId = parseOk(
+    spawnSync(
+      process.execPath,
+      [GATE, "--run", runId, "emit", "--child", child.childId, "--kind", "question", "--summary", "s", "--question", "q?"],
+      { encoding: "utf8", env: baseEnv() },
+    ),
+  ).gateId;
+  spawnSync(process.execPath, [GATE, "--run", runId, "answer", "--gate", gateId, "--text", "repair it"], {
+    encoding: "utf8",
+    env: baseEnv(),
+  });
+
+  const before = readRegistry(runId).children[child.childId];
+  const r = followup(runId, child.childId, ["--review-loop", "--gate", gateId]);
+  if (r.status !== 0) {
+    fail(`the gate-sourced resume was refused (exit ${r.status}):\n       ${r.stdout}\n       ${r.stderr}`);
+  }
+  const after = readRegistry(runId).children[child.childId];
+  if (after.turns.length !== before.turns.length + 1) {
+    fail(`the gate-sourced turn was not recorded: ${before.turns.length} → ${after.turns.length}`);
+  }
+  // The progress record says what actually happened: zero verdict rounds,
+  // no fingerprints — the gate answer carried the round, not a verdict.
+  const progress = readRegistry(runId).rounds["FOC-123"];
+  if (progress?.rounds !== 0) fail(`progress.rounds was ${progress?.rounds}, not 0`);
+});
+
+test("with NO gate and no verdict rounds the review loop is still refused (FOC-1159)", () => {
+  // The gate answer is the ONLY legitimate substitute for a recorded verdict —
+  // a bare --review-loop with nothing to hand back stays refused (the old
+  // bypass: a Supervisor that never records a verdict would loop forever).
+  const runId = loopRun();
+  const r = followup(runId, "review-1", ["--review-loop"]);
+  if (r.status !== 1) fail(`expected the no-verdict refusal, got exit ${r.status}`);
+  if (!/no REVIEW verdict recorded/.test(r.stdout)) fail(`refusal does not name the missing verdict:\n       ${r.stdout}`);
 });
 
 test("a FAIL verdict with pending return ops warns that the state is unknown (R2-3)", () => {
@@ -452,6 +508,7 @@ test("a FAIL verdict with pending return ops warns that the state is unknown (R2
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "pending", detail: "pending — the verdict file is written before the linear-ops label runs" },
@@ -474,6 +531,7 @@ test("an unlanded TRANSITION warns even when the label applied (R2-3 mirror)", (
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "applied", detail: "" },
@@ -493,6 +551,7 @@ test("a real applied/applied return stays silent — the mirror does not fire on
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "applied", detail: "" },
