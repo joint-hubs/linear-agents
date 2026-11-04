@@ -3,9 +3,11 @@
 // Since FOC-614 this is a thin delegate: scripts/test-run.mjs is the single
 // owner of test execution (lanes, coverage check, isolation audit, timing,
 // wall-clock budget). argv is forwarded unchanged, so every documented
-// invocation keeps working: node scripts/test-all.mjs [pattern].
+// invocation keeps working: node scripts/test-all.mjs [pattern], and
+// --record-timings (FOC-1252, the deliberate timings refresh) rides the same
+// pass-through to test-run.mjs.
 //
-// Run: node scripts/test-all.mjs [pattern]
+// Run: node scripts/test-all.mjs [pattern] [--record-timings]
 
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
