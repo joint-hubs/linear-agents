@@ -351,6 +351,65 @@ test("the runner preserves a caller-provided LA_SETTINGS_FILE", () => {
   if (r.status !== 0) fail(`the caller-provided LA_SETTINGS_FILE was overwritten:\n${r.stderr || r.stdout}`);
 });
 
+// ── --affected (FOC-1074) ─────────────────────────────────────────────────────
+
+// The affected mode shells out to scripts/code-intel.mjs next to the runner's
+// own copy, so a fixture CLI in the sandbox scripts/ dir IS the seam: it answers
+// from FAKE_AFFECTED_JSON and exits with FAKE_AFFECTED_EXIT — the real CLI's
+// exit codes are the vocabulary the repo already trusts (artifact-registry.mjs
+// states the contract): 0 proven, 3 UNKNOWN, anything else also unproven.
+const FAKE_AFFECTED_SRC = [
+  'const out = JSON.parse(process.env.FAKE_AFFECTED_JSON ?? "{}");',
+  'console.log(JSON.stringify(out));',
+  'process.exit(Number(process.env.FAKE_AFFECTED_EXIT ?? "0"));',
+].join("\n");
+
+const affectedSandbox = () =>
+  sandbox(
+    { parallel: [lane("a.test.mjs"), lane("b.test.mjs")], serial: [lane("c.test.mjs")] },
+    { "a.test.mjs": OK, "b.test.mjs": OK, "c.test.mjs": OK, "code-intel.mjs": FAKE_AFFECTED_SRC },
+  );
+
+test("--affected runs only the test files code-intel lists, each in its own lane", () => {
+  const root = affectedSandbox();
+  const affected = { affectedTests: ["scripts/a.test.mjs", "scripts/c.test.mjs"] };
+  const r = run(root, ["--affected", "src/changed.mjs"], { FAKE_AFFECTED_JSON: JSON.stringify(affected) });
+  if (r.status !== 0) fail(`the narrowed run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("2/2 passed")) fail(`expected exactly the two affected files to pass:\n${r.stdout}`);
+  if (r.stdout.includes("✓ b.test.mjs")) fail("an unaffected parallel-lane file ran in the narrowed run");
+  if (!r.stdout.includes("serial lane: 1 file(s)")) {
+    fail(`the serial-lane file was not routed to the serial lane:\n${r.stdout}`);
+  }
+  if (!r.stderr.includes("--affected")) fail(`the narrowed run was not announced on stderr:\n${r.stderr}`);
+});
+
+test("code-intel exit 3 (UNKNOWN) falls back to the FULL suite and says so on stderr", () => {
+  const root = affectedSandbox();
+  const r = run(root, ["--affected", "src/changed.mjs"], { FAKE_AFFECTED_EXIT: "3", FAKE_AFFECTED_JSON: "{}" });
+  if (r.status !== 0) fail(`the fallback run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("3/3 passed")) fail("the fallback did not run the full suite");
+  if (!r.stderr.includes("falling back")) fail(`the fallback was not announced on stderr:\n${r.stderr}`);
+});
+
+test("--affected without explicit files defaults to git diff origin/main; no git → the full-suite fallback", () => {
+  // The sandbox root is a bare mkdtemp dir — not a git repository — so the
+  // default source itself fails and the runner must degrade to the full suite.
+  const root = affectedSandbox();
+  const r = run(root, ["--affected"]);
+  if (r.status !== 0) fail(`the fallback run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("3/3 passed")) fail("the fallback did not run the full suite");
+  if (!r.stderr.includes("git diff")) fail(`the failed default source was not explained on stderr:\n${r.stderr}`);
+});
+
+test("an affected answer that maps to no known test files exits 1, never a silent green", () => {
+  const root = affectedSandbox();
+  const r = run(root, ["--affected", "docs/README.md"], {
+    FAKE_AFFECTED_JSON: JSON.stringify({ affectedTests: [] }),
+  });
+  if (r.status !== 1) fail(`an empty affected answer exited ${r.status}, expected 1`);
+  if (!r.stderr.includes("no test files")) fail(`the empty answer was not explained:\n${r.stderr}`);
+});
+
 // ── summary ──────────────────────────────────────────────────────────────────
 
 for (const root of sandboxes) {

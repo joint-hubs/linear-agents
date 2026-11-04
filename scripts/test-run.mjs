@@ -30,7 +30,7 @@
 //     concurrency on this machine — not a formal guarantee. A file that flakes
 //     under parallel load belongs in the serial lane.
 //
-// Usage: node scripts/test-run.mjs [pattern] [--jobs N] [--max-wall-ms X] [--prove-isolation]
+// Usage: node scripts/test-run.mjs [pattern] [--jobs N] [--max-wall-ms X] [--prove-isolation] [--affected [file …]]
 //   pattern            substring to filter test file names (e.g. "telemetry")
 //   --jobs N           max concurrency for the parallel lane (default 8);
 //                      the serial lane is always concurrency 1
@@ -41,13 +41,20 @@
 //   --prove-isolation  run ALL parallel-lane files concurrently (concurrency =
 //                      file count) and require all green. The pattern filter
 //                      and --jobs are ignored for this mode.
+//   --affected [file…] run only the test files code-intel maps the changed
+//                      file(s) to; with no files given the changed set is
+//                      `git diff --name-only origin/main`. code-intel exit 3
+//                      (UNKNOWN), a missing index or no git → the FULL suite,
+//                      announced on stderr — UNKNOWN never means "no tests".
+//                      An answer that maps to no test file is a real answer:
+//                      exit 1, the same "no match" contract as the pattern.
 
 // First, before anything spawns: the runner's own children get windowsHide by
 // default on win32 (and the same module reaches every suite process through
 // NODE_OPTIONS, see suiteEnv below).
 import './spawn-windows-hide.mjs';
 import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -81,7 +88,12 @@ Isolation proof — what it does and does not show:
   - --prove-isolation runs every parallel-lane file at once and requires all
     green. It shows absence of OBSERVED interference at the tested concurrency
     on this machine, not a formal guarantee. New flakes under parallel load
-    mean the file belongs in the serial lane.`);
+    mean the file belongs in the serial lane.
+  - --affected [file …] narrows the run to the test files code-intel maps the
+    changed file(s) to (no files given → git diff --name-only origin/main).
+    code-intel exit 3 (UNKNOWN), a missing index or no git degrades to the
+    FULL suite, announced on stderr; an answer that maps to no test file
+    exits 1 — the same "no match" contract as the pattern filter.`);
   process.exit(0);
 }
 
@@ -89,6 +101,8 @@ let filter = '';
 let jobs = DEFAULT_JOBS;
 let maxWallMs = 0;
 let proveIsolation = false;
+let affected = false;
+const affectedFiles = [];
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === '--jobs') {
@@ -105,6 +119,13 @@ for (let i = 0; i < args.length; i++) {
     }
   } else if (a === '--prove-isolation') {
     proveIsolation = true;
+  } else if (a === '--affected') {
+    affected = true;
+    // Explicit changed files: every following non-option arg belongs to
+    // --affected. The bare flag alone means "ask git diff origin/main".
+    while (i + 1 < args.length && !args[i + 1].startsWith('--')) {
+      affectedFiles.push(args[++i]);
+    }
   } else if (!a.startsWith('--')) {
     filter = a;
   } else {
@@ -214,6 +235,64 @@ if (auditProblems.length) {
   console.error(`Static isolation audit FAILED (${auditProblems.length} problem(s)) — these files do not belong on the parallel allowlist:`);
   for (const p of auditProblems) console.error(`  - ${p}`);
   process.exit(1);
+}
+
+// ── --affected: narrow the run to the test files the change reaches (FOC-1074) ─
+
+// The narrowed set is whatever `code-intel affected` answers — the SAME
+// contract the rest of the repo already trusts (artifact-registry.mjs states
+// it): the CLI's exit codes are the vocabulary, 0 proven / 3 UNKNOWN /
+// anything else also unproven. UNKNOWN never means "no tests" — it means the
+// runner cannot know, and the run degrades to the FULL suite, announced on
+// stderr so a full run can never silently read as a deliberate narrow one.
+// Exit 0 with an answer no test file maps to is a real answer: the runner says
+// so and exits 1, the same "no match" contract the pattern filter has.
+const ROOT_DIR = join(SCRIPTS_DIR, '..');
+let affectedNarrowed = null; // Set of test-file names once proven; null = run the full suite
+if (affected) {
+  let changed = [...affectedFiles];
+  let unproven = '';
+  if (changed.length === 0) {
+    const git = spawnSync('git', ['diff', '--name-only', 'origin/main'], { cwd: ROOT_DIR, encoding: 'utf8' });
+    if (git.status !== 0) {
+      unproven = `git diff --name-only origin/main failed (exit ${git.status}) in ${ROOT_DIR} — the changed set cannot be resolved`;
+    } else {
+      changed = git.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+      if (changed.length === 0) {
+        unproven = `git diff --name-only origin/main is empty (this tree matches origin/main) — the changed set cannot be resolved`;
+      }
+    }
+  }
+  if (!unproven) {
+    const ci = spawnSync(
+      process.execPath,
+      [join(SCRIPTS_DIR, 'code-intel.mjs'), 'affected', ...changed, '--json', '--project-root', ROOT_DIR],
+      { cwd: ROOT_DIR, encoding: 'utf8' },
+    );
+    if (ci.status !== 0) {
+      unproven = `code-intel affected exited ${ci.status} (UNKNOWN${ci.status === 3 ? ' — index missing, stale or unprovable' : ''})`;
+    } else {
+      try {
+        const listed = JSON.parse(ci.stdout)?.affectedTests;
+        if (!Array.isArray(listed)) throw new Error('stdout JSON has no affectedTests array');
+        const onDisk = new Set(allFiles);
+        const narrowed = [...new Set(listed.map((p) => String(p).replace(/\\/g, '/').split('/').pop()))]
+          .filter((f) => onDisk.has(f));
+        if (narrowed.length === 0) {
+          console.error(`--affected: no test files map to ${changed.join(', ')} — nothing to run.`);
+          process.exit(1);
+        }
+        affectedNarrowed = new Set(narrowed);
+        console.error(`--affected: narrowed to ${narrowed.length} test file(s) from ${changed.length} changed file(s) (code-intel).`);
+      } catch (err) {
+        unproven = `code-intel affected stdout was not the expected JSON (${err.message})`;
+      }
+    }
+  }
+  if (unproven) {
+    console.error(`--affected: ${unproven} — falling back to the FULL suite.`);
+    affectedNarrowed = null;
+  }
 }
 
 // ── legacy fixture run dirs in the real supervisor state (FOC-602) ───────────
@@ -474,7 +553,11 @@ const runFiles = (files, concurrency, budget) =>
 
 // Selected run order: both lanes start together — the parallel lane bounded by
 // --jobs, the serial lane strictly one file at a time.
-const selected = (list) => list.map((e) => e.file).filter((f) => !filter || f.includes(filter));
+const selected = (list) =>
+  list
+    .map((e) => e.file)
+    .filter((f) => !filter || f.includes(filter))
+    .filter((f) => !affectedNarrowed || affectedNarrowed.has(f));
 const parallelFiles = proveIsolation ? lanes.parallel.map((e) => e.file) : selected(lanes.parallel);
 const serialFiles = proveIsolation ? [] : selected(lanes.serial);
 const runConcurrency = proveIsolation ? parallelFiles.length : jobs;
