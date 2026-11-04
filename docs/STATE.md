@@ -219,6 +219,7 @@ lint 903 plików / 0 naruszeń — wszystko zielone.
 - FOC-914 — done — last entry 2026-10-19 17:41 — foc-914-team-group-filters — #114
 - FOC-915 — done — last entry 2026-10-19 17:12 — foc-915-insights-task-table — #112
 - FOC-523 — done — last entry 2026-10-19 15:51 — foc-523-merge-deps — #111
+- FOC-1074 — done — last entry - — foc-1074-dev-0548b90543f3 — — (not pushed; hand-off is the committed branch)
 - FOC-1157 — `scripts/telemetry-idle-tick.test.mjs`, case "idle ticks write — done — last entry - — `foc-1157-dev-8af5c2311ae3` (base 0e5d266) — #182
 - FOC-921 — done — last entry - — foc-921-prompt-hygiene — #118
 <!-- state-index:end -->
