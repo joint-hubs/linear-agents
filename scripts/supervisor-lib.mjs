@@ -3179,6 +3179,19 @@ export function isPathSafeRunId(id) {
   return typeof id === "string" && PATH_SAFE_RUN_ID_RE.test(id) && id !== "." && id !== "..";
 }
 
+// FOC-1245: the probe predicate, in ONE place. A --dry-run verdict is a probe,
+// not a round (FOC-1236) — and "is this record a probe?" is a question three
+// readers ask: roundsFor below, supervisor-verdict's list, and the reward
+// ingest. Spelled out inline in each, the three predicates were free to drift.
+// A probe is defined by CONTENT, never by file name: linearEffects.dryRun is
+// planned onto every record (true iff the dry path was taken), so a
+// pre-FOC-1236 dry record that landed in the round namespace reads as a probe
+// too. A record with no linearEffects at all predates the flag — a REAL
+// round, never a probe.
+export function isProbe(record) {
+  return record?.linearEffects?.dryRun === true;
+}
+
 export function roundsFor(runId, taskId) {
   const prefix = `${String(taskId).toLowerCase()}-round`;
   // FOC-1155: a launcher restart mid-task splits one task's verdict chain
@@ -3208,10 +3221,10 @@ export function roundsFor(runId, taskId) {
         const rec = JSON.parse(readFileSync(join(dir, f), "utf8"));
         // FOC-1236: a --dry-run record is a probe, never a round — it takes no
         // number from the chain, enters no repeat comparison and is no
-        // same-child idempotency base. Skipped on the CONTENT flag, so a
-        // pre-FOC-1236 dry record that landed in the round namespace is
+        // same-child idempotency base. isProbe skips on the CONTENT flag, so
+        // a pre-FOC-1236 dry record that landed in the round namespace is
         // skipped too (the JW incident's round files read correctly again).
-        if (rec?.linearEffects?.dryRun === true) continue;
+        if (isProbe(rec)) continue;
         merged.set(`${rid}/${f}`, rec);
       } catch {
         // Unreadable is not absent. A verdict nobody can parse must not make the

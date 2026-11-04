@@ -12,6 +12,7 @@
 // Run: node scripts/decision-log.test.mjs
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,7 @@ import {
 } from "./decision-log.mjs";
 import {
   ROOT,
+  baseEnv,
   cleanupLater,
   fixtureChild,
   fixtureRepo,
@@ -335,14 +337,29 @@ function issueFile(dir, acs) {
   return path;
 }
 
-// Offline recipe from supervisor-verdict.test.mjs: the dry-run env keeps any
-// Linear op offline, and LA_SUPERVISOR_CHILD is scrubbed so the FOC-167 child
-// guard never skips what these tests are about.
+// Offline-REAL recipe from supervisor-verdict.test.mjs (FOC-1245): these
+// tests pin the auto-join a REAL verdict performs, and since FOC-1245 a
+// REVIEW_DRY_RUN=1 record is a probe — a probe labels nothing. So the
+// fixtures record REAL verdicts, made hermetic-fast instead: the dry-run env
+// is off, both Linear credential vars are stripped and LA_LINEAR_NO_ENV_FILE
+// stops linear-ops' loadEnv() from backfilling them from .env — the Linear ops
+// fail fast offline, the real record (round slot and all) lands, the label
+// joins. LA_SUPERVISOR_CHILD is still scrubbed so the FOC-167 child guard
+// never skips what these tests are about. The probe behavior itself (probe ⇒
+// no label) is pinned in supervisor-verdict.test.mjs's FOC-1245 test.
 const recordVerdict = (s, extra = []) => {
   const saved = process.env.LA_SUPERVISOR_CHILD;
   delete process.env.LA_SUPERVISOR_CHILD;
   try {
-    return runScript(VERDICT, ["record", "--run", s.runId, "--child", "review-1", ...extra], { REVIEW_DRY_RUN: "1" });
+    const e = baseEnv({ REVIEW_DRY_RUN: "" });
+    delete e.LINEAR_API_KEY;
+    delete e.LINEAR_API_KEY_PISI;
+    e.LA_LINEAR_NO_ENV_FILE = "1";
+    return spawnSync(process.execPath, [VERDICT, "record", "--run", s.runId, "--child", "review-1", ...extra], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: e,
+    });
   } finally {
     if (saved !== undefined) process.env.LA_SUPERVISOR_CHILD = saved;
   }

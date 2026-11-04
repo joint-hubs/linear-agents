@@ -94,6 +94,7 @@ import {
   ensureRunDir,
   failJson,
   isPathSafeRunId,
+  isProbe,
   latestVerdict,
   mergeOnlySincePass,
   normalizeFailingTests,
@@ -1315,7 +1316,10 @@ function cmdRecord(args) {
   // no-op (roundsFor reads nothing there), the reverse is a blind loop. A
   // failed stamp refuses the record — fail closed, an unstamped bridge is the
   // bug this fixes, not a degraded feature.
-  if (workRunId && workChildRunId !== runId) {
+  // FOC-1245: the bridge names runs that hold recorded rounds — a probe
+  // records none, so a probe stamps nothing. The stamp itself stays
+  // fail-closed for REAL records, unchanged.
+  if (workRunId && workChildRunId !== runId && !dry) {
     const workEntry = workRegistry.children[workChild.childId] ?? {};
     const verdictRuns = [...new Set([...(workEntry.verdictRuns ?? []), runId])];
     try {
@@ -1338,7 +1342,10 @@ function cmdRecord(args) {
   ensureRunDir(runId);
   mkdirSync(verdictsDir(runId), { recursive: true });
   atomicWriteJSON(path, record);
-  if (verdict === 'fail' && ['review','test'].includes(entry.squad) && workChild.squad === 'dev' && entry.attemptId) {
+  // FOC-1245: a probe stages no pendingRuntimeReturn — the evidenceRef below
+  // names the round the record took, and a probe takes none: staged for a
+  // probe, it would dangle. The dry file is the probe's only artifact.
+  if (!dry && verdict === 'fail' && ['review','test'].includes(entry.squad) && workChild.squad === 'dev' && entry.attemptId) {
     try {
       // FOC-1155: the touched entry lives in the work child's own run, and —
       // when that is another run — carries the provenance so the patch is
@@ -1361,7 +1368,11 @@ function cmdRecord(args) {
   // carries provenance for — outcome = the verdict value, by:"agent",
   // via:"verdict". Best-effort: a failed label is a warning in the record's
   // own warnings trail, never a broken verdict.
-  warnings.push(...autoLabel(record.decisionEvents, { outcome: verdict, by: "agent", via: "verdict" }).warnings);
+  // FOC-1245: no auto-join for a probe — its outcome would label decision
+  // events of a round that never happened.
+  if (!dry) {
+    warnings.push(...autoLabel(record.decisionEvents, { outcome: verdict, by: "agent", via: "verdict" }).warnings);
+  }
 
   const opsRan = executeReturnEffects(record, taskId, warnings);
   const gateAttempted = maybeEmitReturnGate(record, taskId, workChild, runId, warnings);
@@ -1717,7 +1728,11 @@ function cmdRecordDelivery(args) {
 
   // FOC-449 auto-join — inert unless --decision-event/--decision-run were
   // passed, same as the normal path.
-  warnings.push(...autoLabel(record.decisionEvents, { outcome: verdict, by: "agent", via: "verdict" }).warnings);
+  // FOC-1245: no auto-join for a probe — its outcome would label decision
+  // events of a round that never happened.
+  if (!dry) {
+    warnings.push(...autoLabel(record.decisionEvents, { outcome: verdict, by: "agent", via: "verdict" }).warnings);
+  }
 
   const opsRan = executeReturnEffects(record, taskId, warnings);
   const gateAttempted = maybeEmitReturnGate(record, taskId, workChild, runId, warnings);
@@ -1763,7 +1778,7 @@ function cmdList(args) {
       // FOC-1236: a dry-run record is a probe, not a round — the same content
       // skip roundsFor applies, so a probe cannot sneak into `rounds` and
       // fabricate a repeatedLastRound (the signal the FOC-1146 loop reads).
-      if (v?.linearEffects?.dryRun === true) continue;
+      if (isProbe(v)) continue;
       const list = byTask.get(v.taskId) ?? [];
       list.push({ round: v.round, verdict: v.verdict, fingerprint: v.fingerprint?.combined ?? null, findings: v.findings?.length ?? 0 });
       byTask.set(v.taskId, list);

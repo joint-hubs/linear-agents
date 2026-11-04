@@ -222,6 +222,17 @@ its own dry file on a re-probe, and `--round` together with `--dry-run` is refus
 contradiction. The Linear ops side of a dry run is unchanged: it runs through linear-ops' dry
 path, loudly, with `linearEffects.dryRun: true` persisted in the dry file.
 
+FOC-1245: the dry file is the probe's **only** artifact — none of the round's side effects run
+for it. No `verdictRuns` is stamped on the work child's registry entry (the bridge names runs
+that hold recorded rounds; a probe recorded none). The FOC-449 auto-join labels no decision
+event (the outcome of a round that never happened is no outcome). No `pendingRuntimeReturn` is
+staged: its `evidenceRef` (`runId:verdict:task:round`) would name a round the probe never took,
+and nothing resolves it — a return for a probe is not wanted, so nothing is staged at all. The
+probe skip is the content predicate `isProbe(record)` (`linearEffects.dryRun === true`), exported
+from `scripts/supervisor-lib.mjs` — the one place a probe is defined, read by `roundsFor`,
+`list` and the reward ingest alike; a record with no `linearEffects` predates the flag and is a
+real round, never a probe.
+
 ### The unset-identity record path (FOC-1237) — you record no verdict on a child's behalf
 
 When `LA_SUPERVISOR_CHILD` is unset (the Supervisor's own session) and `LA_SUPERVISOR_RUN` is
