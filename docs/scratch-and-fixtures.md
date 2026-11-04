@@ -7,6 +7,15 @@ Where the supervisor's throwaway state lives, and how old layouts migrate (FOC-9
 A supervised run owns everything it produces under its own run dir
 (`$LA_SUPERVISOR_STATE_HOME/<runId>/`, default `.state/supervisor/<runId>/`):
 
+**The state home is the RUNTIME's, never the target repo's** (FOC-1159). A supervised run is
+launched from the repo it works ON, so the session's cwd is the TARGET repo — a relative
+`.state/supervisor/<run>/scratch/...` composed from that cwd lands in the target checkout
+(run `3f52` wrote its PR-body scratch there; the dir is gitignored there, but the isolation
+rule was still broken). The launcher pins `LA_SUPERVISOR_STATE_HOME` to the runtime's
+absolute state home (`<linear-agents>/.state/supervisor`), and the scripts derive the same
+root from their own location — a run-dir path is resolved from the runtime, never from the
+target repo's cwd.
+
 ```
 <runId>/
   review-rounds.json          # the run's REVIEW round counter (one writer per task)

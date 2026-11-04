@@ -357,6 +357,56 @@ test("runLaunch supervisor — LA_SUPERVISOR_RUN defaults to the run id, record 
   }
 });
 
+test("runLaunch supervisor — LA_SUPERVISOR_STATE_HOME pins the runtime's absolute state home (FOC-1159)", async () => {
+  // Run 3f52 wrote its scratch under the TARGET repo's `.state/supervisor/`:
+  // the session's cwd IS the target repo (LA_SUPERVISOR_REPO), and a relative
+  // `.state/supervisor/<run>/scratch/...` composed from that cwd lands in the
+  // target checkout, not the runtime. The launcher pins the absolute runtime
+  // state home in the session env, so every run-dir path resolved from the
+  // environment — scratch included — lands in the runtime, never the target.
+  const root = makeRoot();
+  try {
+    const cwd = join(root, "target-repo");
+    const plan = planLaunch({ squad: "supervisor", task: "FOC-1159", env: baseEnv(root), cwd, root });
+    const calls = [];
+    const spawn = (command, args) => {
+      calls.push({ command, args });
+      if (args[1] === "gen-id") return { status: 0, stdout: "RUN-ISO\n" };
+      return { status: 0, stdout: "" };
+    };
+    const spawnAsync = (command, args, opts) => {
+      calls.push({ command, args, opts });
+      return fakeChild(0);
+    };
+    await runLaunch(plan, { spawn, spawnAsync, log: () => {} });
+    const claude = calls.find((c) => isClaude(c.command));
+    assert.ok(claude, "claude spawned");
+    assert.ok(claude.opts.env.LA_SUPERVISOR_REPO, "target repo captured");
+    assert.equal(claude.opts.env.LA_SUPERVISOR_STATE_HOME, join(root, ".state", "supervisor"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runLaunch supervisor — an explicit LA_SUPERVISOR_STATE_HOME override is preserved (FOC-1159)", async () => {
+  // The pin fills a gap; it never rewrites a deliberate redirect (the same
+  // seam the supervisor suites use to hermet their fixture state homes).
+  const root = makeRoot();
+  try {
+    const custom = join(root, "custom-state-home");
+    const plan = planLaunch({
+      squad: "supervisor",
+      task: "FOC-1159",
+      env: { ...baseEnv(root), LA_SUPERVISOR_STATE_HOME: custom },
+      cwd: join(root, "target-repo"),
+      root,
+    });
+    assert.equal(plan.env.LA_SUPERVISOR_STATE_HOME, custom);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runLaunch supervisor — record exit 3 (MANAGED_SESSIONS_ACTIVE) stops the launch with code 2, claude never spawned", async () => {
   const root = makeRoot();
   try {

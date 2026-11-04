@@ -428,7 +428,20 @@ export function planLaunch({
 
   // 8. Supervisor extras (FOC-172): the repo the Supervisor works ON is the
   // directory it was launched from, captured before anything can cd.
-  if (isSupervisor) childEnv.LA_SUPERVISOR_REPO = cwd;
+  // FOC-1159: pin the RUNTIME's absolute state home in the same env. The
+  // session's cwd is the TARGET repo, so a run-dir path resolved relative to
+  // that cwd (run 3f52's `.state/supervisor/<run>/scratch/...`) lands in the
+  // target checkout — the isolation rule broken. With the absolute home in
+  // the env, every path the session or a script composes from
+  // LA_SUPERVISOR_STATE_HOME resolves into the runtime, never the target.
+  // An explicit redirect is preserved: the pin fills a gap, it never rewrites
+  // a deliberate state-home override (the same seam the suites hermet on).
+  if (isSupervisor) {
+    childEnv.LA_SUPERVISOR_REPO = cwd;
+    if (!childEnv.LA_SUPERVISOR_STATE_HOME) {
+      childEnv.LA_SUPERVISOR_STATE_HOME = join(root, ".state", "supervisor");
+    }
+  }
 
   // Status echo lines (stderr — the bats echo to the console too).
   const echo = [
