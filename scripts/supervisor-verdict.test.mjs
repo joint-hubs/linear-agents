@@ -11,13 +11,15 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 import {
   FOLLOWUP,
   ROOT,
   baseEnv,
+  cleanupLater,
   fixtureRepo,
   fixtureRun,
   fixtureWorktree,
@@ -1597,6 +1599,64 @@ test("--round with --dry-run is refused on the delivery path (FOC-1236)", () => 
   assert.match(out.error, /takes no round number/);
   assert.equal(existsSync(dryVerdictPath(s.runId, "FOC-123")), false);
   assert.equal(existsSync(verdictPath(s.runId, "FOC-123", 1)), false);
+});
+
+test("a --dry-run probe stamps nothing: no verdictRuns, no auto-join, no pendingRuntimeReturn (FOC-1245)", () => {
+  // FOC-1245: a probe is not a round, so none of the round's side effects may
+  // run for it either. RED on the base tree, on all three axes: the
+  // verdictRuns bridge stamps a run that recorded no round, the FOC-449
+  // auto-join labels a decision event with the outcome of a round that never
+  // happened, and the staged pendingRuntimeReturn carries an evidenceRef
+  // naming a round the probe never took — it dangles. The dry file is the
+  // probe's only artifact.
+  const s = splitRunScenario();
+
+  // The decision event the probe would auto-join, under a private LA_STATE_ROOT
+  // so the label a base-tree probe writes lands in this test's own tree,
+  // never in the repo's real .state/runs.
+  const stateRoot = mkdtempSync(join(tmpdir(), "la-foc1245-labels-"));
+  cleanupLater(stateRoot);
+  const labelRun = "run-label-target";
+  const decisionsPath = join(stateRoot, "runs", labelRun, "decisions.jsonl");
+  mkdirSync(dirname(decisionsPath), { recursive: true });
+  writeFileSync(
+    decisionsPath,
+    JSON.stringify({ type: "event", eventId: "ev-foc-1245", decisionId: "dec-1" }) + "\n",
+    "utf8",
+  );
+
+  const out = parse(
+    verdict(
+      ["record", "--run", s.runB, "--child", "recorder-1",
+       "--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a",
+       "--work-run", s.runA, "--work-child", "dev-1",
+       "--decision-event", "ev-foc-1245", "--decision-run", labelRun],
+      { LA_STATE_ROOT: stateRoot },
+    ),
+    fail,
+  );
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.linearEffects.dryRun, true, "the suite default env records this as a dry probe");
+
+  // The dry file is the probe's only artifact — the round namespace stays empty.
+  assert.equal(existsSync(dryVerdictPath(s.runB, "FOC-123")), true);
+  assert.equal(existsSync(verdictPath(s.runB, "FOC-123", 1)), false);
+
+  // The bridge stamps nothing on the work child's entry in run A.
+  const after = readRegistry(s.runA).children["dev-1"];
+  assert.equal(after.verdictRuns, undefined, `verdictRuns stamped for a probe: ${JSON.stringify(after.verdictRuns)}`);
+  // No rejected-round return is staged for a probe.
+  assert.equal(after.pendingRuntimeReturn, undefined, `pendingRuntimeReturn staged for a probe: ${JSON.stringify(after.pendingRuntimeReturn)}`);
+  // The auto-join labelled nothing — the seeded event is still label-less.
+  const lines = readFileSync(decisionsPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+  assert.equal(
+    lines.some((l) => l.type === "label" && l.eventId === "ev-foc-1245"),
+    false,
+    "the probe auto-joined a decision event with the outcome of a round that never happened",
+  );
 });
 
 test("a pass followed by a fail on the same tree is a new opinion, not a reproduced round", () => {
