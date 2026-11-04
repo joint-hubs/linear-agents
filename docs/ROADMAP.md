@@ -117,6 +117,17 @@ and skill edits only, second routing proposals, third tool gaps. FOC-947 after d
 5. FOC-965 arms: glm-5.3-flash (baseline), mimo-v2.6-pro, claude-haiku-5.5, gemini-4-argon, muse-spark-1.3, claude-sonnet-5.5.
 6. Autonomous pickup off by default, opt-in per owner scope (FOC-902); not part of the 1.0 acceptance.
 
+### Changes on 2026-11-04
+
+- **Phase 1 pulled forward** (Mateusz, 2026-11-04: "Faza 1 naprzód"). The rc.10 lane is done except FOC-777, FOC-789 day 6 and
+  the tag wait for Mateusz, and the Fenix delivery queue after FOC-1227 is empty — so the delivery owner starts the
+  Phase 1 tickets now instead of 2026-12-07, in this order: FOC-1074 (`test-run --affected`, jobs, longest-first,
+  spawn-test split, prove-isolation in CI) → FOC-1071 (targets on the board) → FOC-1072 (Bash output cap) → FOC-878
+  (per-run child identity). The Gantt dates stay as the latest-finish line; `updated` above is not bumped for this.
+- Delivery 2026-11-03 → 11-04: PRs #207 → #217 (FOC-1222, 1224, 1231, 1232, 1159, 1236, 1237, 1235, 1238, 1245)
+  through the headless Supervisor — verdict provenance and idempotent recording, scratch isolation, the container
+  gate on the host-archived HEAD, two CI flakes fixed on measured causes, the dry-run probe. FOC-1227 in flight.
+
 ### Changes on 2026-11-03
 
 - Rewrite from the 2026-10-26 proposal and the 2026-10-29 Gantt (FOC-1050). The JOI-era NOW/NEXT/LATER tail and
