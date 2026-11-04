@@ -32,6 +32,7 @@ import {
   progressFingerprint,
   readRegistry,
   roundsFor,
+  dryVerdictPath,
   runDir,
   worktreeHead,
   verdictPath,
@@ -192,6 +193,17 @@ function mergeMain(s, name) {
 const record = (s, extra = []) => recordAs(s, "review-1", extra);
 const recordAs = (s, childId, extra = []) =>
   parse(verdict(["record", "--run", s.runId, "--child", childId, ...extra]), fail);
+
+// The offline-REAL recipe (FOC-1236): the round-bookkeeping tests need records
+// that TAKE a round, and a dry-run probe takes none — so they record REAL
+// verdicts made to fail fast offline (stripped creds, no .env backfill). The
+// ops fail, the round slot lands: linearEffects.dryRun is false.
+const realRecordAs = (s, childId, extra = []) =>
+  parse(
+    verdict(["record", "--run", s.runId, "--child", childId, ...extra], { REVIEW_DRY_RUN: "" }, { stripCreds: true }),
+    fail,
+  );
+const realRecord = (s, extra = []) => realRecordAs(s, "review-1", extra);
 
 /**
  * An output file the reviewer produced, under the run's scratch reviews dir —
@@ -539,6 +551,13 @@ function testScenario() {
 
 const testRecord = (s, extra = [], env = {}) =>
   parse(verdict(["record", "--run", s.runId, "--child", "test-1", ...extra], env), fail);
+// The offline-REAL recipe for the one TEST record that must TAKE a round
+// (FOC-1236): the shape-order pin reads the round file.
+const realTestRecord = (s, extra = [], env = {}) =>
+  parse(
+    verdict(["record", "--run", s.runId, "--child", "test-1", ...extra], { REVIEW_DRY_RUN: "", ...env }, { stripCreds: true }),
+    fail,
+  );
 
 const testPassArgs = (s) => [
   "--verdict", "pass",
@@ -581,7 +600,7 @@ test("a test pass with the why recorded lands as containerRun: \"unavailable: <w
 
 test("a test pass with a cited container run is recorded, keys in shape order", () => {
   const s = testScenario();
-  const out = testRecord(s, [...testPassArgs(s), "--container-run", containerRunFlag(s)], { LA_DOCKER_AVAILABLE: "1" });
+  const out = realTestRecord(s, [...testPassArgs(s), "--container-run", containerRunFlag(s)], { LA_DOCKER_AVAILABLE: "1" });
   assert.equal(out.ok, true, out.error);
   assert.equal(out.containerRun.cmd, "sh /src/docker/test-in-container.sh");
   assert.equal(out.containerRun.exit, 0);
@@ -1019,6 +1038,10 @@ function splitRunScenario(squad = "test") {
 
 // Records against runB — the run the restart created.
 const recordIn = (s, extra = []) => parse(verdict(["record", "--run", s.runB, ...extra]), fail);
+// The offline-REAL recipe for the split-run chain tests (FOC-1236): a probe
+// takes no round, so the chain tests record REAL verdicts, offline-fast-failed.
+const realRecordIn = (s, extra = []) =>
+  parse(verdict(["record", "--run", s.runB, ...extra], { REVIEW_DRY_RUN: "" }, { stripCreds: true }), fail);
 
 test("a TEST child in run B records the DEV work child registered in run A, via --work-run", () => {
   const s = splitRunScenario();
@@ -1109,7 +1132,7 @@ test("a missing work child in an existing run is refused, naming the child and t
 
 test("the verdict chain continues across the split — and the progress guard can see both rounds", () => {
   const s = splitRunScenario();
-  const first = recordIn(s, [
+  const first = realRecordIn(s, [
     "--child", "recorder-1", "--verdict", "fail",
     "--finding", CITED, "--failing-test", "suite/a",
     "--work-run", s.runA, "--work-child", "dev-1",
@@ -1118,7 +1141,7 @@ test("the verdict chain continues across the split — and the progress guard ca
   assert.equal(first.round, 1);
 
   advance(s, "moved-on.txt");
-  const second = recordIn(s, [
+  const second = realRecordIn(s, [
     "--child", "recorder-1", "--verdict", "fail",
     "--finding", CITED, "--failing-test", "suite/a",
     "--work-run", s.runA, "--work-child", "dev-1",
@@ -1164,7 +1187,7 @@ console.log("\nmost zwrotny: pętla czyta łańcuch z runu PRACY (--run A)");
 
 test("the review loop in run A opens on a TEST fail recorded in run B", () => {
   const s = splitRunScenario();
-  const fail1 = recordIn(s, [
+  const fail1 = realRecordIn(s, [
     "--child", "recorder-1", "--verdict", "fail",
     "--finding", CITED, "--failing-test", "suite/a",
     "--work-run", s.runA, "--work-child", "dev-1",
@@ -1185,7 +1208,7 @@ test("the review loop in run A opens on a TEST fail recorded in run B", () => {
 
 test("a repeated cross-run fail is refused as a repeat — the FOC-1146 semantics survive the split", () => {
   const s = splitRunScenario();
-  recordIn(s, [
+  realRecordIn(s, [
     "--child", "recorder-1", "--verdict", "fail",
     "--finding", CITED, "--failing-test", "suite/a",
     "--work-run", s.runA, "--work-child", "dev-1",
@@ -1195,7 +1218,7 @@ test("a repeated cross-run fail is refused as a repeat — the FOC-1146 semantic
   // re-recording — an identical re-record from one child is data noise now
   // (refused at record time), and the loop-level refusal this test pins is
   // about two DISTINCT reviews reading the same unmoved tree.
-  const fail2 = recordIn(s, [
+  const fail2 = realRecordIn(s, [
     "--child", "recorder-2", "--verdict", "fail",
     "--finding", CITED, "--failing-test", "suite/a",
     "--work-run", s.runA, "--work-child", "dev-1",
@@ -1314,8 +1337,9 @@ test("a declared design failure is recorded, and the record carries the declarat
   const out = record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", NO_TESTS_REASON]);
   assert.equal(out.ok, true, out.error);
 
-  // The operator's view is the FILE on disk, not the stdout echo.
-  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", out.round), "utf8"));
+  // The operator's view is the FILE on disk, not the stdout echo. The probe's
+  // file is the dry one (FOC-1236) — the declaration rides the record either way.
+  const onDisk = JSON.parse(readFileSync(dryVerdictPath(s.runId, "FOC-123"), "utf8"));
   assert.deepEqual(onDisk.fingerprint.failingTests, []);
   // Present BECAUSE it was declared — this field is what "on purpose" looks like.
   assert.equal(onDisk.noFailingTests.reason, NO_TESTS_REASON);
@@ -1407,9 +1431,9 @@ test("a round that reproduced the previous one is refused, showing both", () => 
   writeRegistry(s.runId, registry);
 
   advance(s, "attempt.txt");
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
   // Nothing changed in the tree; DEV produced the same work and the same failure.
-  recordAs(s, "review-2", ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  realRecordAs(s, "review-2", ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
 
   const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
   assert.equal(out.ok, false);
@@ -1426,8 +1450,8 @@ test("an identical re-record from the SAME child is refused, not a new round (FO
   // moved 4→5 for ONE review. The re-record must not create a round.
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  const again = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const again = realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
   assert.equal(again.ok, false);
   assert.match(again.error, /not a new round/);
   assert.equal(again.childId, "review-1");
@@ -1446,13 +1470,133 @@ test("a same-child duplicate ALREADY on disk does not eat the review loop (FOC-1
   // the loop proceeds and hands the findings to DEV.
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "2", "--force"]);
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "2", "--force"]);
 
   const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.progress.rounds, 2);
   assert.equal(out.progress.repeated, true);
+});
+
+test("a --dry-run probe takes no round — the real record after it is round 1 (FOC-1236)", () => {
+  // The JW incident (FOC-1118 run, 2026-11-03): REVIEW recorded with --dry-run,
+  // then for real 37 s later — same child, same fingerprint, same verdict, same
+  // findings. The probe took round 1, so the real record was refused by the
+  // FOC-1159 guard as "not a new round" and the Linear return effects never
+  // landed. A probe is not a round: it must not number itself into the chain.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const probe = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(probe.ok, true, probe.error);
+  assert.equal(probe.linearEffects.dryRun, true, "the suite default env must exercise the probe as a dry run");
+
+  // The REAL record — same child, same tree, same verdict — lands as round 1.
+  const real = () =>
+    parse(
+      verdict(
+        ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail",
+         "--finding", CITED, "--failing-test", "suite/a"],
+        { REVIEW_DRY_RUN: "" },
+        { stripCreds: true },
+      ),
+      fail,
+    );
+  const real1 = real();
+  assert.equal(real1.ok, true, real1.error);
+  assert.equal(real1.round, 1);
+  assert.equal(real1.linearEffects.dryRun, false);
+
+  // The probe's file sits OUTSIDE the round namespace; the round slot holds the real record.
+  const files = readdirSync(join(runDir(s.runId), "verdicts")).filter((f) => f.endsWith(".json"));
+  assert.deepEqual(files.sort(), ["foc-123-dry.json", "foc-123-round1.json"]);
+
+  // The first --review-loop return goes through: one real round, not repeated.
+  const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.progress.rounds, 1);
+
+  // The next REAL round is numbered 2.
+  advance(s, "fix.txt");
+  const real2 = real();
+  assert.equal(real2.ok, true, real2.error);
+  assert.equal(real2.round, 2);
+});
+
+test("list does not count a dry probe as a round (FOC-1236 r1 finding 1)", () => {
+  // cmdList scans the verdicts dir directly, not through roundsFor — so the
+  // probe used to sneak back into `rounds` and could flip repeatedLastRound
+  // to true: the false "repeated round" signal the FOC-1146 loop reads.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const probe = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(probe.ok, true, probe.error);
+
+  const out = parse(verdict(["list", "--run", s.runId]), fail);
+  assert.equal(out.ok, true, out.error);
+  const task = out.tasks.find((t) => t.taskId === "FOC-123");
+  assert.ok(task, "FOC-123 is listed");
+  assert.deepEqual(task.rounds.map((r) => r.round), [1], "only the real round is listed");
+  assert.equal(task.repeatedLastRound, null, "one real round — the probe must not fabricate a repeat");
+});
+
+test("a pre-FOC-1236 dry record in the round namespace takes no slot (roundsFor content skip)", () => {
+  // The load-bearing half for REAL state dirs: the JW incident left dry round
+  // files on disk inside <task>-roundN.json names. roundsFor must skip them by
+  // the linearEffects.dryRun CONTENT flag, not the file name, so historical
+  // state reads correctly without a migration — and the chain they once
+  // poisoned (a probe occupying round 1) reads as it should have.
+  const s = scenario();
+  mkdirSync(verdictsDir(s.runId), { recursive: true });
+  const shape = (round, recordedAt, dry) => JSON.stringify({
+    taskId: "FOC-123", runId: s.runId, childId: "review-1", squad: "review", round,
+    verdict: "fail", fingerprint: { combined: `fp-${round}` }, findings: [],
+    ...(dry ? { linearEffects: { dryRun: true, dryRunTrigger: "REVIEW_DRY_RUN=1" } } : {}),
+    recordedAt,
+  });
+  writeFileSync(verdictPath(s.runId, "FOC-123", 1), shape(1, "2026-11-03T01:49:45.000Z", true), "utf8");
+  writeFileSync(verdictPath(s.runId, "FOC-123", 2), shape(2, "2026-11-03T01:50:22.000Z", false), "utf8");
+
+  assert.deepEqual(
+    roundsFor(s.runId, "FOC-123").map((r) => r.round),
+    [2],
+    "the historical dry round file takes no slot in the chain",
+  );
+
+  // Numbering continues from the REAL chain only: the next record is round 3,
+  // never round 4 on the back of a probe.
+  advance(s, "fix.txt");
+  const next = realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/b"]);
+  assert.equal(next.ok, true, next.error);
+  assert.equal(next.round, 3, "the historical dry round never consumes a number");
+});
+
+test("--round with --dry-run is refused on the review path (FOC-1236)", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = record(s, [
+    "--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--dry-run", "--round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /takes no round number/);
+  // Refused means refused: no probe file, no round file.
+  assert.equal(existsSync(dryVerdictPath(s.runId, "FOC-123")), false);
+  assert.equal(existsSync(verdictPath(s.runId, "FOC-123", 1)), false);
+});
+
+test("--round with --dry-run is refused on the delivery path (FOC-1236)", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  // Inline invocation — the deliveryRecord helper is defined further down the file.
+  const out = parse(
+    verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", "--verdict", "pass", "--dry-run", "--round", "1"]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /takes no round number/);
+  assert.equal(existsSync(dryVerdictPath(s.runId, "FOC-123")), false);
+  assert.equal(existsSync(verdictPath(s.runId, "FOC-123", 1)), false);
 });
 
 test("a pass followed by a fail on the same tree is a new opinion, not a reproduced round", () => {
@@ -1462,13 +1606,13 @@ test("a pass followed by a fail on the same tree is a new opinion, not a reprodu
   // new opinion, and the round must open for the rework the fail asks for.
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ran", ranFlag(s),
   ]);
-  record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", NO_TESTS_REASON]);
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", NO_TESTS_REASON]);
 
   const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
   assert.equal(out.ok, true, out.error);
@@ -1482,8 +1626,8 @@ test("a repeat with a NEW finding is allowed — the finding is something to act
   // harder and found one more thing. Refusing that would refuse the fix.
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  record(s, [
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  realRecord(s, [
     "--verdict", "fail",
     "--finding", CITED,
     "--finding", JSON.stringify({ text: "the retry path drops the lock", evidence: "scripts/ledger.mjs:91 retry" }),
@@ -1501,7 +1645,7 @@ test("a third DIFFERING round is allowed — the old cap of 2 is gone", () => {
   const s = scenario();
   for (const n of [1, 2, 3]) {
     advance(s, `round${n}.txt`);
-    record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", `suite/${n}`]);
+    realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", `suite/${n}`]);
   }
 
   const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
@@ -1521,8 +1665,8 @@ test("a plain follow-up does not touch the progress record", () => {
 
 test("recording the same round twice is refused", () => {
   const s = scenario();
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  const again = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "1"]);
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const again = realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "1"]);
   assert.equal(again.ok, false);
   assert.match(again.error, /recorded once/);
 });
@@ -1594,7 +1738,9 @@ test("a review fail stamps the return flag and transitions In Progress (offline 
 test("the verdict file carries the same audit block the CLI printed", () => {
   const s = scenario();
   record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  // A dry-run record is a probe (FOC-1236): the audit block lands in the dry
+  // file, outside the round namespace.
+  const onDisk = JSON.parse(readFileSync(dryVerdictPath(s.runId, "FOC-123"), "utf8"));
   assert.equal(onDisk.linearEffects.label.status, "applied");
   assert.equal(onDisk.linearEffects.transition.status, "applied");
   assert.equal(onDisk.linearEffects.dryRun, true);
@@ -1662,8 +1808,9 @@ test("inside a spawned child the writes are skipped — and the verdict still la
   assert.equal(out.linearEffects.transition.status, "skipped");
   assert.match(out.linearEffects.label.detail, /FOC-167/);
   assert.ok(out.warnings.some((w) => /skipped inside child/.test(w)), JSON.stringify(out.warnings));
-  // The point of warnings-only: the verdict file exists anyway.
-  assert.ok(existsSync(verdictPath(s.runId, "FOC-123", 1)));
+  // The point of warnings-only: the verdict file exists anyway (the dry probe's
+  // file — FOC-1236).
+  assert.ok(existsSync(dryVerdictPath(s.runId, "FOC-123")));
   // The child guard is the real run's job, not a failed return — no gate (F3).
   assert.equal(out.linearEffects.gate, undefined);
 });
@@ -1679,7 +1826,7 @@ test("a linear-ops failure degrades to a warning; the verdict is still written",
   assert.equal(out.linearEffects.transition.status, "failed");
   assert.ok(out.warnings.some((w) => /return label failed/.test(w)), JSON.stringify(out.warnings));
   assert.ok(out.warnings.some((w) => /return transition failed/.test(w)), JSON.stringify(out.warnings));
-  assert.ok(existsSync(verdictPath(s.runId, "FOC-777", 1)));
+  assert.ok(existsSync(dryVerdictPath(s.runId, "FOC-777")));
   // A dry-run failure is exercise, not enforcement — no gate (F3).
   assert.equal(out.linearEffects.gate, undefined);
 });
@@ -1880,8 +2027,8 @@ test("a refused re-record of the same round touches no Linear write", () => {
   // The record-once guard fires BEFORE the side effects — re-recording round 1
   // must not stamp the label twice.
   const s = scenario();
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  const again = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "1"]);
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const again = realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "1"]);
   assert.equal(again.ok, false);
   assert.match(again.error, /recorded once/);
   assert.equal(again.linearEffects, undefined);
@@ -1892,6 +2039,13 @@ console.log("\ndelivery verdykty — etykiety bez dziecka");
 
 const deliveryRecord = (s, extra = []) =>
   parse(verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", ...extra]), fail);
+// The offline-REAL recipe for the delivery records that must TAKE a round or
+// join a chain (FOC-1236): a dry probe writes the dry file and takes no round.
+const realDeliveryRecord = (s, extra = []) =>
+  parse(
+    verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", ...extra], { REVIEW_DRY_RUN: "" }, { stripCreds: true }),
+    fail,
+  );
 
 test("a delivery verdict carries the candidate sha it covers (FOC-1222)", () => {
   const s = scenario();
@@ -1952,7 +2106,9 @@ test("the record shape without --delivery is unchanged (byte-level pin)", () => 
   const s = scenario();
   advance(s, "golden.txt");
   record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  const rec = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  // The pinned shape is a dry-run record's (the suite's default env) — its file
+  // is the dry one since FOC-1236. The round slot holds the real record.
+  const rec = JSON.parse(readFileSync(dryVerdictPath(s.runId, "FOC-123"), "utf8"));
   const norm = {
     ...rec,
     runId: "<run>",
@@ -1991,7 +2147,8 @@ test("a delivery fail is recorded without a child, fingerprinting the dev child'
   // Delivery has no return emitter: the side effects are inert BY SHAPE.
   assert.equal(out.linearEffects.label.status, "not-applicable");
   assert.equal(out.linearEffects.transition.status, "not-applicable");
-  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
+  // The suite's delivery record is a dry probe (FOC-1236): its file is the dry one.
+  const onDisk = JSON.parse(readFileSync(dryVerdictPath(s.runId, "FOC-123"), "utf8"));
   assert.equal(onDisk.recordedBy, "delivery");
   assert.equal(onDisk.childId, null);
 });
@@ -2105,13 +2262,13 @@ test("a delivery fail after a REVIEW pass on the same tree opens the round (FOC-
   // roundsFor chain that guard reads.
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ran", ranFlag(s),
   ]);
-  const out = deliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
+  const out = realDeliveryRecord(s, ["--verdict", "fail", "--reason", "design", "--no-failing-tests", NO_TESTS_REASON]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.round, 2, "the delivery verdict joins the task's round chain");
 
@@ -2279,7 +2436,7 @@ test("a LIVE delivery fail with --contradicts-round is accepted when only a merg
   // is NOW) and additionally carries the pass's fingerprint in `contradicts`.
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
@@ -2290,7 +2447,7 @@ test("a LIVE delivery fail with --contradicts-round is accepted when only a merg
 
   mergeMain(s, "main-move.txt");
 
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--contradicts-round", "1",
   ]);
@@ -2317,7 +2474,7 @@ test("a LIVE --contradicts-round is refused when a non-merge commit landed after
   // defect's owner (a later DEV round's fix, not the reviewer's miss).
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
@@ -2325,7 +2482,7 @@ test("a LIVE --contradicts-round is refused when a non-merge commit landed after
   ]);
   mergeMain(s, "main-move.txt");
   advance(s, "fix.txt");
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--contradicts-round", "1",
   ]);
@@ -2337,14 +2494,14 @@ test("a LIVE --contradicts-round is refused when a non-merge commit landed after
 test("a LIVE --contradicts-round is refused when rework (a non-merge commit) followed the pass with no merge at all", () => {
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ran", ranFlag(s),
   ]);
   advance(s, "rework.txt");
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--contradicts-round", "1",
   ]);
@@ -2358,14 +2515,14 @@ test("a LIVE --contradicts-round is refused when the pass tree was dirty — mer
   const s = scenario();
   advance(s, "attempt.txt");
   writeFileSync(join(s.worktree, "uncommitted.txt"), "dirty\n");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ran", ranFlag(s),
   ]);
   mergeMain(s, "main-move.txt");
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--contradicts-round", "1",
   ]);
@@ -2388,9 +2545,9 @@ test("a LIVE --contradicts-round naming a round that does not exist is refused",
 test("a LIVE --contradicts-round naming a delivery round is refused — the copy must come from the REVIEW pass", () => {
   const s = scenario();
   advance(s, "attempt.txt");
-  const first = deliveryRecord(s, ["--verdict", "pass"]);
+  const first = realDeliveryRecord(s, ["--verdict", "pass"]);
   assert.equal(first.ok, true, first.error);
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--contradicts-round", "1",
   ]);
@@ -2406,7 +2563,7 @@ test("a backfilled delivery fail with --contradicts-round carries the judged rou
   // saw it", not "the tree now".
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
@@ -2417,7 +2574,7 @@ test("a backfilled delivery fail with --contradicts-round carries the judged rou
 
   rmSync(s.worktree, { recursive: true, force: true });
 
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
     "--contradicts-round", "1",
@@ -2539,20 +2696,20 @@ test("--contradicts-round naming a delivery round is refused — the copy must c
   // refused, so every copied source points at a genuine review round.
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ran", ranFlag(s),
   ]);
-  const copied = deliveryRecord(s, [
+  const copied = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
     "--contradicts-round", "1",
   ]);
   assert.equal(copied.ok, true, copied.error);
   assert.equal(copied.round, 2);
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "design", "--failing-test", "suite/design",
     "--recorded-at", "2026-11-02T11:00:00.000Z", "--backfill",
     "--contradicts-round", "2",
@@ -2569,13 +2726,13 @@ test("the copy path carries the operator's --failing-test declaration separately
   // --no-failing-tests variant was already carried as noFailingTests).
   const s = scenario();
   advance(s, "attempt.txt");
-  record(s, [
+  realRecord(s, [
     "--verdict", "pass",
     "--issue-file", issueFile(s.base, 1),
     "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
     "--ran", ranFlag(s),
   ]);
-  const out = deliveryRecord(s, [
+  const out = realDeliveryRecord(s, [
     "--verdict", "fail", "--reason", "ci", "--failing-test", "suite/ci",
     "--recorded-at", "2026-11-02T10:00:00.000Z", "--backfill",
     "--contradicts-round", "1",

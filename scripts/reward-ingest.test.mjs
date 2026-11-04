@@ -20,7 +20,7 @@
 //       the ratings base cap (20 newest) extended by scoped lookups for the
 //       rendered History window so visible rows never render "not rated".
 
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -186,6 +186,34 @@ test("award: pass verdict + linked producing run → one resolved award", async 
       `revision gap must be documented once: ${JSON.stringify(result.missing)}`,
     );
     assert(result.missing.filter((m) => m.field === "revision").length === 1, "revision gap must appear exactly once per pass");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a --dry-run probe verdict is not rewardable (FOC-1236)", async () => {
+  requireSqlite();
+  resetRewardsIngestCache();
+  const h = harness();
+  try {
+    seedRun(h.telemetryDb, { runId: "run-a", squad: "dev", launchCwd: REPO_LA });
+    seedLink(h.telemetryDb, "run-a", "FOC-500");
+    seedUsage(h.telemetryDb, "run-a", "z-ai/glm-5.3-flash");
+    // The probe carries every field the ingest requires — except it is a dry
+    // run: nothing was reviewed, so no award may read it (the same skip
+    // roundsFor applies to the round bookkeeping).
+    const file = writeVerdict(h.supervisorRoot, "run-a", "FOC-500", 1, "pass");
+    const rec = JSON.parse(readFileSync(file, "utf8"));
+    rec.linearEffects = { dryRun: true, dryRunTrigger: "REVIEW_DRY_RUN=1" };
+    writeFileSync(file, JSON.stringify(rec), "utf8");
+
+    const result = await ingestRewards(h.deps);
+    assert(
+      result.awarded === 0 && result.held === 0 && result.revoked === 0,
+      `a probe must not award: ${JSON.stringify(result)}`,
+    );
+    const row = h.rewardsDb.prepare("SELECT COUNT(*) AS n FROM reward_records").get();
+    assert(row.n === 0, `a probe must not land in reward_records: ${row.n}`);
   } finally {
     h.cleanup();
   }
