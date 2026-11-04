@@ -866,7 +866,7 @@ function containerRunEvidence(args, targetWorktree) {
   });
   if (problems.length) {
     const malHint = isFenixRepo(targetWorktree)
-      ? `--container-run '{"cmd":"docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`
+      ? `--container-run '{"cmd":"git archive --format=tar -o <scratch>/candidate.tar HEAD && MSYS_NO_PATHCONV=1 docker run --rm -v <checkout>:/src:ro -v <scratch>/candidate.tar:/src.tar:ro -e FENIX_TEST_ARCHIVE=/src.tar fenix:dev sh /src/docker/test-in-container.sh","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`
       : `--container-run '{"cmd":"docker run --rm -v <checkout>:/src -w /src python:3.12-slim <the affected suites' test command>","exit":0,"outputRef":"<path under the run's scratch or the test worktree>"}'`;
     failJson(`the container-run flags are malformed`, {
       problems,

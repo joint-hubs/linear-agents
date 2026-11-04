@@ -1,10 +1,17 @@
 #!/bin/sh
 # Lint and the full test suite on Linux, inside the Fenix image (FOC-774).
-#   docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh [test-all args]
+#   docker run --rm -v <checkout>:/src:ro -v <scratch>/candidate.tar:/src.tar:ro \
+#     -e FENIX_TEST_ARCHIVE=/src.tar fenix:dev sh /src/docker/test-in-container.sh [test-all args]
 # Tests need a real git repository (dev-branch, supervisor-cleanup) and must
-# never write into the host tree, so they run in a throwaway clone of HEAD
-# with the checkout's uncommitted changes laid on top.
-# A linked worktree cannot be cloned from inside the container; it is snapshotted instead.
+# never write into the host tree, so they run in a throwaway copy of the tree.
+# Preferred input (FOC-1238): the host archived HEAD with `git archive` and
+# mounted the tarball read-only — FENIX_TEST_ARCHIVE names its container path
+# (`fenix test` does this). The tested tree is then exactly the committed
+# candidate (FOC-1222): no write hitting the checkout while the gate runs can
+# change what is tested. Without the tarball, a readable git repository is
+# cloned with its uncommitted changes laid on top; a linked worktree cannot be
+# cloned from inside the container (its .git points at a host path) and is
+# tar-snapshotted instead — safe only while nothing writes into the checkout.
 set -eu
 
 SRC="${FENIX_TEST_SRC:-/src}"
@@ -14,7 +21,15 @@ git config --global --add safe.directory '*'
 git config --global user.email fenix-test@example.invalid
 git config --global user.name fenix-test
 
-if git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
+if [ -n "${FENIX_TEST_ARCHIVE:-}" ]; then
+  # FOC-1238: the host handed over the committed candidate as a tarball
+  # (git archive HEAD, mounted read-only). Extract it as the throwaway
+  # repository — the tested tree is exactly HEAD.
+  tar -xf "$FENIX_TEST_ARCHIVE" -C "$WORK"
+  git -C "$WORK" init -q
+  git -C "$WORK" add -A
+  git -C "$WORK" commit -qm "fenix test snapshot"
+elif git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
   git clone -q "$SRC" "$WORK"
   # Uncommitted work: copy modified and untracked (not ignored) files, drop deleted ones.
   (cd "$SRC" && git ls-files -z -m -o --exclude-standard | tar --null --ignore-failed-read -T - -cf -) | tar -C "$WORK" -xf -
