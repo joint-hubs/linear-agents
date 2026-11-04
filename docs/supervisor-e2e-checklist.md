@@ -222,6 +222,18 @@ its own dry file on a re-probe, and `--round` together with `--dry-run` is refus
 contradiction. The Linear ops side of a dry run is unchanged: it runs through linear-ops' dry
 path, loudly, with `linearEffects.dryRun: true` persisted in the dry file.
 
+### The unset-identity record path (FOC-1237) — you record no verdict on a child's behalf
+
+When `LA_SUPERVISOR_CHILD` is unset (the Supervisor's own session) and `LA_SUPERVISOR_RUN` is
+set, a bare `supervisor-verdict.mjs record --child review-N` would be you speaking for a child.
+A verdict is the record of the child that produced it: you record **no review/test verdict on a
+child's behalf**. Your route is `supervisor-followup.mjs --review-loop --gate <answered gate>`
+(FOC-1159) or a fresh child. `record` deliberately does not refuse the shape — refusing
+unset-identity records would break the suites' offline-real recipe (the harness strips
+`LA_SUPERVISOR_CHILD`, so the suites' own `record` calls run with an unset identity) — so the
+boundary is a written rule, not an enforced guard; a refusal would be a design change for its
+own issue.
+
 ---
 
 ## Review evidence as code (FOC-1170) — a pass cites what the reviewer ran
