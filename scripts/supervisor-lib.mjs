@@ -119,6 +119,13 @@ export const gatePath = (runId, gateId) => join(gatesDir(runId), `${gateId}.json
 export const verdictsDir = (runId) => join(runDir(runId), "verdicts");
 export const verdictPath = (runId, taskId, round) =>
   join(verdictsDir(runId), `${String(taskId).toLowerCase()}-round${round}.json`);
+// FOC-1236: a --dry-run verdict is a PROBE, not a round. It writes outside the
+// `<task>-roundN.json` namespace — no round number taken, no chain slot — and
+// the round bookkeeping (roundsFor) skips it by content flag. The name carries
+// no round either, so the by-name scanners (manager-snapshot's `-round` filter)
+// never see it. Latest probe wins: the file is overwritten on a re-probe.
+export const dryVerdictPath = (runId, taskId) =>
+  join(verdictsDir(runId), `${String(taskId).toLowerCase()}-dry.json`);
 export const teeRelPath = (childId) => join("children", `${childId}.jsonl`);
 export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(childId));
 
@@ -3198,7 +3205,14 @@ export function roundsFor(runId, taskId) {
     for (const f of readdirSync(dir)) {
       if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
       try {
-        merged.set(`${rid}/${f}`, JSON.parse(readFileSync(join(dir, f), "utf8")));
+        const rec = JSON.parse(readFileSync(join(dir, f), "utf8"));
+        // FOC-1236: a --dry-run record is a probe, never a round — it takes no
+        // number from the chain, enters no repeat comparison and is no
+        // same-child idempotency base. Skipped on the CONTENT flag, so a
+        // pre-FOC-1236 dry record that landed in the round namespace is
+        // skipped too (the JW incident's round files read correctly again).
+        if (rec?.linearEffects?.dryRun === true) continue;
+        merged.set(`${rid}/${f}`, rec);
       } catch {
         // Unreadable is not absent. A verdict nobody can parse must not make the
         // round before it look like the latest one.

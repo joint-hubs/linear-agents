@@ -211,6 +211,17 @@ Backfilling a historical session (the 2026-11-01/02 baseline) adds
 `--recorded-at <iso> --backfill` — the pair is required together; `--recorded-at` alone is
 refused.
 
+### What a `--dry-run` verdict writes (FOC-1236)
+
+A verdict recorded with `--dry-run` (or one of the allowlisted `*_DRY_RUN=1` envs) is a **probe,
+not a round**: it takes no round number, writes `<task>-dry.json` — outside the
+`<task>-roundN.json` namespace — and the round bookkeeping (`roundsFor`, the reward ingest)
+skips it. The real record that follows the probe is therefore **round 1**, never a refused
+re-record of the probe. The probe prints the would-be round and path on stderr; it overwrites
+its own dry file on a re-probe, and `--round` together with `--dry-run` is refused as a
+contradiction. The Linear ops side of a dry run is unchanged: it runs through linear-ops' dry
+path, loudly, with `linearEffects.dryRun: true` persisted in the dry file.
+
 ---
 
 ## Review evidence as code (FOC-1170) — a pass cites what the reviewer ran

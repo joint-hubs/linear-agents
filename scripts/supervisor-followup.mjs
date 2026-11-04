@@ -254,8 +254,10 @@ if (args["review-loop"]) {
   //       mirrored here so a later resume still sees it when that gate failed
   //       to emit. Never-block cuts both ways: a belt that fires only at
   //       record time is no belt.
-  // Applied/applied, skipped (child), not-applicable, dry-run and pass
-  // verdicts stay silent. Warning only — the resume is not refused on a
+  // Applied/applied, skipped (child), not-applicable and pass verdicts stay
+  // silent. A dry-run record never reaches this chain view any more (FOC-1236:
+  // roundsFor skips the probe) — the branch stays silent on one all the same.
+  // Warning only — the resume is not refused on a
   // signal we cannot act on from here.
   if (last?.verdict === "fail") {
     const effects = last.linearEffects;

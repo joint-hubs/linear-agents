@@ -218,6 +218,9 @@ export async function ingestRewards(deps = {}) {
         missing(result.missing, evidenceId, "verdict", `verdict record unreadable: ${toMissingEntry(err)}`);
         continue;
       }
+      // FOC-1236: a --dry-run verdict is a probe, not a round — no award reads
+      // it, the same skip roundsFor applies to the round bookkeeping.
+      if (record?.linearEffects?.dryRun === true) continue;
       const taskId = typeof record?.taskId === "string" ? record.taskId.trim().toUpperCase() : "";
       const round = Number(record?.round);
       const verdict = typeof record?.verdict === "string" ? record.verdict.trim().toLowerCase() : "";

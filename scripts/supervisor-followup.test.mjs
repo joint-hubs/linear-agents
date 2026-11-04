@@ -426,10 +426,13 @@ test("a FAIL verdict with a failed return label warns before the dev round", () 
 test("a landed (or skipped / not-applicable) return stays silent on the resume", () => {
   const runId = loopRun();
   writeRound(runId, 1);
+  // FOC-1236: a dry-run record no longer reaches the chain at all (it is a
+  // probe, skipped by roundsFor), so the silence set the resume can actually
+  // see is landed / skipped / not-applicable — exercised here as a landed one.
   writeRound(runId, 2, {
     childId: "review-2",
     linearEffects: {
-      dryRun: true,
+      dryRun: false,
       label: { status: "applied", detail: "" },
       transition: { status: "applied", detail: "" },
     },

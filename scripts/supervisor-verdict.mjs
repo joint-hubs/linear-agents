@@ -9,11 +9,11 @@
 //        [--red-first '{"cmd":"...","baseExit":1,"candidateExit":0,"outputRef":"..."}' ...]
 //        [--container-run '{"cmd":"...","exit":0,"outputRef":"..."}']       (FOC-1179, TEST pass)
 //        [--container-unavailable '<why>']                                  (FOC-1179, when docker is not)
-//        [--dry-run]
+//        [--dry-run]                       (FOC-1236: a probe — writes <task>-dry.json, takes no round)
 //   node scripts/supervisor-verdict.mjs record --delivery --run <runId> --task FOC-n
 //        --verdict pass|fail --reason <design|evidence|test-gap|ci|scope|other>
 //        [--finding '<json>' ...] [--work-child <id>] [--round N]
-//        [--recorded-at <iso> --backfill] [--contradicts-round N] [--dry-run]     (FOC-1169)
+//        [--recorded-at <iso> --backfill] [--contradicts-round N] [--dry-run]     (FOC-1169, probe per FOC-1236)
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
 //
@@ -70,7 +70,14 @@
 // linear-ops failure, and the verdict file is written either way. `--dry-run`
 // (or one of the explicitly allow-listed *_DRY_RUN=1 envs, which linear-ops
 // honours offline via the mock fixture) runs the operations through linear-ops'
-// dry-run path instead — loudly, see DRY_RUN_ENV_ALLOWLIST. Any OTHER
+// dry-run path instead — loudly, see DRY_RUN_ENV_ALLOWLIST.
+//
+// A dry-run RECORD is a probe, not a round (FOC-1236): it writes
+// `<task>-dry.json` — outside the `<task>-roundN.json` namespace — takes no
+// round number, and the round bookkeeping (roundsFor, the reward ingest)
+// skips it. The real record that follows a probe is therefore round 1, not a
+// refused re-record. `--round` with `--dry-run` is refused as a
+// contradiction. Any OTHER
 // *_DRY_RUN=1 in the session is scrubbed from every spawned Linear op's
 // environment (round 3): linear-ops AND linear-query honour the glob for ANY
 // name, and an unscrubbed rogue var would drive the offline fixture path — a
@@ -100,6 +107,7 @@ import {
   runDir,
   updateChild,
   verdictPath,
+  dryVerdictPath,
   worktreeHead,
   verdictsDir,
 } from "./supervisor-lib.mjs";
@@ -316,6 +324,11 @@ const dryRunEnvTrigger = () =>
   DRY_RUN_ENV_ALLOWLIST.find((k) => process.env[k] === "1") ?? null;
 const isEnvDryRun = () => dryRunEnvTrigger() !== null;
 
+// FOC-1236: the dry-run question in one place — the bare --dry-run flag or an
+// allowlisted *_DRY_RUN=1 env (the same precedence planReturnEffects encodes).
+// A dry record is a PROBE: it writes the dry namespace and consumes no round.
+const dryRunRequested = (args) => args["dry-run"] === true || isEnvDryRun();
+
 // R2-1 (round 3, extended to every spawned Linear op): the environment a
 // spawned op inherits. linear-ops (dryRunContext) AND linear-query
 // (detectDryRun) honour the glob for ANY <NAME>_DRY_RUN=1 and serve the
@@ -403,7 +416,7 @@ function runLinearOps(argv, dryRun) {
  * nothing was written to Linear.
  */
 function planReturnEffects(record, taskId, verdict, args, warnings) {
-  const dryRun = args["dry-run"] === true || isEnvDryRun();
+  const dryRun = dryRunRequested(args);
   // R2-N1 (round 3): WHICH trigger engaged dry-run is known at write time and
   // must survive into the record — warnings[] are not persisted, and a later
   // `show` consumer should not have to infer the trigger. Same precedence the
@@ -1170,6 +1183,21 @@ function cmdRecord(args) {
   const prior = chain[chain.length - 1] ?? null;
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);
 
+  // FOC-1236: a --dry-run record is a probe, not a round — it must not take a
+  // round number, or the real record that follows the probe (same child, same
+  // fingerprint, same verdict — the JW incident on the FOC-1118 run) is
+  // refused by the FOC-1159 guard below as "not a new round" and the Linear
+  // return effects never land. The chain already excludes dry records
+  // (roundsFor skips the content flag), so the number computed here for a
+  // probe is informational only — the would-be round, printed on stderr.
+  // Explicitly naming a round for a probe is a contradiction, refused.
+  const dry = dryRunRequested(args);
+  if (dry && args.round !== undefined) {
+    failJson("--round with --dry-run is contradictory — a dry-run probe takes no round number", {
+      hint: "drop --round to probe (it prints the would-be round), or drop --dry-run to record a real round",
+    });
+  }
+
   const record = {
     taskId,
     runId,
@@ -1208,8 +1236,18 @@ function cmdRecord(args) {
     recordedAt: new Date().toISOString(),
   };
 
-  const path = verdictPath(runId, taskId, round);
-  if (existsSync(path) && !args.force) {
+  // FOC-1236: the probe writes OUTSIDE the round namespace — the round slot it
+  // would have taken stays free for the real record that follows. A probe
+  // overwrites its own file (a probe is repeatable by nature) and is refused
+  // nothing: the exists-once check and the same-child guard police REAL
+  // records only.
+  const path = dry ? dryVerdictPath(runId, taskId) : verdictPath(runId, taskId, round);
+  if (dry) {
+    console.error(
+      `[verdict] dry run: would record round ${round} of ${taskId} at ${verdictPath(runId, taskId, round)} — ` +
+        `the probe is written to ${path} and takes no round`,
+    );
+  } else if (existsSync(path) && !args.force) {
     failJson(`round ${round} of ${taskId} is already recorded — a verdict is recorded once`, {
       path,
       hint: "record the next round, or pass --force if this is deliberately a correction",
@@ -1243,6 +1281,7 @@ function cmdRecord(args) {
     return ta.size === tb.size && [...ta].every((t) => tb.has(t));
   };
   if (
+    !dry &&
     priorSameChild &&
     priorSameChild.fingerprint?.combined === fingerprint.combined &&
     priorSameChild.verdict === verdict &&
@@ -1605,6 +1644,15 @@ function cmdRecordDelivery(args) {
     );
   }
 
+  // FOC-1236: a dry delivery record is a probe, not a round — same rule as the
+  // review path (latestVerdict already excludes dry records, so the number is
+  // the would-be round, informational only).
+  const dry = dryRunRequested(args);
+  if (dry && args.round !== undefined) {
+    failJson("--round with --dry-run is contradictory — a dry-run probe takes no round number", {
+      hint: "drop --round to probe (it prints the would-be round), or drop --dry-run to record a real round",
+    });
+  }
   const prior = latestVerdict(runId, taskId);
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);
 
@@ -1643,8 +1691,15 @@ function cmdRecordDelivery(args) {
     recordedAt,
   };
 
-  const path = verdictPath(runId, taskId, round);
-  if (existsSync(path) && !args.force) {
+  // FOC-1236: same probe rule as the review path — a dry delivery verdict
+  // writes the dry namespace and takes no round.
+  const path = dry ? dryVerdictPath(runId, taskId) : verdictPath(runId, taskId, round);
+  if (dry) {
+    console.error(
+      `[verdict] dry run: would record round ${round} of ${taskId} at ${verdictPath(runId, taskId, round)} — ` +
+        `the probe is written to ${path} and takes no round`,
+    );
+  } else if (existsSync(path) && !args.force) {
     failJson(`round ${round} of ${taskId} is already recorded — a verdict is recorded once`, {
       path,
       hint: "record the next round, or pass --force if this is deliberately a correction",
