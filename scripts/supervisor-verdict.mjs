@@ -1760,6 +1760,10 @@ function cmdList(args) {
   for (const f of files) {
     try {
       const v = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      // FOC-1236: a dry-run record is a probe, not a round — the same content
+      // skip roundsFor applies, so a probe cannot sneak into `rounds` and
+      // fabricate a repeatedLastRound (the signal the FOC-1146 loop reads).
+      if (v?.linearEffects?.dryRun === true) continue;
       const list = byTask.get(v.taskId) ?? [];
       list.push({ round: v.round, verdict: v.verdict, fingerprint: v.fingerprint?.combined ?? null, findings: v.findings?.length ?? 0 });
       byTask.set(v.taskId, list);

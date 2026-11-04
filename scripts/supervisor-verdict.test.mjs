@@ -1523,6 +1523,24 @@ test("a --dry-run probe takes no round — the real record after it is round 1 (
   assert.equal(real2.round, 2);
 });
 
+test("list does not count a dry probe as a round (FOC-1236 r1 finding 1)", () => {
+  // cmdList scans the verdicts dir directly, not through roundsFor — so the
+  // probe used to sneak back into `rounds` and could flip repeatedLastRound
+  // to true: the false "repeated round" signal the FOC-1146 loop reads.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const probe = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(probe.ok, true, probe.error);
+
+  const out = parse(verdict(["list", "--run", s.runId]), fail);
+  assert.equal(out.ok, true, out.error);
+  const task = out.tasks.find((t) => t.taskId === "FOC-123");
+  assert.ok(task, "FOC-123 is listed");
+  assert.deepEqual(task.rounds.map((r) => r.round), [1], "only the real round is listed");
+  assert.equal(task.repeatedLastRound, null, "one real round — the probe must not fabricate a repeat");
+});
+
 test("a pass followed by a fail on the same tree is a new opinion, not a reproduced round", () => {
   // FOC-1146: two verdicts on one tree hash identically — the fingerprint
   // measures the WORK, never the judgment about it. A pass the operator
