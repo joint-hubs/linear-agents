@@ -189,8 +189,9 @@ function mergeMain(s, name) {
   gitIn(s.worktree, "merge", "main", "--no-edit");
 }
 
-const record = (s, extra = []) =>
-  parse(verdict(["record", "--run", s.runId, "--child", "review-1", ...extra]), fail);
+const record = (s, extra = []) => recordAs(s, "review-1", extra);
+const recordAs = (s, childId, extra = []) =>
+  parse(verdict(["record", "--run", s.runId, "--child", childId, ...extra]), fail);
 
 /**
  * An output file the reviewer produced, under the run's scratch reviews dir —
@@ -985,6 +986,10 @@ function splitRunScenario(squad = "test") {
     "dev-1": fixtureWorktree(repo, "foc-1155-dev"),
     "review-1": fixtureWorktree(repo, "foc-1155-review"),
     "recorder-1": fixtureWorktree(repo, "foc-1155-recorder"),
+    // FOC-1159: a second recorder, for the repeat tests — an identical
+    // re-record from ONE child is refused at record time now, so a "two
+    // reviews of the same tree" fixture needs two reviewer children.
+    "recorder-2": fixtureWorktree(repo, "foc-1159-recorder2"),
   };
   const child = (cid, sq) => ({
     childId: cid,
@@ -1003,7 +1008,12 @@ function splitRunScenario(squad = "test") {
   const runA = fixtureRun({
     children: { "dev-1": child("dev-1", "dev"), "review-1": child("review-1", "review") },
   });
-  const runB = fixtureRun({ children: { "recorder-1": child("recorder-1", squad) } });
+  const runB = fixtureRun({
+    children: {
+      "recorder-1": child("recorder-1", squad),
+      "recorder-2": child("recorder-2", squad),
+    },
+  });
   return { base, repo, runA, runB, ...wts["dev-1"], reviewTree: wts["review-1"].worktree };
 }
 
@@ -1181,8 +1191,12 @@ test("a repeated cross-run fail is refused as a repeat — the FOC-1146 semantic
     "--work-run", s.runA, "--work-child", "dev-1",
   ]);
   // No tree movement: the same work, the same failure, one round later.
+  // FOC-1159: round 2 is a SECOND reviewer (recorder-2), not recorder-1
+  // re-recording — an identical re-record from one child is data noise now
+  // (refused at record time), and the loop-level refusal this test pins is
+  // about two DISTINCT reviews reading the same unmoved tree.
   const fail2 = recordIn(s, [
-    "--child", "recorder-1", "--verdict", "fail",
+    "--child", "recorder-2", "--verdict", "fail",
     "--finding", CITED, "--failing-test", "suite/a",
     "--work-run", s.runA, "--work-child", "dev-1",
   ]);
@@ -1371,11 +1385,31 @@ test("--review-loop without a recorded verdict is refused", () => {
 });
 
 test("a round that reproduced the previous one is refused, showing both", () => {
+  // FOC-1159: the two rounds come from DIFFERENT review children — two real
+  // reviews of the same unmoved tree. (One child recording the same verdict
+  // twice is the duplicate the record-time guard refuses; the loop treats a
+  // pre-existing same-child duplicate as noise, not a reproduced round.)
   const s = scenario();
+  const review2 = fixtureWorktree(s.repo, "foc-123-review-2");
+  const registry = readRegistry(s.runId);
+  registry.children["review-2"] = {
+    childId: "review-2",
+    squad: "review",
+    taskId: "FOC-123",
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    status: "exited",
+    turns: [{ pid: 1 }],
+    permissionMode: "bypassPermissions",
+    worktree: review2.worktree,
+    branch: review2.branch,
+    baseRevision: review2.baseRevision,
+  };
+  writeRegistry(s.runId, registry);
+
   advance(s, "attempt.txt");
   record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
   // Nothing changed in the tree; DEV produced the same work and the same failure.
-  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  recordAs(s, "review-2", ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
 
   const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
   assert.equal(out.ok, false);
@@ -1384,6 +1418,41 @@ test("a round that reproduced the previous one is refused, showing both", () => 
   // The operator has to be able to see WHAT stood still, not just be told it did.
   assert.deepEqual(out.failingTests, ["suite/a"]);
   assert.match(out.hint, /change strategy/);
+});
+
+test("an identical re-record from the SAME child is refused, not a new round (FOC-1159)", () => {
+  // Run ff22's incident: review-4 recorded the same verdict twice ~7s apart —
+  // round4 and round5, one fingerprint, one findings set — and the counter
+  // moved 4→5 for ONE review. The re-record must not create a round.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const again = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.equal(again.ok, false);
+  assert.match(again.error, /not a new round/);
+  assert.equal(again.childId, "review-1");
+  assert.equal(again.priorRound, 1);
+  // Nothing landed in a round-2 slot: one verdict, one round.
+  const files = readdirSync(join(runDir(s.runId), "verdicts")).filter((f) => f.endsWith(".json"));
+  assert.equal(files.length, 1);
+  assert.match(files[0], /round1\.json$/);
+});
+
+test("a same-child duplicate ALREADY on disk does not eat the review loop (FOC-1159)", () => {
+  // The other half of the incident: the duplicate reached the chain (written
+  // with --force before the record-time guard existed), and the loop refused
+  // "round 5 reproduced round 4" — the FAIL's findings never reached DEV
+  // although only ONE review had happened. A same-child duplicate is noise;
+  // the loop proceeds and hands the findings to DEV.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "2", "--force"]);
+
+  const out = parse(followup(s.runId, "review-1", ["--review-loop"]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.progress.rounds, 2);
+  assert.equal(out.progress.repeated, true);
 });
 
 test("a pass followed by a fail on the same tree is a new opinion, not a reproduced round", () => {

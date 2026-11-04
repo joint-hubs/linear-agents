@@ -382,6 +382,9 @@ const writeRound = (runId, round, over = {}) => {
   writeFileSync(
     join(dir, `foc-123-round${round}.json`),
     JSON.stringify({
+      // Default review-1; a round-2 from ANOTHER child (`childId: "review-2"`)
+      // keeps the repeated-round refusal REAL — two distinct reviews of the
+      // same tree (FOC-1159: one child recording twice is data noise now).
       taskId: "FOC-123", runId, childId: "review-1", squad: "review", round,
       verdict: "fail", fingerprint: { combined: "same" },
       ...over,
@@ -396,7 +399,7 @@ test("a FAIL verdict with no linearEffects audit warns before the dev round", ()
   // tool, the apply never ran, nothing warned, and the record says nothing.
   const runId = loopRun();
   writeRound(runId, 1);
-  writeRound(runId, 2); // no linearEffects key at all
+  writeRound(runId, 2, { childId: "review-2" }); // no linearEffects key at all
   const r = loopAttempt(runId);
   if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
   if (!/NO linearEffects audit/.test(r.stderr)) fail(`no incident warning on stderr:\n       ${r.stderr}`);
@@ -407,6 +410,7 @@ test("a FAIL verdict with a failed return label warns before the dev round", () 
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "failed", detail: "linear-ops label FOC-123 --add returned-by:review → refused" },
@@ -423,6 +427,7 @@ test("a landed (or skipped / not-applicable) return stays silent on the resume",
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: true,
       label: { status: "applied", detail: "" },
@@ -437,7 +442,7 @@ test("a landed (or skipped / not-applicable) return stays silent on the resume",
 test("a PASS verdict never trips the catcher", () => {
   const runId = loopRun();
   writeRound(runId, 1);
-  writeRound(runId, 2, { verdict: "pass" }); // no linearEffects — irrelevant on a pass
+  writeRound(runId, 2, { childId: "review-2", verdict: "pass" }); // no linearEffects — irrelevant on a pass
   const r = loopAttempt(runId);
   if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
   if (/linearEffects|probably missing/.test(r.stderr)) fail(`unexpected incident warning:\n       ${r.stderr}`);
@@ -503,6 +508,7 @@ test("a FAIL verdict with pending return ops warns that the state is unknown (R2
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "pending", detail: "pending — the verdict file is written before the linear-ops label runs" },
@@ -525,6 +531,7 @@ test("an unlanded TRANSITION warns even when the label applied (R2-3 mirror)", (
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "applied", detail: "" },
@@ -544,6 +551,7 @@ test("a real applied/applied return stays silent — the mirror does not fire on
   const runId = loopRun();
   writeRound(runId, 1);
   writeRound(runId, 2, {
+    childId: "review-2",
     linearEffects: {
       dryRun: false,
       label: { status: "applied", detail: "" },

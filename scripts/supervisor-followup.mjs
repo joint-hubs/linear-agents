@@ -299,7 +299,20 @@ if (args["review-loop"]) {
     repeated === true && [...findingTexts(last)].every((t) => findingTexts(prev).has(t));
   const sameVerdict = repeated === true && last?.verdict === prev?.verdict;
 
-  if (repeated === true && repeatedFindings && sameVerdict) {
+  // FOC-1159: the comparison is between DISTINCT review runs. Two records
+  // from ONE child with one fingerprint are one review recorded twice (the
+  // ff22 incident: round 4 and round 5, child review-4, 7s apart) — a
+  // duplicate the record-time guard refuses now, but a duplicate already on
+  // disk (pre-guard, or --force) is data noise, and refusing on it is what
+  // ate the loop: the FAIL's findings never reached DEV although only ONE
+  // review had happened. Refuse only when the last two records came from
+  // different producers — a review child each, or the delivery owner
+  // (`recordedBy`, FOC-1169): that is the real repeat, DEV re-running the
+  // same work into the same verdict.
+  const producerOf = (record) => record?.recordedBy ?? record?.childId ?? null;
+  const distinctRuns = producerOf(last) !== producerOf(prev);
+
+  if (repeated === true && repeatedFindings && sameVerdict && distinctRuns) {
     failJson(
       `round ${last.round} of ${entry.taskId} reproduced round ${prev.round}: same diff, same failing tests — ` +
         `another identical round is budget, not progress`,
