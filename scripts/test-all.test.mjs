@@ -110,7 +110,48 @@ test("fenix test archives HEAD on the host and mounts it read-only (FOC-1238)", 
   }
 });
 
-console.log(`\n${passed}/5 passed.`);
+// FOC-1074: the prove-isolation proof is a SECOND step of the container gate,
+// driven by env — its own CI step sets FENIX_TEST_PROVE_ISOLATION=1 and that
+// container then runs ONLY the one proof run (every parallel-lane file at
+// once). Locally the env is never set, so the default gate is unchanged.
+test("docker/test-in-container.sh runs the prove-isolation proof only behind FENIX_TEST_PROVE_ISOLATION (FOC-1074)", () => {
+  const sh = readFileSync(join(HERE, "..", "docker", "test-in-container.sh"), "utf8");
+  const gate = sh.indexOf('if [ -n "${FENIX_TEST_PROVE_ISOLATION:-}" ]; then');
+  if (gate === -1) fail("test-in-container.sh has no FENIX_TEST_PROVE_ISOLATION branch - the proof lane can never be requested");
+  const proof = sh.indexOf("test-all.mjs --prove-isolation");
+  if (proof === -1 || proof < gate) fail("the proof run must sit inside the FENIX_TEST_PROVE_ISOLATION branch");
+  // The proof container runs ONLY the proof: the default gate (lint,
+  // state-index, the plain suite) must stay below the gate, in the branch
+  // a local run without the env takes.
+  for (const [what, token] of [["lint", "node scripts/lint.mjs"], ["state-index", "node scripts/state-index.mjs --check"], ["the plain suite", 'node scripts/test-all.mjs "$@"']]) {
+    const at = sh.indexOf(token);
+    if (at === -1) fail(`the default gate lost its ${what} step`);
+    if (at < gate) fail(`the ${what} step must stay in the default branch - without the env a local run is unchanged`);
+  }
+});
+
+// The proof has its own workflow step (FOC-1074) and lands ADVISORY: TEST's
+// proof run in the blocking shape exited 1 (193/200 — six load-signature reds
+// of the FOC-1232/1235 family plus the FOC-161 semaphore red under 2-CPU
+// starvation), so a blocking step turns the linux job red on every PR from
+// the first one. FOC-1251 measures the flakes per cause and makes the step
+// blocking again; the --cpus=2 cap is dropped with it — the runner's own shape
+// is the proof's shape, and the cap only reproduces the starvation.
+test("the linux workflow runs the prove-isolation proof as its own advisory step (FOC-1074)", () => {
+  const yml = readFileSync(join(HERE, "..", ".github", "workflows", "linux.yml"), "utf8");
+  const lines = yml.split("\n");
+  const run = lines.findIndex((l) => l.includes("FENIX_TEST_PROVE_ISOLATION=1"));
+  if (run === -1) fail("the proof step lost its env passthrough — -e FENIX_TEST_PROVE_ISOLATION=1 must ride the docker run line (a step env: block stays in the runner shell)");
+  const step = lines.slice(Math.max(0, run - 4), run + 2).join("\n");
+  if (!step.includes("continue-on-error: true")) {
+    fail("the proof step must be advisory (continue-on-error: true) until FOC-1251 lands its per-cause fixes — blocking, it goes red on every PR from the load-timing flakes");
+  }
+  if (step.includes("--cpus=2")) {
+    fail("the proof step must not cap the container at --cpus=2 — the cap only reproduces the 2-CPU starvation reds; the runner's own shape is the proof's shape");
+  }
+});
+
+console.log(`\n${passed}/7 passed.`);
 if (failures.length > 0) {
   console.error(`${failures.length} test(s) failed.`);
   process.exit(1);

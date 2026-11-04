@@ -24,8 +24,8 @@
 // Run: node scripts/test-run.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
@@ -349,6 +349,183 @@ test("the runner preserves a caller-provided LA_SETTINGS_FILE", () => {
   const caller = { ...process.env, LA_SETTINGS_FILE: "caller-pinned-settings.json" };
   const r = run(root, [], caller);
   if (r.status !== 0) fail(`the caller-provided LA_SETTINGS_FILE was overwritten:\n${r.stderr || r.stdout}`);
+});
+
+// ── --affected (FOC-1074) ─────────────────────────────────────────────────────
+
+// The affected mode shells out to scripts/code-intel.mjs next to the runner's
+// own copy, so a fixture CLI in the sandbox scripts/ dir IS the seam: it answers
+// from FAKE_AFFECTED_JSON and exits with FAKE_AFFECTED_EXIT — the real CLI's
+// exit codes are the vocabulary the repo already trusts (artifact-registry.mjs
+// states the contract): 0 proven, 3 UNKNOWN, anything else also unproven.
+const FAKE_AFFECTED_SRC = [
+  'const out = JSON.parse(process.env.FAKE_AFFECTED_JSON ?? "{}");',
+  'console.log(JSON.stringify(out));',
+  'process.exit(Number(process.env.FAKE_AFFECTED_EXIT ?? "0"));',
+].join("\n");
+
+const affectedSandbox = () =>
+  sandbox(
+    { parallel: [lane("a.test.mjs"), lane("b.test.mjs")], serial: [lane("c.test.mjs")] },
+    { "a.test.mjs": OK, "b.test.mjs": OK, "c.test.mjs": OK, "code-intel.mjs": FAKE_AFFECTED_SRC },
+  );
+
+test("--affected runs only the test files code-intel lists, each in its own lane", () => {
+  const root = affectedSandbox();
+  const affected = { affectedTests: ["scripts/a.test.mjs", "scripts/c.test.mjs"] };
+  const r = run(root, ["--affected", "src/changed.mjs"], { FAKE_AFFECTED_JSON: JSON.stringify(affected) });
+  if (r.status !== 0) fail(`the narrowed run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("2/2 passed")) fail(`expected exactly the two affected files to pass:\n${r.stdout}`);
+  if (r.stdout.includes("✓ b.test.mjs")) fail("an unaffected parallel-lane file ran in the narrowed run");
+  if (!r.stdout.includes("serial lane: 1 file(s)")) {
+    fail(`the serial-lane file was not routed to the serial lane:\n${r.stdout}`);
+  }
+  if (!r.stderr.includes("--affected")) fail(`the narrowed run was not announced on stderr:\n${r.stderr}`);
+});
+
+test("code-intel exit 3 (UNKNOWN) falls back to the FULL suite and says so on stderr", () => {
+  const root = affectedSandbox();
+  const r = run(root, ["--affected", "src/changed.mjs"], { FAKE_AFFECTED_EXIT: "3", FAKE_AFFECTED_JSON: "{}" });
+  if (r.status !== 0) fail(`the fallback run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("3/3 passed")) fail("the fallback did not run the full suite");
+  if (!r.stderr.includes("falling back")) fail(`the fallback was not announced on stderr:\n${r.stderr}`);
+});
+
+test("--affected without explicit files defaults to git diff origin/main; no git → the full-suite fallback", () => {
+  // The sandbox root is a bare mkdtemp dir — not a git repository — so the
+  // default source itself fails and the runner must degrade to the full suite.
+  const root = affectedSandbox();
+  const r = run(root, ["--affected"]);
+  if (r.status !== 0) fail(`the fallback run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("3/3 passed")) fail("the fallback did not run the full suite");
+  if (!r.stderr.includes("git diff")) fail(`the failed default source was not explained on stderr:\n${r.stderr}`);
+});
+
+test("an EMPTY git diff (origin/main matches) is unproven, not 'no tests' — the full-suite fallback", () => {
+  // A clean repo whose origin/main ref points at its own HEAD: git succeeds
+  // with empty output, which must degrade to the full suite like a failed
+  // git — an empty diff says nothing about what a change would reach.
+  const root = affectedSandbox();
+  const git = (...args) => spawnSync("git", args, { cwd: root });
+  git("init", "-q");
+  git("-c", "user.email=t@t.invalid", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "x");
+  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const r = run(root, ["--affected"]);
+  if (r.status !== 0) fail(`the fallback run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("3/3 passed")) fail("the fallback did not run the full suite");
+  if (!r.stderr.includes("is empty")) fail(`an empty diff was not explained as unproven on stderr:\n${r.stderr}`);
+  if (!r.stderr.includes("falling back")) fail(`the fallback was not announced on stderr:\n${r.stderr}`);
+});
+
+test("an affected answer that maps to no known test files exits 1, never a silent green", () => {
+  const root = affectedSandbox();
+  const r = run(root, ["--affected", "docs/README.md"], {
+    FAKE_AFFECTED_JSON: JSON.stringify({ affectedTests: [] }),
+  });
+  if (r.status !== 1) fail(`an empty affected answer exited ${r.status}, expected 1`);
+  if (!r.stderr.includes("no test files")) fail(`the empty answer was not explained:\n${r.stderr}`);
+});
+
+// ── default --jobs (FOC-1074) ─────────────────────────────────────────────────
+
+test("the default --jobs is availableParallelism() capped at 16, and an explicit --jobs still wins", () => {
+  // The mode line names the concurrency the run actually used, so the default
+  // is observable from the outside without importing anything.
+  const root = sandbox(
+    { parallel: [lane("a.test.mjs"), lane("b.test.mjs")], serial: [lane("c.test.mjs")] },
+    { "a.test.mjs": OK, "b.test.mjs": OK, "c.test.mjs": OK },
+  );
+  const expected = Math.min(availableParallelism(), 16);
+  const r = run(root);
+  if (r.status !== 0) fail(`the run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes(`@ jobs ${expected}`)) {
+    fail(`the default concurrency was not min(availableParallelism(), 16) = ${expected}:\n${r.stdout}`);
+  }
+  const explicit = run(root, ["--jobs", "3"]);
+  if (explicit.status !== 0) fail(`the explicit run failed:\n${explicit.stdout}\n${explicit.stderr}`);
+  if (!explicit.stdout.includes("@ jobs 3")) fail(`an explicit --jobs did not win over the default:\n${explicit.stdout}`);
+});
+
+// ── longest-first timings (FOC-1074) ──────────────────────────────────────────
+
+// A fixture file that records its own admission: the runner admits from a
+// queue, so with --jobs 1 the log line order IS the queue order.
+const ORDER_LOG_BODY = (name) =>
+  [
+    'import { appendFileSync } from "node:fs";',
+    `appendFileSync(process.env.ORDER_LOG, ${JSON.stringify(name + "\n")});`,
+    OK,
+  ].join("\n");
+
+test("a recorded timings file orders the parallel lane longest-first, unknown files first (FOC-1074)", () => {
+  const logDir = mkdtempSync(join(tmpdir(), "test-run-order-log-"));
+  sandboxes.push(logDir);
+  const root = sandbox(
+    { parallel: [lane("a-slow.test.mjs"), lane("b-fast.test.mjs"), lane("c-unknown.test.mjs")], serial: [] },
+    {
+      "a-slow.test.mjs": ORDER_LOG_BODY("a"),
+      "b-fast.test.mjs": ORDER_LOG_BODY("b"),
+      "c-unknown.test.mjs": ORDER_LOG_BODY("c"),
+      // Durations recorded by an earlier full run: a is slow, b is fast,
+      // c is unknown.
+      "test-timings.json": JSON.stringify({ "a-slow.test.mjs": 5000, "b-fast.test.mjs": 10 }),
+    },
+  );
+  const log = join(logDir, "order.log");
+  const r = run(root, ["--jobs", "1"], { ORDER_LOG: log });
+  if (r.status !== 0) fail(`the ordered run failed:\n${r.stdout}\n${r.stderr}`);
+  const order = readFileSync(log, "utf8").trim().split("\n");
+  if (JSON.stringify(order) !== JSON.stringify(["c", "a", "b"])) {
+    fail(
+      `admission order was ${JSON.stringify(order)}, expected ["c","a","b"] ` +
+        "(unknown first, then recorded duration descending)",
+    );
+  }
+});
+
+test("a full run records per-file durations to scripts/test-timings.json (FOC-1074)", () => {
+  const root = sandbox(
+    { parallel: [lane("a.test.mjs")], serial: [lane("s.test.mjs")] },
+    { "a.test.mjs": OK, "s.test.mjs": OK },
+  );
+  const r = run(root);
+  if (r.status !== 0) fail(`the full run failed:\n${r.stdout}\n${r.stderr}`);
+  const timingsPath = join(root, "scripts", "test-timings.json");
+  if (!existsSync(timingsPath)) fail("a full run did not write scripts/test-timings.json");
+  const timings = JSON.parse(readFileSync(timingsPath, "utf8"));
+  if (JSON.stringify(Object.keys(timings)) !== JSON.stringify(["a.test.mjs", "s.test.mjs"])) {
+    fail(`timings keys were ${JSON.stringify(Object.keys(timings))}, expected exactly the run files`);
+  }
+  for (const [file, ms] of Object.entries(timings)) {
+    if (!Number.isFinite(ms) || ms < 0) fail(`${file}: "${ms}" is not a recorded duration`);
+  }
+});
+
+test("a narrowed run (pattern or --affected) never regenerates the timings file (FOC-1074)", () => {
+  const recorded = `${JSON.stringify({ "a.test.mjs": 500, "b.test.mjs": 10 }, null, 2)}\n`;
+  const root = sandbox(
+    { parallel: [lane("a.test.mjs"), lane("b.test.mjs")], serial: [lane("c.test.mjs")] },
+    {
+      "a.test.mjs": OK,
+      "b.test.mjs": OK,
+      "c.test.mjs": OK,
+      "code-intel.mjs": FAKE_AFFECTED_SRC,
+      "test-timings.json": recorded,
+    },
+  );
+  const timingsPath = join(root, "scripts", "test-timings.json");
+  const filtered = run(root, ["a"]);
+  if (filtered.status !== 0) fail(`the filtered run failed:\n${filtered.stdout}\n${filtered.stderr}`);
+  if (readFileSync(timingsPath, "utf8") !== recorded) {
+    fail("a pattern-filtered run regenerated scripts/test-timings.json — only full runs may");
+  }
+  const narrowed = run(root, ["--affected", "src/x.mjs"], {
+    FAKE_AFFECTED_JSON: JSON.stringify({ affectedTests: ["scripts/a.test.mjs"] }),
+  });
+  if (narrowed.status !== 0) fail(`the narrowed run failed:\n${narrowed.stdout}\n${narrowed.stderr}`);
+  if (readFileSync(timingsPath, "utf8") !== recorded) {
+    fail("an --affected run regenerated scripts/test-timings.json — only full runs may");
+  }
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
