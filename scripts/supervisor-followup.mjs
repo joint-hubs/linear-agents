@@ -206,13 +206,27 @@ if (args["review-loop"]) {
   // back, and no fingerprint to compare. This also closes the obvious bypass —
   // a Supervisor that never records a verdict would otherwise loop forever,
   // exactly the freedom the old counter existed to remove.
-  if (!rounds.length) {
+  // FOC-1159 — ONE legitimate substitute: an ANSWERED gate. A gate ruling that
+  // orders a repair has to reach DEV even when no verdict was recorded to hand
+  // back (the last review passed, or no review round exists yet). Refusing that
+  // resume is what pushed the runtime to the bare-record incident — a FAIL
+  // recorded for a child that never looked at the work (run 3f52). The gate was
+  // validated above (exists, answered, belongs to this child); here it is the
+  // source the loop runs on, and the resume carries its answer.
+  const gateAsSource = Boolean(args.gate && args.gate !== true);
+  if (!rounds.length && !gateAsSource) {
     failJson(
       `no REVIEW verdict recorded for ${entry.taskId} — there is nothing to send back to DEV`,
       {
         taskId: entry.taskId,
         hint: `record it first: node scripts/supervisor-verdict.mjs record --child <reviewChild> --verdict fail --finding '{"text":"...","evidence":"..."}'`,
       },
+    );
+  }
+  if (!rounds.length && gateAsSource) {
+    console.error(
+      `[followup] no verdict rounds recorded for ${entry.taskId} — resuming on the answered gate ` +
+        `${args.gate} as the source (FOC-1159); the repair order rides the gate answer, not a verdict`,
     );
   }
 
@@ -312,7 +326,9 @@ if (args["review-loop"]) {
 
   progress = {
     rounds: rounds.length,
-    latest: last.fingerprint?.combined ?? null,
+    // `last` is undefined on the gate-sourced path (zero rounds) — never a
+    // crash, the progress record just says what actually happened.
+    latest: last?.fingerprint?.combined ?? null,
     previous: prev?.fingerprint?.combined ?? null,
     repeated,
   };

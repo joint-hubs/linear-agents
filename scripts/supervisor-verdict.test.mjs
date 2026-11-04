@@ -1458,6 +1458,47 @@ test("recording the same round twice is refused", () => {
   assert.match(again.error, /recorded once/);
 });
 
+// ── 4. a verdict only from the child that produced it (FOC-1159) ─────────────
+console.log("\nverdict recorded by the child that produced it");
+
+test("a recorder running as ANOTHER child is refused", () => {
+  // Run 3f52's incident: supervisor-verdict record was invoked with --child
+  // review-2 by a session that was not review-2, recording a FAIL for work the
+  // named child never looked at. The named child must be the recorder.
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = parse(
+    verdict(
+      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"],
+      { LA_SUPERVISOR_CHILD: "review-2" },
+    ),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /cannot record a verdict as child/);
+  assert.equal(out.recorder, "review-2");
+  assert.equal(out.namedChild, "review-1");
+  // Nothing was recorded: the verdicts dir stays empty.
+  const dir = join(runDir(s.runId), "verdicts");
+  assert.equal(readdirSync(dir).filter((f) => f.endsWith(".json")).length, 0);
+});
+
+test("the child itself still records — the identity guard only refuses mismatches", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = parse(
+    verdict(
+      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"],
+      { LA_SUPERVISOR_CHILD: "review-1" },
+    ),
+    fail,
+  );
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.round, 1);
+  // A child never writes to Linear (FOC-167) — the skip must still hold.
+  assert.equal(out.linearEffects.label.status, "skipped");
+});
+
 // ── 5. the fail transition (FOC-284) ─────────────────────────────────────────
 console.log("\nprzejście powrotu po failu recenzji");
 

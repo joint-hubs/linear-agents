@@ -443,6 +443,57 @@ test("a PASS verdict never trips the catcher", () => {
   if (/linearEffects|probably missing/.test(r.stderr)) fail(`unexpected incident warning:\n       ${r.stderr}`);
 });
 
+test("an ANSWERED gate is a legitimate --review-loop source when no verdict is recorded (FOC-1159)", () => {
+  // A gate ruling that orders a repair has to have a path to DEV even when
+  // nothing was recorded to hand back (the last review passed, or no round
+  // exists yet). Refusing that resume is what pushed the runtime to the
+  // FOC-1159 incident: a FAIL bare-recorded for a child that never looked at
+  // the work. The answered gate IS the source — the loop proceeds, the turn
+  // is recorded, and the answer is delivered with it. A REAL spawned child
+  // (not the loopRun() stub): the resume reaches the launch path, and the
+  // stub's non-existent worktree would crash it on a spawn ENOENT.
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const child = spawnChild(runId, repo);
+  waitForStatus(runId, child.childId, ["exited", "crashed", "waiting_gate"]);
+
+  const gateId = parseOk(
+    spawnSync(
+      process.execPath,
+      [GATE, "--run", runId, "emit", "--child", child.childId, "--kind", "question", "--summary", "s", "--question", "q?"],
+      { encoding: "utf8", env: baseEnv() },
+    ),
+  ).gateId;
+  spawnSync(process.execPath, [GATE, "--run", runId, "answer", "--gate", gateId, "--text", "repair it"], {
+    encoding: "utf8",
+    env: baseEnv(),
+  });
+
+  const before = readRegistry(runId).children[child.childId];
+  const r = followup(runId, child.childId, ["--review-loop", "--gate", gateId]);
+  if (r.status !== 0) {
+    fail(`the gate-sourced resume was refused (exit ${r.status}):\n       ${r.stdout}\n       ${r.stderr}`);
+  }
+  const after = readRegistry(runId).children[child.childId];
+  if (after.turns.length !== before.turns.length + 1) {
+    fail(`the gate-sourced turn was not recorded: ${before.turns.length} → ${after.turns.length}`);
+  }
+  // The progress record says what actually happened: zero verdict rounds,
+  // no fingerprints — the gate answer carried the round, not a verdict.
+  const progress = readRegistry(runId).rounds["FOC-123"];
+  if (progress?.rounds !== 0) fail(`progress.rounds was ${progress?.rounds}, not 0`);
+});
+
+test("with NO gate and no verdict rounds the review loop is still refused (FOC-1159)", () => {
+  // The gate answer is the ONLY legitimate substitute for a recorded verdict —
+  // a bare --review-loop with nothing to hand back stays refused (the old
+  // bypass: a Supervisor that never records a verdict would loop forever).
+  const runId = loopRun();
+  const r = followup(runId, "review-1", ["--review-loop"]);
+  if (r.status !== 1) fail(`expected the no-verdict refusal, got exit ${r.status}`);
+  if (!/no REVIEW verdict recorded/.test(r.stdout)) fail(`refusal does not name the missing verdict:\n       ${r.stdout}`);
+});
+
 test("a FAIL verdict with pending return ops warns that the state is unknown (R2-3)", () => {
   // The crash window between the pending write and the amend: the record stays
   // "pending" forever. Either nothing was applied, or Linear WAS mutated while

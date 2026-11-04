@@ -902,6 +902,25 @@ function cmdRecord(args) {
     failJson(`no child "${childId}" in run ${runId}`, { known: Object.keys(registry.children) });
   }
 
+  // ── FOC-1159: a verdict is recorded by the child that produced it ──────────
+  // Run 3f52's incident: `record --child review-2` was invoked by a session
+  // that was NOT review-2, writing a FAIL for work the named child never
+  // looked at — recorded, attributed to "the owner", and applied Linear
+  // effects. A session running AS one child cannot speak for another: the
+  // recorder's own identity (LA_SUPERVISOR_CHILD, set by spawn) must match the
+  // child the verdict names. Refuse the mismatch before anything is written.
+  // (An unset identity — the Supervisor recording on behalf of a child — is a
+  // separate path: that one is the followup/gate-answer route, not a bare
+  // record; see FOC-1159 for the design note.)
+  const selfChild = process.env.LA_SUPERVISOR_CHILD;
+  if (selfChild && selfChild !== childId) {
+    failJson(
+      `child "${selfChild}" cannot record a verdict as child "${childId}" — ` +
+        `a verdict is recorded by the child that produced it`,
+      { recorder: selfChild, namedChild: childId },
+    );
+  }
+
   const verdict = args.verdict;
   if (!VERDICTS.includes(verdict)) failJson(`--verdict must be one of ${VERDICTS.join(" | ")}`);
 
