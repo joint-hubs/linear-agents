@@ -1541,6 +1541,64 @@ test("list does not count a dry probe as a round (FOC-1236 r1 finding 1)", () =>
   assert.equal(task.repeatedLastRound, null, "one real round — the probe must not fabricate a repeat");
 });
 
+test("a pre-FOC-1236 dry record in the round namespace takes no slot (roundsFor content skip)", () => {
+  // The load-bearing half for REAL state dirs: the JW incident left dry round
+  // files on disk inside <task>-roundN.json names. roundsFor must skip them by
+  // the linearEffects.dryRun CONTENT flag, not the file name, so historical
+  // state reads correctly without a migration — and the chain they once
+  // poisoned (a probe occupying round 1) reads as it should have.
+  const s = scenario();
+  mkdirSync(verdictsDir(s.runId), { recursive: true });
+  const shape = (round, recordedAt, dry) => JSON.stringify({
+    taskId: "FOC-123", runId: s.runId, childId: "review-1", squad: "review", round,
+    verdict: "fail", fingerprint: { combined: `fp-${round}` }, findings: [],
+    ...(dry ? { linearEffects: { dryRun: true, dryRunTrigger: "REVIEW_DRY_RUN=1" } } : {}),
+    recordedAt,
+  });
+  writeFileSync(verdictPath(s.runId, "FOC-123", 1), shape(1, "2026-11-03T01:49:45.000Z", true), "utf8");
+  writeFileSync(verdictPath(s.runId, "FOC-123", 2), shape(2, "2026-11-03T01:50:22.000Z", false), "utf8");
+
+  assert.deepEqual(
+    roundsFor(s.runId, "FOC-123").map((r) => r.round),
+    [2],
+    "the historical dry round file takes no slot in the chain",
+  );
+
+  // Numbering continues from the REAL chain only: the next record is round 3,
+  // never round 4 on the back of a probe.
+  advance(s, "fix.txt");
+  const next = realRecord(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/b"]);
+  assert.equal(next.ok, true, next.error);
+  assert.equal(next.round, 3, "the historical dry round never consumes a number");
+});
+
+test("--round with --dry-run is refused on the review path (FOC-1236)", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  const out = record(s, [
+    "--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--dry-run", "--round", "1",
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /takes no round number/);
+  // Refused means refused: no probe file, no round file.
+  assert.equal(existsSync(dryVerdictPath(s.runId, "FOC-123")), false);
+  assert.equal(existsSync(verdictPath(s.runId, "FOC-123", 1)), false);
+});
+
+test("--round with --dry-run is refused on the delivery path (FOC-1236)", () => {
+  const s = scenario();
+  advance(s, "attempt.txt");
+  // Inline invocation — the deliveryRecord helper is defined further down the file.
+  const out = parse(
+    verdict(["record", "--delivery", "--run", s.runId, "--task", "FOC-123", "--verdict", "pass", "--dry-run", "--round", "1"]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /takes no round number/);
+  assert.equal(existsSync(dryVerdictPath(s.runId, "FOC-123")), false);
+  assert.equal(existsSync(verdictPath(s.runId, "FOC-123", 1)), false);
+});
+
 test("a pass followed by a fail on the same tree is a new opinion, not a reproduced round", () => {
   // FOC-1146: two verdicts on one tree hash identically — the fingerprint
   // measures the WORK, never the judgment about it. A pass the operator
