@@ -366,7 +366,18 @@ test("a turn that just started is never stalled on its predecessor's silence", (
   const old = new Date(Date.now() - 1_200_000);
   utimesSync(teeAbsPath(runId, childId), old, old);
 
-  const out = parse(status(runId, [], { LA_SUPERVISOR_POLL_MS: "100" }));
+  // FOC-1235 (measured): the wall clock between this fixture's turnStartedAt
+  // and the status child's own `Date.now()` belongs to the scheduler, not to
+  // the child under test. In a --cpus=2 container under the parallel lane
+  // (jobs 8) the spawnSync of supervisor-status.mjs was measured at 593 ms —
+  // process spawn, node boot and the task-sessions import chain — past the
+  // 500 ms threshold a 100 ms base sets, so the just-started turn read
+  // `stalled`. The base pins the window to the fixture's OWN timestamps
+  // instead: a 60 s base puts the threshold at 5 min — ~500x the measured
+  // scheduling gap, and still 4x below the tee's 20 min of predecessor
+  // silence, so a regression to tee-only silence (silentMs ≈ 20 min) still
+  // trips the stalled assert and still loses the silentMs bound below.
+  const out = parse(status(runId, [], { LA_SUPERVISOR_POLL_MS: "60000" }));
   if (out.children[0].stalled) fail(`a just-started turn was reported stalled (silentMs=${out.children[0].silentMs})`);
   if (!(out.children[0].silentMs < 60_000)) {
     fail(`silentMs=${out.children[0].silentMs} still counts the predecessor's silence`);
