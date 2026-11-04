@@ -38,7 +38,7 @@ import { readSettings } from "./fenix-settings.mjs";
 import { hostBase, hostRequest, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
 import { graphql, workspaceEnabled, integrationOffMessage } from "./linear-client.mjs";
 import { readRegistry, supervisorStateHome } from "./supervisor-lib.mjs";
-import { hostTokenPath, squadConfigDir } from "./fenix-paths.mjs";
+import { hostTokenPath, squadConfigDir, stateRoot } from "./fenix-paths.mjs";
 import { resolveTaskKey, issuePartOf, OWNER_STATUSES, taskSessionsDbPath } from "./task-sessions.mjs";
 import { pidAlive } from "./supervisor-current-run.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
@@ -132,7 +132,14 @@ function workFactsTtlMs() {
 export function ticketFacts() {
   const now = Date.now();
   if (factsCache && now - factsCache.at < workFactsTtlMs()) return factsCache.facts;
-  const facts = collectTicketFacts({ stateHome: supervisorStateHome(), days: 30, now: new Date(now) });
+  const facts = collectTicketFacts({
+    stateHome: supervisorStateHome(),
+    days: 30,
+    now: new Date(now),
+    // FOC-1071: the PR-open records at the state root feed the wall-time
+    // metric — the same sink publish-exec appends to.
+    publishActionsPath: join(stateRoot(), "publish-actions.jsonl"),
+  });
   factsCache = { facts, at: now };
   return facts;
 }

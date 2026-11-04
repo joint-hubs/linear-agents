@@ -123,10 +123,44 @@ function roundsForHome(home, runId, taskId) {
 const verdictPathHome = (home, runId, taskId, round) =>
   join(home, runId, "verdicts", `${String(taskId).toLowerCase()}-round${round}.json`);
 
+const TRIAGE_SIZES = ["small", "medium", "large"];
+
 function triageIssueHome(home, runId) {
   const parsed = readJsonFile(join(home, runId, "triage.json"));
   const issue = parsed.ok ? parsed.value?.issue : null;
   return typeof issue === "string" && isTicketId(issue.trim()) ? issue.trim() : null;
+}
+
+/**
+ * The run's triage record (FOC-1071): the issue plus its declared size. An
+ * unknown or missing size is no size — never invented into a bucket.
+ */
+function triageRecordHome(home, runId) {
+  const parsed = readJsonFile(join(home, runId, "triage.json"));
+  const value = parsed.ok ? parsed.value : null;
+  const issue = typeof value?.issue === "string" && isTicketId(value.issue.trim()) ? value.issue.trim() : null;
+  const size = TRIAGE_SIZES.includes(value?.size) ? value.size : null;
+  return { issue, size };
+}
+
+/**
+ * The publish-action records (FOC-1071): append-only JSONL at the state root.
+ * A missing file or a torn line costs nothing — an empty record list, never a
+ * throw (the same tolerance every other reader here applies).
+ */
+function readPublishActions(path) {
+  if (!path || !existsSync(path)) return [];
+  const rows = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row && typeof row === "object") rows.push(row);
+    } catch {
+      /* torn line — skip */
+    }
+  }
+  return rows;
 }
 
 /** Every readable gate file in the run; unreadable ones are skipped (W1 rule). */
@@ -196,6 +230,10 @@ const emptyFacts = (taskId) => ({
   gates: [],
   interventions: 0,
   interventionRows: [],
+  // FOC-1071: the run's triage size (small/medium/large) for the triage
+  // ticket, and the earliest successful PR open for the wall-time metric.
+  size: null,
+  prOpenAt: null,
 });
 
 const childFact = (runId, child) => {
@@ -233,11 +271,27 @@ const verdictOf = (record) => {
  * Tickets Fenix touched, from the supervisor state home. One bad run never
  * breaks the sweep: corrupt registry → run skipped, unreadable files dropped.
  */
-export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 30, now = Date.now() } = {}) {
+export function collectTicketFacts({
+  stateHome = supervisorStateHome(),
+  days = 30,
+  now = Date.now(),
+  publishActionsPath = null,
+} = {}) {
   const home = stateHome ?? supervisorStateHome();
   const useLib = home === supervisorStateHome();
   const windowStart = now - days * DAY_MS;
   const tickets = new Map();
+
+  // FOC-1071: the earliest SUCCESSFUL PR open per ticket, from the publish
+  // actions record. Failed records and non-PR actions never count.
+  const prOpenByTicket = new Map();
+  for (const row of readPublishActions(publishActionsPath)) {
+    if (row?.action !== "pr" || row.ok !== true) continue;
+    const ts = isoMs(row.ts);
+    if (ts == null || !isTicketId(row.ticket)) continue;
+    const prev = prOpenByTicket.get(row.ticket);
+    if (prev == null || ts < prev) prOpenByTicket.set(row.ticket, ts);
+  }
 
   for (const runId of recentRunIdsHome(home, windowStart)) {
     let registry;
@@ -268,7 +322,8 @@ export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 3
       newChildren.get(taskId).push(childFact(runId, child));
     }
 
-    const triageIssue = triageIssueHome(home, runId);
+    const triage = triageRecordHome(home, runId);
+    const triageIssue = triage.issue;
     if (isTicketId(triageIssue)) runTickets.add(triageIssue);
 
     // Gates: attributed via the record's own taskId, else its child's taskId,
@@ -366,6 +421,13 @@ export function collectTicketFacts({ stateHome = supervisorStateHome(), days = 3
       facts.gates.push(...(gatesByTicket.get(taskId) ?? []));
       facts.verdicts.push(...(verdictsByTicket.get(taskId) ?? []));
       facts.interventionRows.push(...(rowsByTicket.get(taskId) ?? []));
+      // FOC-1071: the newest run's size wins — runs are processed newest
+      // first, so only a still-null size is set.
+      if (taskId === triageIssue && triage.size != null && facts.size == null) {
+        facts.size = triage.size;
+      }
+      const prMs = prOpenByTicket.get(taskId);
+      if (prMs != null) facts.prOpenAt = new Date(prMs).toISOString();
     }
   }
 
