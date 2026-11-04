@@ -163,6 +163,7 @@ lint 903 plików / 0 naruszeń — wszystko zielone.
 <!-- state-index:start -->
 ## Task journals (generated)
 
+- FOC-1235 — done — last entry 2026-11-04 12:00 — foc-1235-dev-ee5ff7adeff9 — #215
 - FOC-1237 — done — last entry 2026-11-04 10:12 — foc-1237-dev-72c2f017ff9c — #214
 - FOC-1236 — done — last entry 2026-11-04 08:03 — foc-1236-dev-7edca7aeda8f — #213
 - FOC-1159 — done — last entry 2026-11-04 04:50 — foc-1159-dev-25abaa05e7af — #212
@@ -216,7 +217,6 @@ lint 903 plików / 0 naruszeń — wszystko zielone.
 - FOC-915 — done — last entry 2026-10-19 17:12 — foc-915-insights-task-table — #112
 - FOC-523 — done — last entry 2026-10-19 15:51 — foc-523-merge-deps — #111
 - FOC-1157 — `scripts/telemetry-idle-tick.test.mjs`, case "idle ticks write — done — last entry - — `foc-1157-dev-8af5c2311ae3` (base 0e5d266) — #182
-- FOC-1235 — in progress — last entry - — foc-1235-dev-ee5ff7adeff9 — -
 - FOC-921 — done — last entry - — foc-921-prompt-hygiene — #118
 <!-- state-index:end -->
 
