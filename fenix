@@ -937,9 +937,12 @@ cmd_test() {
   if [ -n "$(git -C "$src" status --porcelain 2>/dev/null)" ]; then
     printf 'INFO uncommitted changes present — the gate tests the committed candidate %s, not the working tree (FOC-1222)\n' "$(git -C "$src" rev-parse --short HEAD)"
   fi
+  # `cmd || rc=$?` (the repo's own idiom): under set -e a bare failing docker
+  # run would kill the shell before the cleanup — the archive must go on BOTH
+  # paths while the exit code still propagates (REVIEW round 1, FOC-1238).
+  rc=0
   docker run --rm -v "$src:/src:ro" -v "$archive:/src.tar:ro" -e FENIX_TEST_ARCHIVE=/src.tar \
-    fenix:dev sh /src/docker/test-in-container.sh "$@"
-  rc=$?
+    fenix:dev sh /src/docker/test-in-container.sh "$@" || rc=$?
   rm -f "$archive"
   exit "$rc"
 }
