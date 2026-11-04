@@ -80,7 +80,7 @@ const DEFAULT_JOBS = Math.min(availableParallelism(), 16);
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log(`Usage: node scripts/test-run.mjs [pattern] [--jobs N] [--max-wall-ms X] [--prove-isolation]
+  console.log(`Usage: node scripts/test-run.mjs [pattern] [--jobs N] [--max-wall-ms X] [--prove-isolation] [--affected [file …]]
 
 Runs every scripts/*.test.mjs in two lanes from scripts/test-lanes.json:
 parallel (isolated files, concurrency --jobs, default

@@ -378,6 +378,8 @@ into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run
 - `node scripts/test-all.mjs` → 219/219 files (the registered lane count: 200 parallel + 19 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
+- The `linux` CI job's prove-isolation step (FOC-1074) is advisory (`continue-on-error: true`)
+  until FOC-1251 lands its per-cause fixes for the load-timing reds; the gate steps stay blocking.
 - The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.
 - This checklist, walked once on a throwaway issue (§8.12).
 - Run ownership (FOC-905): `supervisor-orphans` marks only what this container owns — a run from another host/container sharing the state home is listed (the `--json` report's `skipped`, the doctor's `run owners` warn) and swept only with `--all --yes`.

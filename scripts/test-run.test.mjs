@@ -401,6 +401,22 @@ test("--affected without explicit files defaults to git diff origin/main; no git
   if (!r.stderr.includes("git diff")) fail(`the failed default source was not explained on stderr:\n${r.stderr}`);
 });
 
+test("an EMPTY git diff (origin/main matches) is unproven, not 'no tests' — the full-suite fallback", () => {
+  // A clean repo whose origin/main ref points at its own HEAD: git succeeds
+  // with empty output, which must degrade to the full suite like a failed
+  // git — an empty diff says nothing about what a change would reach.
+  const root = affectedSandbox();
+  const git = (...args) => spawnSync("git", args, { cwd: root });
+  git("init", "-q");
+  git("-c", "user.email=t@t.invalid", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "x");
+  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const r = run(root, ["--affected"]);
+  if (r.status !== 0) fail(`the fallback run failed:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("3/3 passed")) fail("the fallback did not run the full suite");
+  if (!r.stderr.includes("is empty")) fail(`an empty diff was not explained as unproven on stderr:\n${r.stderr}`);
+  if (!r.stderr.includes("falling back")) fail(`the fallback was not announced on stderr:\n${r.stderr}`);
+});
+
 test("an affected answer that maps to no known test files exits 1, never a silent green", () => {
   const root = affectedSandbox();
   const r = run(root, ["--affected", "docs/README.md"], {
