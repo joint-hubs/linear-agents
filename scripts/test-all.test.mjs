@@ -110,7 +110,40 @@ test("fenix test archives HEAD on the host and mounts it read-only (FOC-1238)", 
   }
 });
 
-console.log(`\n${passed}/5 passed.`);
+// FOC-1074: the prove-isolation proof is a SECOND step of the container gate,
+// driven by env — its own CI step sets FENIX_TEST_PROVE_ISOLATION=1 and that
+// container then runs ONLY the one proof run (every parallel-lane file at
+// once). Locally the env is never set, so the default gate is unchanged.
+test("docker/test-in-container.sh runs the prove-isolation proof only behind FENIX_TEST_PROVE_ISOLATION (FOC-1074)", () => {
+  const sh = readFileSync(join(HERE, "..", "docker", "test-in-container.sh"), "utf8");
+  const gate = sh.indexOf('if [ -n "${FENIX_TEST_PROVE_ISOLATION:-}" ]; then');
+  if (gate === -1) fail("test-in-container.sh has no FENIX_TEST_PROVE_ISOLATION branch - the proof lane can never be requested");
+  const proof = sh.indexOf("test-all.mjs --prove-isolation");
+  if (proof === -1 || proof < gate) fail("the proof run must sit inside the FENIX_TEST_PROVE_ISOLATION branch");
+  // The proof container runs ONLY the proof: the default gate (lint,
+  // state-index, the plain suite) must stay below the gate, in the branch
+  // a local run without the env takes.
+  for (const [what, token] of [["lint", "node scripts/lint.mjs"], ["state-index", "node scripts/state-index.mjs --check"], ["the plain suite", 'node scripts/test-all.mjs "$@"']]) {
+    const at = sh.indexOf(token);
+    if (at === -1) fail(`the default gate lost its ${what} step`);
+    if (at < gate) fail(`the ${what} step must stay in the default branch - without the env a local run is unchanged`);
+  }
+});
+
+// The proof has its own workflow step (FOC-1074): one --cpus=2 fenix:dev
+// container per CI build. A step `env:` block sets the variable in the RUNNER
+// shell — the container never sees it; the docker run line itself must carry
+// the -e passthrough or CI silently runs the plain gate twice.
+test("the linux workflow gives the prove-isolation proof its own --cpus=2 step (FOC-1074)", () => {
+  const yml = readFileSync(join(HERE, "..", ".github", "workflows", "linux.yml"), "utf8");
+  const line = yml.split("\n").find((l) => l.includes("docker run --rm --cpus=2"));
+  if (!line) fail("the proof step lost its bounded container (docker run --rm --cpus=2)");
+  if (!line.includes("-e FENIX_TEST_PROVE_ISOLATION=1")) {
+    fail("the --cpus=2 docker run must pass FENIX_TEST_PROVE_ISOLATION into the container with -e — a step env: block stays in the runner shell and the proof never runs");
+  }
+});
+
+console.log(`\n${passed}/7 passed.`);
 if (failures.length > 0) {
   console.error(`${failures.length} test(s) failed.`);
   process.exit(1);

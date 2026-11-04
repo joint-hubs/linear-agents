@@ -8,7 +8,10 @@
 # mounted the tarball read-only — FENIX_TEST_ARCHIVE names its container path
 # (`fenix test` does this). The tested tree is then exactly the committed
 # candidate (FOC-1222): no write hitting the checkout while the gate runs can
-# change what is tested. Without the tarball, a readable git repository is
+# change what is tested. FENIX_TEST_PROVE_ISOLATION=1 (its own CI step,
+# FOC-1074) runs ONLY the prove-isolation proof instead of the gate — every
+# parallel-lane file at once; never on by default, so a local gate run is
+# unchanged. Without the tarball, a readable git repository is
 # cloned with its uncommitted changes laid on top; a linked worktree cannot be
 # cloned from inside the container (its .git points at a host path) and is
 # tar-snapshotted instead — safe only while nothing writes into the checkout.
@@ -68,9 +71,17 @@ unset $runtime_env
 export LA_ROOT="$WORK"
 
 rc=0
-node scripts/lint.mjs || rc=1
-# The generated index block must match docs/state/ (FOC-1224) — CI holds the
-# line so a journal that lands without a regen fails the lint job.
-node scripts/state-index.mjs --check || rc=1
-node scripts/test-all.mjs "$@" || rc=1
+if [ -n "${FENIX_TEST_PROVE_ISOLATION:-}" ]; then
+  # FOC-1074: the prove-isolation CI step — this container runs ONLY the one
+  # proof run (every parallel-lane file at once); the gate step's container
+  # already did lint, state-index and the full suite. Never on by default, so
+  # a local `docker run … test-in-container.sh` is the plain gate.
+  node scripts/test-all.mjs --prove-isolation || rc=1
+else
+  node scripts/lint.mjs || rc=1
+  # The generated index block must match docs/state/ (FOC-1224) — CI holds the
+  # line so a journal that lands without a regen fails the lint job.
+  node scripts/state-index.mjs --check || rc=1
+  node scripts/test-all.mjs "$@" || rc=1
+fi
 exit "$rc"
