@@ -83,13 +83,17 @@ test("docker/test-in-container.sh reads the shared list instead of carrying its 
 // over by the host is exactly HEAD and immune to the race.
 test("docker/test-in-container.sh extracts the host-archived candidate before touching /src (FOC-1238)", () => {
   const sh = readFileSync(join(HERE, "..", "docker", "test-in-container.sh"), "utf8");
-  const archive = sh.indexOf("FENIX_TEST_ARCHIVE");
-  if (archive === -1) fail("test-in-container.sh has no FENIX_TEST_ARCHIVE branch - the gate still snapshots the live tree");
+  if (!sh.includes("FENIX_TEST_ARCHIVE")) fail("test-in-container.sh has no FENIX_TEST_ARCHIVE branch - the gate still snapshots the live tree");
+  // Anchor on the CODE branch, not the bare variable name: the header comment
+  // names FENIX_TEST_ARCHIVE too and sits above both branches, so an indexOf on
+  // the name passes even with the branch moved after the probe (REVIEW round 1).
+  const archive = sh.indexOf('tar -xf "$FENIX_TEST_ARCHIVE"');
+  if (archive === -1) fail("the archive branch lost its extraction step");
   const probe = sh.indexOf("rev-parse");
   if (probe === -1 || probe < archive) {
     fail("the FENIX_TEST_ARCHIVE branch must come before the /src git probes - a host-archived candidate must win");
   }
-  for (const token of ['tar -xf "$FENIX_TEST_ARCHIVE"', 'git -C "$WORK" init -q', 'git -C "$WORK" add -A', 'git -C "$WORK" commit -qm']) {
+  for (const token of ['git -C "$WORK" init -q', 'git -C "$WORK" add -A', 'git -C "$WORK" commit -qm']) {
     if (!sh.includes(token)) fail(`the archive branch lost a step: ${token}`);
   }
 });
