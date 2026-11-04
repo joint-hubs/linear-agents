@@ -190,6 +190,18 @@ typed by hand walks past both keys (TEST pass, answered gate).
       pending` shows no `cleanup-approval` gate for this run — each one ended in a removal or in an
       explicit answer. A pending cleanup question on a finished run is queue pollution.
 
+Archive policy (FOC-1227), decided 2026-11-04: `remove` archives the worktree's ignored/untracked
+scratch before the tree dies. A nested git repository under `.state/scratch` (a child's red-first
+fixture) is walked, not copyfile'd — `git ls-files --others` hands it over as ONE directory entry,
+and `copyFileSync` on a directory is EPERM, which used to abort the whole removal (run c0cd,
+FOC-1210). The walk copies the real files and skips nested `.git` directories BY NAME; the skip is
+named in `skippedGitDirs`, never silent. A failure to archive ONE scratch entry is REPORTED — the
+result's `archiveFailures` names every entry it could not archive and why — and does NOT block the
+removal of a tree whose gate was answered: exit stays 0 when the tree was removed. Two classes stay
+fail-closed, deliberately: a listing failure (the inventory is UNKNOWN, never read as "nothing to
+lose") and an archive destination that cannot be created (nothing was archived at all) each refuse
+the whole removal having deleted nothing.
+
 ---
 
 ## Delivery verdicts (FOC-1169) — when delivery records one

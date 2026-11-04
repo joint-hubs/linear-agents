@@ -605,16 +605,32 @@ function boundedPaths(paths, cap = ARCHIVE_PATH_CAP) {
 
 /**
  * Copy every work-product path out of the worktree, path-preservingly, BEFORE
- * anything deletes it (FOC-649, AC2). Fail-closed in both directions:
+ * anything deletes it (FOC-649, AC2). Fail-closed where the whole archive is
+ * at stake, per-entry where it is not (FOC-1227):
  *
  *   · a listing failure (the `<git ls-files failed>` sentinel) means UNKNOWN —
  *     and UNKNOWN is never read as "nothing to lose";
- *   · any copy or verification failure refuses the WHOLE removal having deleted
- *     nothing — the tree is still standing when the refusal prints.
+ *   · an archive destination that cannot be created archives NOTHING — both
+ *     refuse the WHOLE removal having deleted nothing, and the tree is still
+ *     standing when the refusal prints;
+ *   · ONE entry that cannot be copied is REPORTED, never blocking (FOC-1227):
+ *     a tree whose gate was answered is removed anyway, the JSON result names
+ *     every entry it could not archive and why, and the removal report carries
+ *     the list. The measured case (run c0cd, FOC-1210): `git ls-files --others`
+ *     cannot descend into a nested git repository, so a throwaway fixture repo
+ *     under .state/scratch arrived as a single DIRECTORY entry, copyFileSync on
+ *     a directory is EPERM, and every removal of such a tree aborted until the
+ *     fixture was deleted by hand.
+ *
+ * Directory entries are WALKED, never copyfile'd: git hands a nested repository
+ * over as one path, so the walk descends itself, copying files and skipping
+ * nested `.git` directories BY NAME with a named warning in the result — a
+ * fixture repo's objects are noise, but a skip is never silent.
  *
  * Verification reuses unarchivedIgnoredContent itself, so the archive is proven
  * covered by the exact predicate the grant precondition uses — not by a recount
- * that could disagree with it.
+ * that could disagree with it. Entries already reported as unarchivable are
+ * subtracted first: they are the report's own list, not a second refusal.
  */
 function archiveWorkProduct({ worktree, inventory, archiveDir }) {
   const work = [...inventory.ignored, ...inventory.untracked].sort();
@@ -625,7 +641,9 @@ function archiveWorkProduct({ worktree, inventory, archiveDir }) {
       hint: "what would be lost is UNKNOWN, so the removal is refused (fail-closed)",
     });
   }
-  if (work.length === 0) return { dir: archiveDir, count: 0, paths: [] };
+  if (work.length === 0) {
+    return { dir: archiveDir, count: 0, paths: [], skippedGitDirs: [], failed: [] };
+  }
 
   console.error(`[cleanup] archiving ${work.length} ignored/untracked work-product path(s) to ${archiveDir}`);
   try {
@@ -635,29 +653,96 @@ function archiveWorkProduct({ worktree, inventory, archiveDir }) {
       hint: "nothing was deleted — the worktree and every file in it are untouched",
     });
   }
-  for (const rel of work) {
+
+  // FOC-1227: per-entry outcomes — what was copied, what was skipped by name,
+  // and what resisted archiving. None of the last two is silent, and neither
+  // blocks a removal whose gate was answered.
+  const copied = [];
+  const skippedGitDirs = [];
+  const failed = [];
+
+  const copyOne = (rel) => {
     try {
       const dest = join(archiveDir, rel);
       mkdirSync(dirname(dest), { recursive: true });
       copyFileSync(join(worktree, rel), dest);
+      copied.push(rel);
     } catch (err) {
-      failJson(`archiving ${rel} failed: ${err.message.split("\n")[0]}`, {
-        archiveDir,
-        hint: "nothing was deleted — the removal is refused until every work-product path is archived",
-      });
+      failed.push({ path: rel, reason: err.message.split("\n")[0] });
     }
+  };
+
+  // A directory entry is walked, never copyfile'd — copyFileSync on a directory
+  // is the EPERM the c0cd/FOC-1210 removal died on. Nested `.git` directories are
+  // skipped BY NAME and named in the result; a symlink is never copied
+  // (copyFile would follow it out of the tree, exactly as unarchivedIgnoredContent
+  // refuses to at the top level), only reported.
+  const walk = (rel) => {
+    let entries;
+    try {
+      entries = readdirSync(join(worktree, rel), { withFileTypes: true });
+    } catch (err) {
+      failed.push({ path: rel, reason: `unreadable directory: ${err.message.split("\n")[0]}` });
+      return;
+    }
+    for (const entry of entries) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.name === ".git") {
+        skippedGitDirs.push({
+          path: child,
+          reason: "nested git repository — its objects are rebuildable noise, not work product",
+        });
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        failed.push({ path: child, reason: "symlink — never copied (copyFile would follow it out of the tree)" });
+        continue;
+      }
+      if (entry.isDirectory()) walk(child);
+      else copyOne(child);
+    }
+  };
+
+  for (const rawRel of work) {
+    // git hands a nested repository over WITH a trailing slash (`.../repo/`) —
+    // normalize it once here, or every walked child path doubles the slash.
+    const rel = rawRel.replace(/\/+$/, "");
+    let isDir = false;
+    try {
+      isDir = lstatSync(join(worktree, rel)).isDirectory();
+    } catch {
+      isDir = false; // vanished between listing and stat — copyOne reports it
+    }
+    if (!isDir) {
+      copyOne(rel);
+      continue;
+    }
+    // The directory entry itself exists in the archive even when everything
+    // under it was skipped or failed — the coverage predicate checks the entry
+    // by path, and the walk's skips and failures are the report's lists, not
+    // coverage gaps.
+    try {
+      mkdirSync(join(archiveDir, rel), { recursive: true });
+    } catch (err) {
+      failed.push({ path: rel, reason: `archive destination cannot be created: ${err.message.split("\n")[0]}` });
+      continue;
+    }
+    walk(rel);
   }
+
   const check = unarchivedIgnoredContent(worktree, archiveDir);
-  if (!check.covered) {
+  const reported = new Set(failed.map((f) => f.path));
+  const missing = check.unarchived.filter((p) => !reported.has(p));
+  if (missing.length > 0) {
     failJson(
-      `archive verification failed: ${check.unarchived.length} path(s) still missing from ${archiveDir}`,
+      `archive verification failed: ${missing.length} path(s) still missing from ${archiveDir}`,
       {
-        unarchived: check.unarchived.slice(0, 10),
+        unarchived: missing.slice(0, 10),
         hint: "nothing was deleted — the removal is refused until the archive covers the whole inventory",
       },
     );
   }
-  return { dir: archiveDir, count: work.length, paths: boundedPaths(work) };
+  return { dir: archiveDir, count: copied.length, paths: boundedPaths(copied), skippedGitDirs, failed };
 }
 
 /**
@@ -1139,6 +1224,9 @@ function trackedSymlinkPaths(worktree) {
  * tracked-dirty set (unchanged meaning — `git status --porcelain`, what the
  * approval covered); `archived` is the ignored/untracked work product that was
  * copied out first; `skippedCache` is the rebuildable cache left to die by name.
+ * `skippedGitDirs` (FOC-1227) names the nested `.git` directories the archive
+ * walk refused to copy, by name; `archiveFailures` (FOC-1227) names the entries
+ * it could not — reported, never blocking, the removal proceeds and says so.
  * `removedLinks` (FOC-1153) names the reparse points unlinked as links first —
  * they die here too, but their TARGETS are the point of the list.
  * Skipping is fine; skipping silently is not.
@@ -1224,13 +1312,25 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, arch
         skippedLinks: (archive.skippedLinks ?? []).map(
           (l) => `${l.path} — symlink${l.target ? ` → ${l.target}` : ""}, skipped: the link is removed, its target is untouched`,
         ),
-        // List 5 (FOC-1153): reparse points unlinked as links before the remove,
+        // List 5 (FOC-1227): nested `.git` directories the archive walk skipped
+        // BY NAME — a fixture repo's objects are rebuildable noise, not work
+        // product, and the skip is named so it is never silent.
+        skippedGitDirs: (archive.skippedGitDirs ?? []).map(
+          (e) => `${e.path} — nested .git, skipped by name: ${e.reason}`,
+        ),
+        // List 6 (FOC-1227): entries the archive could not copy — REPORTED, not
+        // blocking. A tree whose gate was answered is removed anyway; this list
+        // names every entry it could not archive and why (policy, FOC-1227).
+        archiveFailures: (archive.failed ?? []).map(
+          (e) => `${e.path} — not archived (${e.reason}); the removal proceeded`,
+        ),
+        // List 7 (FOC-1153): reparse points unlinked as links before the remove,
         // so git could not follow them out of the tree. The link dies with the
         // worktree; what the list is FOR is the target that kept its content.
         removedLinks: removedLinks.map(
           (l) => `${l.path} — reparse point${l.target ? ` → ${l.target}` : ""}, unlinked before removal: git worktree remove follows junctions`,
         ),
-        // List 6 (FOC-1086): the workspace claims this removal released — a
+        // List 8 (FOC-1086): the workspace claims this removal released — a
         // claim whose worktree died with the tree is stale by definition, and
         // keeping it would block a future Supervisor from the branch name.
         releasedClaims: releasedClaims.map((c) => ({ branch: c.branch, ownerId: c.ownerId })),
