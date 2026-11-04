@@ -186,9 +186,9 @@ export default function CostsQuality() {
                       <td>
                         {r.state ? (
                           <span className={`cq-state cq-state-${r.state}`}>{STATE_LABELS[r.state]}</span>
-                        ) : (
+                        ) : r.target == null ? (
                           <span className="muted" style={{ fontSize: 11.5 }}>no target set</span>
-                        )}
+                        ) : null}
                       </td>
                       <td className="cq-num">{r.n == null ? '—' : r.n}</td>
                     </tr>

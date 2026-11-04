@@ -240,7 +240,7 @@ export function costBySizeRows(costs) {
       return {
         size,
         label: SIZE_LABELS[size] || size,
-        value: b.p50 != null ? formatMoney(b.p50) : 'unknown',
+        value: b.p50 != null ? formatMoney(b.p50) : 'n/a — no data',
         band: bandText(b.p20, b.p80, formatMoney),
         target: b.target != null ? formatMoney(b.target) : null,
         state: b.state || null,

@@ -396,7 +396,7 @@ await test('costBySizeRows renders one row per size: p50, band, target, state', 
     {
       size: 'large',
       label: 'Large',
-      value: 'unknown',
+      value: 'n/a — no data',
       band: null,
       target: null,
       state: null,
@@ -404,6 +404,17 @@ await test('costBySizeRows renders one row per size: p50, band, target, state', 
       definition: 'All-in cost per ticket split by triage size.',
     },
   ]);
+});
+
+await test('costBySizeRows: empty bucket WITH a target set -> target shown, state null (REVIEW r1: the table row then renders no chip and no "no target set" text)', () => {
+  const rows = costBySizeRows({
+    kpis: { costPerTicketBySize: { large: { p20: null, p50: null, p80: null, n: 0, target: 20, state: null } } },
+    definitions: {},
+  });
+  eq(rows.length, 1);
+  eq(rows[0].value, 'n/a — no data');
+  eq(rows[0].target, '$20.00');
+  eq(rows[0].state, null);
 });
 
 await test('costBySizeRows without the kpi block -> [] (computing state shows no section data)', () => {
