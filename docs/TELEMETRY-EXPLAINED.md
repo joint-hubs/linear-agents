@@ -567,6 +567,62 @@ tej tabeli raportuje normalnie — każdy komunikat Supervisora ląduje w unattr
 
 ---
 
+## 12. Cele na tablicy: cztery liczby i linie targetów — FOC-1071
+
+### Cztery liczby — po jednej definicji każda
+
+**firstTimeRight** — istniejący klucz, definicja bez zmian: udział pierwszych rund REVIEW
+zakończonych PASS (0..1; brak rund pierwszych → `null`, nigdy zero). Numery tygodnia
+(`scripts/cadence-quality.mjs --json`) liczą go po tym samym `round1VerdictOf`, co ekran.
+
+**interventionsPerTicket** — istniejący klucz, definicja bez zmian: „Gate, hold and
+question answers recorded for the ticket" — dokładnie pokrywa się z zakresem
+intewencji człowieka (gate + hold + odpowiedzi na pytania), więc niczego nie
+przedefiniowywaliśmy; mianownik to tickety z dziećmi.
+
+**costPerTicketBySize** (nowy) — koszt all-in per ticket (`ticketCostReport`, `§11`),
+podzielony po **rozmiarze triage'u** runu (`.state/supervisor/<runId>/triage.json`,
+pole `size` ∈ small/medium/large, join po `triage.issue == taskId`; najnowszy run
+wygrywa). Ticket bez rozmiaru triage'u i ticket zerowy kosztowo nie trafiają do
+żadnego kubełka. Per kubełek: **p50 (mediana) z pasmem p20–p80 (nearest rank)**.
+
+**wallTimeToPr** (nowy) — czas ściany od pierwszej zarejestrowanej aktywności ticketa
+(`firstActivityAt`) do otwarcia pierwszego udanego PR (najstarszy rekord
+`action === "pr", ok === true` w `<stateRoot>/publish-actions.jsonl`). W godzinach,
+jako rozkład: **p50 z pasmem p20–p80 (nearest rank)**; `pr < start` (przeskok zegara)
+jest wykluczany. `numerator`/`denominator` są uczciwie `null` — to rozkład, nie ułamek.
+
+Pasma **p20–p50–p80** liczy wyłącznie `percentileNearestRank` (`ceil(p/100·n)−1`);
+wariant z interpolacją liniową istnieje w innych raportach i NIE jest tu mieszany.
+
+### Linie targetów
+
+Targety to klucze `targets.<metric>` w overlayu ustawień (ustawiane przez
+`fenix settings set`, walidowane przez `fenix-settings.mjs` + `PUT /api/settings/targets`):
+
+| klucz | kierunek | zakres |
+|-------|----------|--------|
+| `targets.firstTimeRight` | wyżej = lepiej | 0..1 |
+| `targets.interventionsPerTicket` | niżej = lepiej | ≥ 0 |
+| `targets.wallTimeToPr` | niżej = lepiej | ≥ 0 (godziny) |
+| `targets.costPerTicketBySize.small` / `.medium` / `.large` | niżej = lepiej | ≥ 0 (USD) |
+
+Brak targetu = brak linii i **brak stanu** — nigdy fałszywe zielone. Stan czerwony/zielony
+liczy **serwer** (`targetState` w `cost-quality.mjs`: „higher" → `value ≥ target` = good;
+„lower" → `value ≤ target` = good) dla okna 30 dni i wysyła w payloadzie (`target` +
+`state`) — UI tylko renderuje, nigdy nie przelicza. Ekran: *Costs & quality* — tabela
+„Cost per ticket by size" i karty jakości z chipem stanu.
+
+### Tydzień do digesta
+
+`node scripts/cadence-quality.mjs --json` zwraca `{weeks, current, previous, deltas}`:
+cztery liczby dla bieżącego i poprzedniego tygodnia ISO (poniedziałek 00:00 UTC) plus
+deltę `current − previous` (`null` po obu stronach delta zostaje `null` — nigdy fałszywe
+0). Przynależność do okna po `lastActivityAt` — ta sama reguła, co filtr okresu
+`/api/quality`, więc liczby tygodnia i ekran nigdy się nie kłócą o to, kto jest w oknie.
+
+---
+
 ## Ściąga na Q&A
 
 **„Skąd wiesz, ile to kosztowało?"** — Claude Code zapisuje każdą turę do transkryptu
