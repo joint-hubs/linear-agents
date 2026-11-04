@@ -24,7 +24,7 @@
 // Run: node scripts/test-run.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -428,6 +428,88 @@ test("the default --jobs is availableParallelism() capped at 16, and an explicit
   const explicit = run(root, ["--jobs", "3"]);
   if (explicit.status !== 0) fail(`the explicit run failed:\n${explicit.stdout}\n${explicit.stderr}`);
   if (!explicit.stdout.includes("@ jobs 3")) fail(`an explicit --jobs did not win over the default:\n${explicit.stdout}`);
+});
+
+// ── longest-first timings (FOC-1074) ──────────────────────────────────────────
+
+// A fixture file that records its own admission: the runner admits from a
+// queue, so with --jobs 1 the log line order IS the queue order.
+const ORDER_LOG_BODY = (name) =>
+  [
+    'import { appendFileSync } from "node:fs";',
+    `appendFileSync(process.env.ORDER_LOG, ${JSON.stringify(name + "\n")});`,
+    OK,
+  ].join("\n");
+
+test("a recorded timings file orders the parallel lane longest-first, unknown files first (FOC-1074)", () => {
+  const logDir = mkdtempSync(join(tmpdir(), "test-run-order-log-"));
+  sandboxes.push(logDir);
+  const root = sandbox(
+    { parallel: [lane("a-slow.test.mjs"), lane("b-fast.test.mjs"), lane("c-unknown.test.mjs")], serial: [] },
+    {
+      "a-slow.test.mjs": ORDER_LOG_BODY("a"),
+      "b-fast.test.mjs": ORDER_LOG_BODY("b"),
+      "c-unknown.test.mjs": ORDER_LOG_BODY("c"),
+      // Durations recorded by an earlier full run: a is slow, b is fast,
+      // c is unknown.
+      "test-timings.json": JSON.stringify({ "a-slow.test.mjs": 5000, "b-fast.test.mjs": 10 }),
+    },
+  );
+  const log = join(logDir, "order.log");
+  const r = run(root, ["--jobs", "1"], { ORDER_LOG: log });
+  if (r.status !== 0) fail(`the ordered run failed:\n${r.stdout}\n${r.stderr}`);
+  const order = readFileSync(log, "utf8").trim().split("\n");
+  if (JSON.stringify(order) !== JSON.stringify(["c", "a", "b"])) {
+    fail(
+      `admission order was ${JSON.stringify(order)}, expected ["c","a","b"] ` +
+        "(unknown first, then recorded duration descending)",
+    );
+  }
+});
+
+test("a full run records per-file durations to scripts/test-timings.json (FOC-1074)", () => {
+  const root = sandbox(
+    { parallel: [lane("a.test.mjs")], serial: [lane("s.test.mjs")] },
+    { "a.test.mjs": OK, "s.test.mjs": OK },
+  );
+  const r = run(root);
+  if (r.status !== 0) fail(`the full run failed:\n${r.stdout}\n${r.stderr}`);
+  const timingsPath = join(root, "scripts", "test-timings.json");
+  if (!existsSync(timingsPath)) fail("a full run did not write scripts/test-timings.json");
+  const timings = JSON.parse(readFileSync(timingsPath, "utf8"));
+  if (JSON.stringify(Object.keys(timings)) !== JSON.stringify(["a.test.mjs", "s.test.mjs"])) {
+    fail(`timings keys were ${JSON.stringify(Object.keys(timings))}, expected exactly the run files`);
+  }
+  for (const [file, ms] of Object.entries(timings)) {
+    if (!Number.isFinite(ms) || ms < 0) fail(`${file}: "${ms}" is not a recorded duration`);
+  }
+});
+
+test("a narrowed run (pattern or --affected) never regenerates the timings file (FOC-1074)", () => {
+  const recorded = `${JSON.stringify({ "a.test.mjs": 500, "b.test.mjs": 10 }, null, 2)}\n`;
+  const root = sandbox(
+    { parallel: [lane("a.test.mjs"), lane("b.test.mjs")], serial: [lane("c.test.mjs")] },
+    {
+      "a.test.mjs": OK,
+      "b.test.mjs": OK,
+      "c.test.mjs": OK,
+      "code-intel.mjs": FAKE_AFFECTED_SRC,
+      "test-timings.json": recorded,
+    },
+  );
+  const timingsPath = join(root, "scripts", "test-timings.json");
+  const filtered = run(root, ["a"]);
+  if (filtered.status !== 0) fail(`the filtered run failed:\n${filtered.stdout}\n${filtered.stderr}`);
+  if (readFileSync(timingsPath, "utf8") !== recorded) {
+    fail("a pattern-filtered run regenerated scripts/test-timings.json — only full runs may");
+  }
+  const narrowed = run(root, ["--affected", "src/x.mjs"], {
+    FAKE_AFFECTED_JSON: JSON.stringify({ affectedTests: ["scripts/a.test.mjs"] }),
+  });
+  if (narrowed.status !== 0) fail(`the narrowed run failed:\n${narrowed.stdout}\n${narrowed.stderr}`);
+  if (readFileSync(timingsPath, "utf8") !== recorded) {
+    fail("an --affected run regenerated scripts/test-timings.json — only full runs may");
+  }
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
