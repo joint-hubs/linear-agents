@@ -921,7 +921,30 @@ cmd_test() {
     printf 'Building the image first...\n'
     docker compose build
   fi
-  exec docker run --rm -v "$src:/src:ro" fenix:dev sh /src/docker/test-in-container.sh "$@"
+  # FOC-1238: a linked worktree cannot be cloned or archived from inside the
+  # container, so the script tarred the LIVE tree — and a concurrent host
+  # writer could be caught mid-rewrite (FOC-1159 run 1: 216/218, two test
+  # names torn). Archive the committed candidate on the host instead and hand
+  # the container a read-only tarball: the gate proves HEAD, whatever else is
+  # written into the checkout while it runs (FOC-1222: the candidate is a
+  # commit, not the working tree).
+  archive="$src/.state/tmp/fenix-test-candidate.tar"
+  mkdir -p "$src/.state/tmp"
+  if ! git -C "$src" archive --format=tar -o "$archive" HEAD; then
+    printf 'fenix test: git archive HEAD failed — cannot hand the candidate to the container\n' >&2
+    exit 1
+  fi
+  if [ -n "$(git -C "$src" status --porcelain 2>/dev/null)" ]; then
+    printf 'INFO uncommitted changes present — the gate tests the committed candidate %s, not the working tree (FOC-1222)\n' "$(git -C "$src" rev-parse --short HEAD)"
+  fi
+  # `cmd || rc=$?` (the repo's own idiom): under set -e a bare failing docker
+  # run would kill the shell before the cleanup — the archive must go on BOTH
+  # paths while the exit code still propagates (REVIEW round 1, FOC-1238).
+  rc=0
+  docker run --rm -v "$src:/src:ro" -v "$archive:/src.tar:ro" -e FENIX_TEST_ARCHIVE=/src.tar \
+    fenix:dev sh /src/docker/test-in-container.sh "$@" || rc=$?
+  rm -f "$archive"
+  exit "$rc"
 }
 
 # --- dispatch ----------------------------------------------------------------

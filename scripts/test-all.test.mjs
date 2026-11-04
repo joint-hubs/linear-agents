@@ -77,7 +77,40 @@ test("docker/test-in-container.sh reads the shared list instead of carrying its 
   if (/^\s*unset\s+LA_/m.test(sh)) fail("test-in-container.sh unsets LA_* by name again - the two lists will drift");
 });
 
-console.log(`\n${passed}/3 passed.`);
+// FOC-1238: the gate tarred the LIVE tree of a linked worktree, so a host
+// writer racing the run could be caught mid-rewrite (FOC-1159 run 1: 216/218,
+// two test names torn). The archive branch must come first — a tarball handed
+// over by the host is exactly HEAD and immune to the race.
+test("docker/test-in-container.sh extracts the host-archived candidate before touching /src (FOC-1238)", () => {
+  const sh = readFileSync(join(HERE, "..", "docker", "test-in-container.sh"), "utf8");
+  if (!sh.includes("FENIX_TEST_ARCHIVE")) fail("test-in-container.sh has no FENIX_TEST_ARCHIVE branch - the gate still snapshots the live tree");
+  // Anchor on the CODE branch, not the bare variable name: the header comment
+  // names FENIX_TEST_ARCHIVE too and sits above both branches, so an indexOf on
+  // the name passes even with the branch moved after the probe (REVIEW round 1).
+  const archive = sh.indexOf('tar -xf "$FENIX_TEST_ARCHIVE"');
+  if (archive === -1) fail("the archive branch lost its extraction step");
+  const probe = sh.indexOf("rev-parse");
+  if (probe === -1 || probe < archive) {
+    fail("the FENIX_TEST_ARCHIVE branch must come before the /src git probes - a host-archived candidate must win");
+  }
+  for (const token of ['git -C "$WORK" init -q', 'git -C "$WORK" add -A', 'git -C "$WORK" commit -qm']) {
+    if (!sh.includes(token)) fail(`the archive branch lost a step: ${token}`);
+  }
+});
+
+// The wrapper is the path TEST actually runs: it must produce the archive on
+// the host and mount it read-only, and the racy direct form must be gone.
+test("fenix test archives HEAD on the host and mounts it read-only (FOC-1238)", () => {
+  const src = readFileSync(join(HERE, "..", "fenix"), "utf8");
+  for (const token of ['git -C "$src" archive --format=tar', '-v "$archive:/src.tar:ro"', "FENIX_TEST_ARCHIVE=/src.tar"]) {
+    if (!src.includes(token)) fail(`cmd_test does not hand the container the archived candidate: ${token}`);
+  }
+  if (/exec docker run --rm -v "\$src:\/src:ro" fenix:dev/.test(src)) {
+    fail("the racy direct form is still in cmd_test - every gate run must carry the archive mount");
+  }
+});
+
+console.log(`\n${passed}/5 passed.`);
 if (failures.length > 0) {
   console.error(`${failures.length} test(s) failed.`);
   process.exit(1);

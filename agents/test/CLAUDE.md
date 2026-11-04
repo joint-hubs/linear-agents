@@ -99,15 +99,22 @@ For a deployed service, `deploy` checks health first; failure → the authorized
 
 ### 4b. CI parity — the container run (FOC-1179)
 For a local CLI/library repo: run lint, the docs count guard and the touched suites INSIDE the
-Fenix image, as CI does —
+Fenix image, as CI does. The gate proves the COMMITTED candidate (FOC-1222): the host first
+archives HEAD with `git archive` into the run's scratch and mounts the tarball read-only — the
+script (`FENIX_TEST_ARCHIVE`) extracts it as the throwaway repository, so what is tested is
+exactly HEAD and no write hitting the checkout while the gate runs can leak into it (FOC-1238:
+a snapshot of the live tree caught a file mid-rewrite — 216/218 with two test names torn). The
+repo's `fenix test` wrapper does both steps; the raw form:
 ```bash
-MSYS_NO_PATHCONV=1 docker run --rm -v <checkout>:/src:ro fenix:dev sh /src/docker/test-in-container.sh
+git archive --format=tar -o <scratch>/candidate.tar HEAD
+MSYS_NO_PATHCONV=1 docker run --rm -v <checkout>:/src:ro -v <scratch>/candidate.tar:/src.tar:ro -e FENIX_TEST_ARCHIVE=/src.tar fenix:dev sh /src/docker/test-in-container.sh
 ```
 On Git Bash/MSYS the container-side path (`/src/docker/...`) is rewritten to a host path without
 the `MSYS_NO_PATHCONV=1` prefix — `sh: cannot open C:/Program Files/Git/src/...`, exit 2; the
 repo's `fenix` wrapper exports the same guard. On PowerShell/cmd the plain form works.
-The script runs lint + the full suite in a throwaway clone of HEAD with uncommitted work laid on
-top — plus the full suite once on the host. The verdict cites the container run:
+The script runs lint + the full suite on the archived HEAD — the committed candidate, no
+uncommitted overlay (a dirty checkout gets an INFO line to that effect, FOC-1222) — plus the
+full suite once on the host. The verdict cites the container run:
 `supervisor-verdict.mjs record --container-run '{"cmd":"...","exit":0,"outputRef":"<path under the run's scratch or this worktree>"}'`.
 The tool refuses `test-pass-without-container-run` when docker is available and nothing is cited.
 When docker is NOT available, the record must still say why —

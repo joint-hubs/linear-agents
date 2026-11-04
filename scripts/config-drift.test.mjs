@@ -777,6 +777,24 @@ test("komenda kontenerowa CI-parity niesie guard MSYS (FOC-1179, runda 4)", () =
   }
 });
 
+test("komenda kontenerowa bierze kandydata z archiwum HEAD hosta, nie ze snapshotu żywego drzewa (FOC-1238)", () => {
+  // Gate tarował ŻYWE drzewo linked worktree — host writer ścigający się
+  // z przebiegiem mógł zostać złapany w połowie przepisywania pliku
+  // (FOC-1159 run 1: 216/218, dwa nazwy testów obcięte). Tekst reguły musi
+  // pokazywać formę archiwum (git archive na hoście → tarball read-only
+  // → FENIX_TEST_ARCHIVE) — gate wtedy dowodzi skomitowanego kandydata.
+  const testLead = read("agents/test/CLAUDE.md");
+  for (const token of ["git archive --format=tar", "FENIX_TEST_ARCHIVE"]) {
+    if (!testLead.includes(token)) fail(`agents/test/CLAUDE.md §4b nie niesie formy archiwum hosta (FOC-1238): brak ${token}`);
+  }
+  if (testLead.includes("-v <checkout>:/src:ro fenix:dev")) {
+    fail("agents/test/CLAUDE.md §4b pokazuje jeszcze formę bez archiwum — gate mógłby znowu snapshotować żywe drzewo (FOC-1238)");
+  }
+  if (!read("scripts/supervisor-verdict.mjs").includes("FENIX_TEST_ARCHIVE")) {
+    fail("scripts/supervisor-verdict.mjs: hint containerRun nie nazywa formy archiwum hosta (FOC-1238)");
+  }
+});
+
 test("graph trzyma limit rund i liczenie werdyktów delivery (FOC-1179)", () => {
   // Limit dwóch cykli dev↔review zostaje; werdykty delivery (FOC-1169) liczą
   // się jako rundy — to musi być prawdą w tekście, który rządzi, nie tylko w
