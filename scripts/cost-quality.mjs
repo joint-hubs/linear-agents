@@ -83,6 +83,25 @@ const SIGNAL_UNITS = {
 const TRIAGE_SIZES = ["small", "medium", "large"];
 const HOUR_MS = 3_600_000;
 
+/**
+ * FOC-1071: the red/green state a target line gives a value. A missing target
+ * or a missing value is NO state — never a false green. Direction "higher":
+ * value at or above target is good (firstTimeRight). Direction "lower": value
+ * at or below target is good (costs, interventions, wall time).
+ */
+export function targetState(value, target, direction) {
+  if (typeof target !== "number" || !Number.isFinite(target)) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return direction === "higher" ? (value >= target ? "good" : "bad") : value <= target ? "good" : "bad";
+}
+
+// Which signal reads which `targets.<metric>` setting, and which way is good.
+const TARGET_SPECS = {
+  firstTimeRight: { direction: "higher", pick: (t) => t?.firstTimeRight },
+  interventionsPerTicket: { direction: "lower", pick: (t) => t?.interventionsPerTicket },
+  wallTimeToPr: { direction: "lower", pick: (t) => t?.wallTimeToPr },
+};
+
 /** Epoch ms from a number or ISO string; null when unparseable. */
 const msOf = (value) => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -156,18 +175,24 @@ function mostExpensiveWhy(ticket, fact, runs) {
  * carries that size. A ticket without a size, and a zero-cost ticket, are in no
  * bucket; an empty bucket is null values with n 0 — never a zero.
  */
-export function costPerTicketBySize(tickets, factsByTask) {
+export function costPerTicketBySize(tickets, factsByTask, targets = null) {
   const rows = Array.isArray(tickets) ? tickets : [];
   const bySize = {};
   for (const size of TRIAGE_SIZES) {
     const values = rows
       .filter((t) => factsByTask?.get(t.taskId)?.size === size && (t.totalUsd ?? 0) > 0)
       .map((t) => t.totalUsd);
+    const p50 = percentileNearestRank(values, 50);
+    // FOC-1071: the size's target line (lower is better) rides the bucket —
+    // a missing target is NO state, never a false green.
+    const target = targets?.costPerTicketBySize?.[size] ?? null;
     bySize[size] = {
       p20: percentileNearestRank(values, 20),
-      p50: percentileNearestRank(values, 50),
+      p50,
       p80: percentileNearestRank(values, 80),
       n: values.length,
+      target,
+      state: targetState(p50, target, "lower"),
     };
   }
   return bySize;
@@ -184,6 +209,7 @@ export function buildCostsPayload({
   snapshot,
   facts,
   period,
+  targets = null,
   now = Date.now(),
   staleAfterMs = 5 * 60_000,
 }) {
@@ -274,7 +300,7 @@ export function buildCostsPayload({
       childrenUsd,
       supervisorUsd,
       supervisorShare: totalUsd > 0 ? supervisorUsd / totalUsd : null,
-      costPerTicketBySize: costPerTicketBySize(tickets, factsByTask),
+      costPerTicketBySize: costPerTicketBySize(tickets, factsByTask, targets),
     },
     attribution: {
       attributedShare,
@@ -310,6 +336,7 @@ export function buildQualityPayload({
   facts,
   linearStates,
   period,
+  targets = null,
   now = Date.now(),
   staleAfterMs = 5 * 60_000,
 }) {
@@ -338,6 +365,10 @@ export function buildQualityPayload({
         ...(key === "wallTimeToPr" ? { p20: null, p80: null, n: null } : {}),
         numerator: null,
         denominator: null,
+        // FOC-1071: the target line rides every state; with no value it can
+        // only be stateless — never a false green while the snapshot computes.
+        target: TARGET_SPECS[key]?.pick(targets) ?? null,
+        state: null,
         unit: SIGNAL_UNITS[key],
         definition: DEFINITIONS[key],
         evidence: [],
@@ -561,7 +592,14 @@ export function buildQualityPayload({
       definition: DEFINITIONS.wallTimeToPr,
       evidence: cap(wallTasks),
     },
-  ];
+  ].map((signal) => {
+    // FOC-1071: the target line and its red/green state ride the signal —
+    // computed here (server-authoritative), rendered verbatim by the screen.
+    const spec = TARGET_SPECS[signal.key];
+    if (!spec) return { ...signal, target: null, state: null };
+    const target = spec.pick(targets) ?? null;
+    return { ...signal, target, state: targetState(signal.value, target, spec.direction) };
+  });
 
   return {
     period,

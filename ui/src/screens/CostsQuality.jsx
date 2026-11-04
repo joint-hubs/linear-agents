@@ -20,6 +20,7 @@ import {
   modelMixRows,
   expensiveRows,
   qualityCards,
+  costBySizeRows,
 } from '../costsModel';
 import { staleLabel } from '../workModel';
 
@@ -33,7 +34,12 @@ const SIGNAL_LABELS = {
   reworkShare: 'Rework share of cost',
   interventionsPerTicket: 'Human interventions per ticket',
   landingYield: 'Landing yield',
+  wallTimeToPr: 'Wall time to PR',
 };
+
+// FOC-1071: the state chip's text. A missing state renders no chip at all —
+// the payload only ever sends good/bad against a set target.
+const STATE_LABELS = { good: 'on target', bad: 'off target' };
 
 const errorMessage = (err) => (err && err.message ? err.message : String(err));
 
@@ -79,6 +85,7 @@ export default function CostsQuality() {
   const mix = modelMixRows(costs?.byModel);
   const expensive = expensiveRows(costs?.mostExpensive);
   const cards = qualityCards(quality);
+  const bySize = costBySizeRows(costs);
 
   // The evidence links need the ticket ids, which qualityCards counts but does
   // not carry — read them off the raw payload, keyed by signal.
@@ -152,6 +159,46 @@ export default function CostsQuality() {
           ))}
         </div>
       </PanelBoundary>
+
+      {bySize.length > 0 && (
+        <PanelBoundary label="Cost per ticket by size">
+          <div className="cq-section">
+            <h3 className="cq-section-h">Cost per ticket by size</h3>
+            <div className="cq-tablewrap">
+              <table className="cq-table">
+                <thead>
+                  <tr>
+                    <th>Size</th>
+                    <th>p50 (median)</th>
+                    <th>p20–p80 band</th>
+                    <th>Target</th>
+                    <th>State</th>
+                    <th>Tickets</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bySize.map((r) => (
+                    <tr key={r.size}>
+                      <td>{r.label}</td>
+                      <td className="cq-num">{r.value}</td>
+                      <td className="cq-num">{r.band || '—'}</td>
+                      <td className="cq-num">{r.target || '—'}</td>
+                      <td>
+                        {r.state ? (
+                          <span className={`cq-state cq-state-${r.state}`}>{STATE_LABELS[r.state]}</span>
+                        ) : (
+                          <span className="muted" style={{ fontSize: 11.5 }}>no target set</span>
+                        )}
+                      </td>
+                      <td className="cq-num">{r.n == null ? '—' : r.n}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </PanelBoundary>
+      )}
 
       <PanelBoundary label="Spend by day">
         <div className="cq-section">
@@ -238,6 +285,15 @@ export default function CostsQuality() {
                   <div className="cq-signal" key={c.key}>
                     <div className="cq-kpi-label">{SIGNAL_LABELS[c.key] || c.key}</div>
                     <div className="cq-kpi-value">{c.value}</div>
+                    {c.band && <div className="cq-kpi-sub">{c.band}</div>}
+                    {(c.target != null || c.state) && (
+                      <div className="cq-target">
+                        {c.target != null && <span>target {c.target}</span>}
+                        {c.state && STATE_LABELS[c.state] && (
+                          <span className={`cq-state cq-state-${c.state}`}>{STATE_LABELS[c.state]}</span>
+                        )}
+                      </div>
+                    )}
                     {c.definition && <p className="cq-signal-def">{c.definition}</p>}
                     {c.evidenceCount > 0 && (
                       <Link

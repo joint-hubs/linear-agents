@@ -126,6 +126,19 @@ function workFactsTtlMs() {
 }
 
 /**
+ * FOC-1071: the target lines the Costs & quality payloads carry — read from
+ * the settings overlay (`targets.<metric>`). A broken settings file costs the
+ * lines, never the payloads: every state comes back null, never a false green.
+ */
+function targetsForPayloads() {
+  try {
+    return readSettings().targets ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * collectTicketFacts for the default state home, cached for a short TTL —
  * exported for the tests that prove the sharing and the reset.
  */
@@ -986,16 +999,17 @@ export async function handleWorkRoute(req, res, url, ctx) {
     }
     const facts = ticketFacts();
     const snapshot = snapshotForPayloads();
+    const targets = targetsForPayloads();
     let payload;
     if (path === "/api/costs") {
-      payload = buildCostsPayload({ snapshot, facts, period, now: Date.now() });
+      payload = buildCostsPayload({ snapshot, facts, period, targets, now: Date.now() });
     } else {
       // landingYield needs the Linear state types; skipped while the snapshot
       // is still computing/erroring — the payload's signals are all null then.
       const linearStates = snapshot?.state === "ok"
         ? (await linearStatesFor(facts.map((f) => f.taskId))).states
         : {};
-      payload = buildQualityPayload({ snapshot, facts, linearStates, period, now: Date.now() });
+      payload = buildQualityPayload({ snapshot, facts, linearStates, period, targets, now: Date.now() });
     }
     json(res, 200, payload);
     log(method, path, 200);

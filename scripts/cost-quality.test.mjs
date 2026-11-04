@@ -1040,3 +1040,132 @@ test("quality: wallTimeToPr definition exists and the computing state lists the 
   assert.equal(s.value, null);
   assert.equal(s.unit, "hours");
 });
+
+// ── FOC-1071: target lines and the red/green state ───────────────────────────
+
+test("quality: a set target gives the signal a state; off-target is bad", () => {
+  const facts = [
+    fact({ taskId: "P", verdicts: [{ round: 1, squad: "review", verdict: "PASS" }] }),
+    fact({ taskId: "F", verdicts: [{ round: 1, squad: "review", verdict: "FAIL" }] }),
+    fact({ taskId: "I", children: [child("r1")], interventions: 3 }),
+    fact({ taskId: "W1", firstActivityAt: NOW - 12 * H, prOpenAt: NOW - 10 * H }),
+    fact({ taskId: "W2", firstActivityAt: NOW - 20 * H, prOpenAt: NOW - 10 * H }),
+  ];
+  const payload = buildQualityPayload({
+    snapshot: snapshot({ runs: { r1: { usd: 1, reworkUsd: 0 } } }),
+    facts,
+    linearStates: {},
+    period: "all",
+    now: NOW,
+    targets: { firstTimeRight: 0.9, interventionsPerTicket: 2, wallTimeToPr: 48 },
+  });
+  const ftr = payload.signals.find((s) => s.key === "firstTimeRight");
+  assert.equal(ftr.target, 0.9);
+  assert.equal(ftr.state, "bad"); // 0.5 < 0.9 — below target
+  const iv = payload.signals.find((s) => s.key === "interventionsPerTicket");
+  assert.equal(iv.target, 2);
+  assert.equal(iv.state, "bad"); // 3 > 2 — above target
+  const wall = payload.signals.find((s) => s.key === "wallTimeToPr");
+  assert.equal(wall.target, 48);
+  assert.equal(wall.state, "good"); // p50 10 <= 48
+});
+
+test("quality: a missing value is NO state — never a false green", () => {
+  const payload = buildQualityPayload({
+    snapshot: snapshot(),
+    facts: [fact({ taskId: "NOPR" })],
+    linearStates: {},
+    period: "all",
+    now: NOW,
+    targets: { wallTimeToPr: 48, firstTimeRight: 0.9 },
+  });
+  const wall = payload.signals.find((s) => s.key === "wallTimeToPr");
+  assert.equal(wall.target, 48);
+  assert.equal(wall.state, null);
+  // signals without a target key stay stateless too
+  const ry = payload.signals.find((s) => s.key === "reworkShare");
+  assert.equal(ry.target, null);
+  assert.equal(ry.state, null);
+});
+
+test("quality: no targets → every target null and every state null", () => {
+  const payload = buildQualityPayload({
+    snapshot: snapshot(),
+    facts: [fact({ taskId: "P", verdicts: [{ round: 1, squad: "review", verdict: "PASS" }] })],
+    linearStates: {},
+    period: "all",
+    now: NOW,
+  });
+  for (const s of payload.signals) {
+    assert.equal(s.target, null, s.key);
+    assert.equal(s.state, null, s.key);
+  }
+});
+
+test("quality: the computing state carries the targets but never a state", () => {
+  const payload = buildQualityPayload({
+    snapshot: null,
+    facts: [],
+    linearStates: {},
+    period: "30d",
+    now: NOW,
+    targets: { firstTimeRight: 0.8 },
+  });
+  const ftr = payload.signals.find((s) => s.key === "firstTimeRight");
+  assert.equal(ftr.target, 0.8);
+  assert.equal(ftr.state, null);
+});
+
+test("costs: costPerTicketBySize carries per-size target and state", () => {
+  const facts = [
+    fact({ taskId: "S1", size: "small" }),
+    fact({ taskId: "S2", size: "small" }),
+    fact({ taskId: "S3", size: "small" }),
+    fact({ taskId: "M1", size: "medium" }),
+    fact({ taskId: "L1", size: "large" }),
+  ];
+  const snap = snapshot({
+    windows: {
+      all: window({
+        tickets: [ticket("S1", 2), ticket("S2", 4, 1), ticket("S3", 3), ticket("M1", 10, 5), ticket("L1", 30, 10)],
+      }),
+      "30d": {},
+      "7d": {},
+    },
+  });
+  const payload = buildCostsPayload({
+    snapshot: snap,
+    facts,
+    period: "all",
+    now: NOW,
+    targets: { costPerTicketBySize: { small: 5, medium: 15 } },
+  });
+  const bySize = payload.kpis.costPerTicketBySize;
+  assert.equal(bySize.small.target, 5);
+  assert.equal(bySize.small.state, "good"); // p50 3 <= 5
+  assert.equal(bySize.medium.target, 15);
+  assert.equal(bySize.medium.state, "good"); // p50 15 <= 15 — at target is good
+  assert.equal(bySize.large.target, null);
+  assert.equal(bySize.large.state, null); // missing target → NO state
+});
+
+test("costs: an off-target size is bad", () => {
+  const facts = [
+    fact({ taskId: "S1", size: "small" }),
+    fact({ taskId: "S2", size: "small" }),
+    fact({ taskId: "S3", size: "small" }),
+  ];
+  const snap = snapshot({
+    windows: { all: window({ tickets: [ticket("S1", 9), ticket("S2", 4, 6), ticket("S3", 3)] }), "30d": {}, "7d": {} },
+  });
+  const payload = buildCostsPayload({
+    snapshot: snap,
+    facts,
+    period: "all",
+    now: NOW,
+    targets: { costPerTicketBySize: { small: 5 } },
+  });
+  const bySize = payload.kpis.costPerTicketBySize;
+  assert.equal(bySize.small.p50, 9);
+  assert.equal(bySize.small.state, "bad"); // 9 > 5
+});
