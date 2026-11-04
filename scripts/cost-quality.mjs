@@ -132,8 +132,10 @@ const staleOf = (snapshot, now, staleAfterMs) => {
   return computedMs == null ? true : now - computedMs > staleAfterMs;
 };
 
-/** The round-1 REVIEW verdict of a TicketFacts entry, or null when there is none. */
-const round1VerdictOf = (fact) =>
+/** The round-1 REVIEW verdict of a TicketFacts entry, or null when there is none.
+ *  Exported for the cadence digest's weekly numbers (FOC-1071) — the same rule
+ *  the firstTimeRight signal applies, never a second one. */
+export const round1VerdictOf = (fact) =>
   (Array.isArray(fact.verdicts) ? fact.verdicts : [])
     // FOC-1169: a delivery verdict never counts as the review opinion, even
     // when it sits at round 1 of the chain. squad null is a legacy record,

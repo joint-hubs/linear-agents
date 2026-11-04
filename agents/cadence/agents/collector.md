@@ -14,10 +14,11 @@ Lead brief: ISO week, the linear-query + flow-db command list (see docs/prd/prd-
 1. Run the linear-query.mjs calls from the brief → throughput (Done this ISO week), In Progress, In Review, blocked, escalated, over-budget, risk:high, aging WIP (>5d), tasks without Initiative (parent null), stale needs:* (>3d).
 2. Fetch detail for flagged issues via `issue <identifier> --json`.
 3. Run `node $LA_ROOT/scripts/flow-db.mjs patterns --json` (or the path the lead gives) → returns `stepStats[]` (`{squad, agent, executions, avg_turns_per_run, cost_usd}`; `agent:"_lead"` = squad lead), `repeats[]`, `bounces[]`, `failures[]`.
-4. FORWARD the four pipeline arrays IN FULL — no interpretation, no truncation, no summarization. Retro has Read only and cannot refetch.
+4. Run `node scripts/cadence-quality.mjs --json` (repo root, FOC-1071) → `{weeks, current, previous, deltas}`: the four weekly quality/cost numbers for the current and previous ISO week.
+5. FORWARD the four pipeline arrays IN FULL — no interpretation, no truncation, no summarization. Retro has Read only and cannot refetch.
 </task>
 <output>
-Structured state: throughput, counts, blocked, escalated, overBudget, agingWip, noInitiative, staleNeeds, plus the full `patterns` object (stepStats / repeats / bounces / failures intact).
+Structured state: throughput, counts, blocked, escalated, overBudget, agingWip, noInitiative, staleNeeds, the full `patterns` object (stepStats / repeats / bounces / failures intact), AND the `cadence-quality` JSON in full.
 Incomplete brief → list questions and stop.
 </output>
 <guardrails>

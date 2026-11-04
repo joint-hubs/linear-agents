@@ -111,7 +111,10 @@ Pass `collector` the query list below — it runs them itself (has Bash) and ret
   - `bounces[]` = `{taskId, bounces}` — REVIEW→DEV bounces.
   - `failures[]` = `{squad, runs, failed}`.
 
-Output: collector returns structured throughput, counts, blocked, escalated, overBudget, agingWip, noInitiative, staleNeeds, AND `patterns`.
+**Quality/cost numbers (FOC-1071):**
+- `node scripts/cadence-quality.mjs --json` → `{weeks, current, previous, deltas}`: `firstTimeRight`, `interventionsPerTicket`, `wallTimeToPr` (p50 hours), `costPerTicketBySize` (p50 per size) for the current and the previous ISO week, with the delta. Forward the JSON IN FULL — the digest quotes the numbers and deltas, it does not recompute them.
+
+Output: collector returns structured throughput, counts, blocked, escalated, overBudget, agingWip, noInitiative, staleNeeds, `patterns`, AND the `cadence-quality` JSON.
 
 ### 2. Retro — drift + retro (delegate to `retro`)
 Pass `retro` the structured state from collector (INCLUDING `patterns` — retro has only Read, cannot fetch it itself). Retro detects:
@@ -127,7 +130,7 @@ Output: drift findings, pipeline findings (bounce breaches, sub-40% squads, repe
 ### 3. Digest — Polish weekly (delegate to `digest`)
 Pass `digest` the retro output. Digest:
 - Composes a **Polish** digest: top priorities, blockers, decisions to make, action items, drift findings, Linear view links.
-- Section **"Jak pracowały składy"**: subagent cost share per squad (against the 40% target), tasks that bounced ≥2 times, most-repeated steps. Numbers, not narrative.
+- Section **"Jak pracowały składy"**: subagent cost share per squad (against the 40% target), tasks that bounced ≥2 times, most-repeated steps. Plus the four weekly numbers from collector's `cadence-quality` JSON — firstTimeRight, interventions per ticket, wall time to PR, cost per ticket by size — each with the delta vs the previous week. Numbers, not narrative.
 - Writes to `.state/cadence/<ISOweek>.md` (e.g. `2026-W26.md`).
 - Optionally posts a summary comment via helper:
   ```
