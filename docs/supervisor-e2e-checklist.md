@@ -378,6 +378,7 @@ into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run
 - `node scripts/test-all.mjs` → 219/219 files (the registered lane count: 200 parallel + 19 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
+- Test timings (FOC-1252): the tracked `scripts/test-timings.json` is refreshed **only deliberately** — after a lane change or a split, committed **together with** that change, via `node scripts/test-all.mjs --record-timings` (or `FENIX_RECORD_TIMINGS=1`); a plain full run only reads it (longest-first lane admission) and never writes it, so a full run never dirties the tree.
 - The `linux` CI job's prove-isolation step (FOC-1074) is advisory (`continue-on-error: true`)
   until FOC-1251 lands its per-cause fixes for the load-timing reds; the gate steps stay blocking.
 - The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.

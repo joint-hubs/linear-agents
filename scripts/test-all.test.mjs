@@ -151,7 +151,29 @@ test("the linux workflow runs the prove-isolation proof as its own advisory step
   }
 });
 
-console.log(`\n${passed}/7 passed.`);
+// FOC-1252: test-all.mjs is a thin delegate forwarding argv unchanged, so
+// --record-timings must reach test-run.mjs through it. A pattern-filtered run
+// is not a full selection, so the tracked timings file must stay byte-identical
+// even with the flag — the pin covers the forwarding AND the completeness
+// condition on the real tree.
+test("test-all.mjs forwards --record-timings to test-run.mjs; a filtered run still never writes the timings file (FOC-1252)", () => {
+  const timingsPath = join(HERE, "test-timings.json");
+  const before = readFileSync(timingsPath, "utf8");
+  const result = spawnSync(process.execPath, [RUNNER, PROBE, "--record-timings"], {
+    cwd: HERE,
+    encoding: "utf8",
+    env: process.env,
+  });
+  if (result.status !== 0) {
+    fail(`runner exit ${result.status}:\n${result.stdout || ""}${result.stderr || ""}`);
+  }
+  if (!result.stdout.includes("1/1 passed")) fail(`probe did not pass:\n${result.stdout}`);
+  if (readFileSync(timingsPath, "utf8") !== before) {
+    fail("a pattern-filtered --record-timings run rewrote test-timings.json — only a complete full selection may");
+  }
+});
+
+console.log(`\n${passed}/8 passed.`);
 if (failures.length > 0) {
   console.error(`${failures.length} test(s) failed.`);
   process.exit(1);

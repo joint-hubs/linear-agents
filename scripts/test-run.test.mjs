@@ -484,11 +484,13 @@ test("a recorded timings file orders the parallel lane longest-first, unknown fi
 });
 
 test("a full run records per-file durations to scripts/test-timings.json (FOC-1074)", () => {
+  // FOC-1252: the write is deliberate — only --record-timings (or the env)
+  // triggers it, and only for a complete full selection.
   const root = sandbox(
     { parallel: [lane("a.test.mjs")], serial: [lane("s.test.mjs")] },
     { "a.test.mjs": OK, "s.test.mjs": OK },
   );
-  const r = run(root);
+  const r = run(root, ["--record-timings"]);
   if (r.status !== 0) fail(`the full run failed:\n${r.stdout}\n${r.stderr}`);
   const timingsPath = join(root, "scripts", "test-timings.json");
   if (!existsSync(timingsPath)) fail("a full run did not write scripts/test-timings.json");
@@ -525,6 +527,63 @@ test("a narrowed run (pattern or --affected) never regenerates the timings file 
   if (narrowed.status !== 0) fail(`the narrowed run failed:\n${narrowed.stdout}\n${narrowed.stderr}`);
   if (readFileSync(timingsPath, "utf8") !== recorded) {
     fail("an --affected run regenerated scripts/test-timings.json — only full runs may");
+  }
+});
+
+// ── timings write is deliberate (FOC-1252) ───────────────────────────────────
+
+test("a plain full run leaves scripts/test-timings.json byte-identical (FOC-1252)", () => {
+  // The file is TRACKED: any full run that rewrites it dirties every DEV/TEST
+  // worktree and trips the merge gate's uncommitted-changes check. Since
+  // FOC-1252 the write happens only behind --record-timings / the env — a
+  // plain full run READS the file for longest-first ordering and never
+  // writes it. This test is the red-first proof: on the pre-fix tree the run
+  // rewrote the file with machine-shaped numbers and failed here.
+  const recorded = `${JSON.stringify({ "a.test.mjs": 500, "s.test.mjs": 10 }, null, 2)}\n`;
+  const root = sandbox(
+    { parallel: [lane("a.test.mjs")], serial: [lane("s.test.mjs")] },
+    { "a.test.mjs": OK, "s.test.mjs": OK, "test-timings.json": recorded },
+  );
+  const timingsPath = join(root, "scripts", "test-timings.json");
+  const r = run(root);
+  if (r.status !== 0) fail(`the full run failed:\n${r.stdout}\n${r.stderr}`);
+  if (readFileSync(timingsPath, "utf8") !== recorded) {
+    fail("a plain full run rewrote scripts/test-timings.json — it must stay byte-identical; the refresh is deliberate, behind --record-timings");
+  }
+});
+
+test("a full run with --record-timings (or FENIX_RECORD_TIMINGS=1) rewrites scripts/test-timings.json (FOC-1252)", () => {
+  // Fixture durations far above the fixtures' real runtime, so the rewrite is
+  // observable as different bytes — while the keys stay exactly the run files
+  // and the values stay recorded durations (the FOC-1074 shape contract).
+  const recorded = `${JSON.stringify({ "a.test.mjs": 5000, "s.test.mjs": 5000 }, null, 2)}\n`;
+  const flagRoot = sandbox(
+    { parallel: [lane("a.test.mjs")], serial: [lane("s.test.mjs")] },
+    { "a.test.mjs": OK, "s.test.mjs": OK, "test-timings.json": recorded },
+  );
+  const flagPath = join(flagRoot, "scripts", "test-timings.json");
+  const flagged = run(flagRoot, ["--record-timings"]);
+  if (flagged.status !== 0) fail(`the --record-timings run failed:\n${flagged.stdout}\n${flagged.stderr}`);
+  const flagBytes = readFileSync(flagPath, "utf8");
+  if (flagBytes === recorded) fail("a --record-timings full run did not refresh scripts/test-timings.json");
+  const flagTimings = JSON.parse(flagBytes);
+  if (JSON.stringify(Object.keys(flagTimings)) !== JSON.stringify(["a.test.mjs", "s.test.mjs"])) {
+    fail(`timings keys were ${JSON.stringify(Object.keys(flagTimings))}, expected exactly the run files`);
+  }
+  for (const [file, ms] of Object.entries(flagTimings)) {
+    if (!Number.isFinite(ms) || ms < 0) fail(`${file}: "${ms}" is not a recorded duration`);
+  }
+  // The env spelling is the same deliberate refresh, for callers that cannot
+  // shape the command line (a wrapper script, a CI step).
+  const envRoot = sandbox(
+    { parallel: [lane("a.test.mjs")], serial: [lane("s.test.mjs")] },
+    { "a.test.mjs": OK, "s.test.mjs": OK, "test-timings.json": recorded },
+  );
+  const envPath = join(envRoot, "scripts", "test-timings.json");
+  const envRun = run(envRoot, [], { ...process.env, FENIX_RECORD_TIMINGS: "1" });
+  if (envRun.status !== 0) fail(`the FENIX_RECORD_TIMINGS=1 run failed:\n${envRun.stdout}\n${envRun.stderr}`);
+  if (readFileSync(envPath, "utf8") === recorded) {
+    fail("FENIX_RECORD_TIMINGS=1 did not refresh scripts/test-timings.json");
   }
 });
 
