@@ -421,6 +421,43 @@ async function unit(method, path, { body, origin = "http://localhost:5173" } = {
     JSON.parse(readText(process.env.LA_SETTINGS_FILE))?.routing?.aux === undefined);
 }
 
+// ── targets (FOC-1071) ────────────────────────────────────────────────────────
+
+{
+  const g = await unit("GET", "/api/settings/targets");
+  check("unit targets GET -> 200 empty by default",
+    g.status === 200 && JSON.stringify(g.body?.targets) === "{}", JSON.stringify(g.body));
+
+  const put = await unit("PUT", "/api/settings/targets", {
+    body: { firstTimeRight: 0.8, wallTimeToPr: 48, costPerTicketBySize: { medium: 15 } },
+  });
+  check("unit targets PUT -> 200 echoes the applied targets",
+    put.status === 200 && put.body?.targets?.firstTimeRight === 0.8 && put.body?.targets?.wallTimeToPr === 48
+    && put.body?.targets?.costPerTicketBySize?.medium === 15, JSON.stringify(put.body));
+  check("unit targets PUT persisted",
+    JSON.parse(readText(process.env.LA_SETTINGS_FILE))?.targets?.firstTimeRight === 0.8);
+
+  // a second PUT deep-merges: existing keys survive, null deletes one key
+  const merge = await unit("PUT", "/api/settings/targets", { body: { interventionsPerTicket: 2 } });
+  check("unit targets PUT merge keeps earlier keys",
+    merge.status === 200 && merge.body?.targets?.firstTimeRight === 0.8
+    && merge.body?.targets?.interventionsPerTicket === 2, JSON.stringify(merge.body));
+  const clear = await unit("PUT", "/api/settings/targets", { body: { firstTimeRight: null } });
+  check("unit targets PUT null deletes the key",
+    clear.status === 200 && clear.body?.targets?.firstTimeRight === undefined
+    && clear.body?.targets?.interventionsPerTicket === 2, JSON.stringify(clear.body));
+
+  const unknown = await unit("PUT", "/api/settings/targets", { body: { sneaky: 1 } });
+  check("unit targets PUT unknown metric -> 400 invalid-targets",
+    unknown.status === 400 && unknown.body?.error === "invalid-targets", JSON.stringify(unknown.body));
+  const outOfRange = await unit("PUT", "/api/settings/targets", { body: { firstTimeRight: 1.5 } });
+  check("unit targets PUT out-of-range -> 400 invalid-targets",
+    outOfRange.status === 400 && outOfRange.body?.error === "invalid-targets", JSON.stringify(outOfRange.body));
+  const notObject = await unit("PUT", "/api/settings/targets", { body: [1, 2] });
+  check("unit targets PUT non-object body -> 400",
+    notObject.status === 400 && notObject.body?.error === "invalid-targets", JSON.stringify(notObject.body));
+}
+
 // ── provider ──────────────────────────────────────────────────────────────────
 
 {

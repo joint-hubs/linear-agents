@@ -51,6 +51,12 @@ export const DEFINITIONS = {
     "Tickets whose Linear issue is Done, divided by tickets with at least one dev child.",
   mostExpensive:
     "First matching rule: 3 or more review rounds, rework share ≥ 50 %, 3 or more interventions, Supervisor share ≥ 50 %, otherwise unexplained.",
+  // FOC-1071: the two new metrics. Triage size comes from the run's
+  // triage.json; the PR open time from the publish-actions record.
+  costPerTicketBySize:
+    "All-in cost per ticket (children's cost plus Supervisor cost attributed to the ticket), split by the run's triage size (small / medium / large from triage.json): p50 with the p20–p80 band (nearest rank) per size. Tickets whose run carries no triage size, and zero-cost tickets, are in no bucket.",
+  wallTimeToPr:
+    "Wall time from a ticket's first recorded activity to its first successful PR open, over tickets that reached a PR in the period: p50 with the p20–p80 band (nearest rank), in hours.",
   unknown:
     "unknown = no priced telemetry for the messages, so the cost cannot be computed (never shown as 0). unattributed = Supervisor cost with no declared focus, so no ticket owns it.",
 };
@@ -69,6 +75,31 @@ const SIGNAL_UNITS = {
   reworkShare: "share",
   interventionsPerTicket: "count",
   landingYield: "share",
+  wallTimeToPr: "hours",
+};
+
+// FOC-1071: the triage sizes the cost-per-size metric splits into, and the
+// hour — the wall-time signal's unit.
+const TRIAGE_SIZES = ["small", "medium", "large"];
+const HOUR_MS = 3_600_000;
+
+/**
+ * FOC-1071: the red/green state a target line gives a value. A missing target
+ * or a missing value is NO state — never a false green. Direction "higher":
+ * value at or above target is good (firstTimeRight). Direction "lower": value
+ * at or below target is good (costs, interventions, wall time).
+ */
+export function targetState(value, target, direction) {
+  if (typeof target !== "number" || !Number.isFinite(target)) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return direction === "higher" ? (value >= target ? "good" : "bad") : value <= target ? "good" : "bad";
+}
+
+// Which signal reads which `targets.<metric>` setting, and which way is good.
+const TARGET_SPECS = {
+  firstTimeRight: { direction: "higher", pick: (t) => t?.firstTimeRight },
+  interventionsPerTicket: { direction: "lower", pick: (t) => t?.interventionsPerTicket },
+  wallTimeToPr: { direction: "lower", pick: (t) => t?.wallTimeToPr },
 };
 
 /** Epoch ms from a number or ISO string; null when unparseable. */
@@ -101,8 +132,10 @@ const staleOf = (snapshot, now, staleAfterMs) => {
   return computedMs == null ? true : now - computedMs > staleAfterMs;
 };
 
-/** The round-1 REVIEW verdict of a TicketFacts entry, or null when there is none. */
-const round1VerdictOf = (fact) =>
+/** The round-1 REVIEW verdict of a TicketFacts entry, or null when there is none.
+ *  Exported for the cadence digest's weekly numbers (FOC-1071) — the same rule
+ *  the firstTimeRight signal applies, never a second one. */
+export const round1VerdictOf = (fact) =>
   (Array.isArray(fact.verdicts) ? fact.verdicts : [])
     // FOC-1169: a delivery verdict never counts as the review opinion, even
     // when it sits at round 1 of the chain. squad null is a legacy record,
@@ -138,6 +171,35 @@ function mostExpensiveWhy(ticket, fact, runs) {
   return { rule: "unexplained", text: "no matching rule" };
 }
 
+/**
+ * FOC-1071: all-in cost per ticket split by the run's triage size — p20/p50/p80
+ * (nearest rank) of totalUsd per size, over snapshot tickets whose joined fact
+ * carries that size. A ticket without a size, and a zero-cost ticket, are in no
+ * bucket; an empty bucket is null values with n 0 — never a zero.
+ */
+export function costPerTicketBySize(tickets, factsByTask, targets = null) {
+  const rows = Array.isArray(tickets) ? tickets : [];
+  const bySize = {};
+  for (const size of TRIAGE_SIZES) {
+    const values = rows
+      .filter((t) => factsByTask?.get(t.taskId)?.size === size && (t.totalUsd ?? 0) > 0)
+      .map((t) => t.totalUsd);
+    const p50 = percentileNearestRank(values, 50);
+    // FOC-1071: the size's target line (lower is better) rides the bucket —
+    // a missing target is NO state, never a false green.
+    const target = targets?.costPerTicketBySize?.[size] ?? null;
+    bySize[size] = {
+      p20: percentileNearestRank(values, 20),
+      p50,
+      p80: percentileNearestRank(values, 80),
+      n: values.length,
+      target,
+      state: targetState(p50, target, "lower"),
+    };
+  }
+  return bySize;
+}
+
 // ── /api/costs ───────────────────────────────────────────────────────────────
 
 /**
@@ -149,6 +211,7 @@ export function buildCostsPayload({
   snapshot,
   facts,
   period,
+  targets = null,
   now = Date.now(),
   staleAfterMs = 5 * 60_000,
 }) {
@@ -167,6 +230,7 @@ export function buildCostsPayload({
         childrenUsd: null,
         supervisorUsd: null,
         supervisorShare: null,
+        costPerTicketBySize: { small: null, medium: null, large: null },
       },
       attribution: {
         attributedShare: null,
@@ -238,6 +302,7 @@ export function buildCostsPayload({
       childrenUsd,
       supervisorUsd,
       supervisorShare: totalUsd > 0 ? supervisorUsd / totalUsd : null,
+      costPerTicketBySize: costPerTicketBySize(tickets, factsByTask, targets),
     },
     attribution: {
       attributedShare,
@@ -273,6 +338,7 @@ export function buildQualityPayload({
   facts,
   linearStates,
   period,
+  targets = null,
   now = Date.now(),
   staleAfterMs = 5 * 60_000,
 }) {
@@ -296,8 +362,15 @@ export function buildQualityPayload({
       signals: Object.keys(SIGNAL_UNITS).map((key) => ({
         key,
         value: null,
+        // wallTimeToPr is a distribution, not a ratio — its band fields ride
+        // every state so the payload shape never depends on the snapshot.
+        ...(key === "wallTimeToPr" ? { p20: null, p80: null, n: null } : {}),
         numerator: null,
         denominator: null,
+        // FOC-1071: the target line rides every state; with no value it can
+        // only be stateless — never a false green while the snapshot computes.
+        target: TARGET_SPECS[key]?.pick(targets) ?? null,
+        state: null,
         unit: SIGNAL_UNITS[key],
         definition: DEFINITIONS[key],
         evidence: [],
@@ -427,6 +500,20 @@ export function buildQualityPayload({
     .filter((f) => deliveryRowsOf(f).some((v) => v.verdict === "FAIL" && v.reason === "ci"))
     .map((f) => f.taskId);
 
+  // wallTimeToPr (FOC-1071) — first recorded activity → first successful PR
+  // open, over tickets with both stamps. A PR earlier than the start is a
+  // clock-skew record no metric can honestly use — dropped. Nearest-rank
+  // p20/p50/p80 in hours; no sample → nulls, never a zero.
+  const wallHours = [];
+  const wallTasks = [];
+  for (const f of periodTickets) {
+    const start = msOf(f.firstActivityAt);
+    const pr = msOf(f.prOpenAt);
+    if (start == null || pr == null || pr < start) continue;
+    wallHours.push((pr - start) / HOUR_MS);
+    wallTasks.push(f.taskId);
+  }
+
   const signals = [
     {
       key: "firstTimeRight",
@@ -493,7 +580,28 @@ export function buildQualityPayload({
       definition: DEFINITIONS.landingYield,
       evidence: cap(landed.map((f) => f.taskId)),
     },
-  ];
+    {
+      // FOC-1071: a distribution, not a ratio — p50 in `value`, the band and
+      // the sample size beside it; numerator/denominator stay null honestly.
+      key: "wallTimeToPr",
+      value: percentileNearestRank(wallHours, 50),
+      p20: percentileNearestRank(wallHours, 20),
+      p80: percentileNearestRank(wallHours, 80),
+      n: wallHours.length,
+      numerator: null,
+      denominator: null,
+      unit: "hours",
+      definition: DEFINITIONS.wallTimeToPr,
+      evidence: cap(wallTasks),
+    },
+  ].map((signal) => {
+    // FOC-1071: the target line and its red/green state ride the signal —
+    // computed here (server-authoritative), rendered verbatim by the screen.
+    const spec = TARGET_SPECS[signal.key];
+    if (!spec) return { ...signal, target: null, state: null };
+    const target = spec.pick(targets) ?? null;
+    return { ...signal, target, state: targetState(signal.value, target, spec.direction) };
+  });
 
   return {
     period,

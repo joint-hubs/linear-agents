@@ -169,19 +169,83 @@ export function expensiveRows(mostExpensive) {
   });
 }
 
+// Hours text: "10 h", fractional values keep one decimal ("2.3 h"). Null/NaN
+// -> null — the caller decides what "no number" reads as.
+function hoursText(h) {
+  if (h == null || typeof h !== 'number' || Number.isNaN(h)) return null;
+  return (Number.isInteger(h) ? String(h) : h.toFixed(1)) + ' h';
+}
+
+// FOC-1071: the band text under a distribution value — "p20–p80 2–30 h".
+// Both ends must be present; one end is not a band.
+function bandText(p20, p80, fmt) {
+  if (p20 == null || p80 == null) return null;
+  return 'p20–p80 ' + fmt(p20) + '–' + fmt(p80);
+}
+
 // qualityCards(quality) -> the quality signal cards { key, value, definition,
 // evidenceCount } (spec §4.4: each with its written definition). A share is a
 // %, a count is a count, and a null value is honestly "n/a — no data".
+// FOC-1071: each card also carries the target line and the red/green state
+// the payload computed (server-authoritative — the screen never recomputes
+// good/bad), plus the p20–p80 band for the distribution signals. A missing
+// target is no target and no state — never a false green.
 export function qualityCards(quality) {
   const signals = quality && Array.isArray(quality.signals) ? quality.signals : [];
   return signals.map((s) => {
     const v = s && s.value;
     const has = typeof v === 'number' && !Number.isNaN(v);
+    const unit = s && s.unit;
+    const targetText =
+      s && s.target != null
+        ? unit === 'share'
+          ? pct(s.target)
+          : unit === 'hours'
+            ? hoursText(s.target)
+            : String(s.target)
+        : null;
     return {
       key: (s && s.key) || 'unknown',
-      value: !has ? 'n/a — no data' : (s && s.unit) === 'count' ? String(v) : pct(v) || 'n/a — no data',
+      value: !has
+        ? 'n/a — no data'
+        : unit === 'count'
+          ? String(v)
+          : unit === 'hours'
+            ? hoursText(v) || 'n/a — no data'
+            : pct(v) || 'n/a — no data',
       definition: (s && s.definition) || null,
       evidenceCount: s && Array.isArray(s.evidence) ? s.evidence.length : 0,
+      target: targetText,
+      state: (s && s.state) || null,
+      band: has && unit === 'hours' ? bandText(s.p20, s.p80, hoursText) : null,
     };
   });
+}
+
+// costBySizeRows(costs) -> one row per triage size from the payload's
+// kpis.costPerTicketBySize (FOC-1071): { size, label, value (p50), band,
+// target, state, n, definition }. Without the kpi block (computing/error) ->
+// [] — the section shows nothing rather than an invented table.
+const SIZE_LABELS = { small: 'Small', medium: 'Medium', large: 'Large' };
+
+export function costBySizeRows(costs) {
+  const bySize = costs && costs.kpis && costs.kpis.costPerTicketBySize;
+  if (!bySize || typeof bySize !== 'object') return [];
+  const defs = (costs && costs.definitions) || {};
+  const definition = defs.costPerTicketBySize || null;
+  return ['small', 'medium', 'large']
+    .filter((size) => bySize[size] && typeof bySize[size] === 'object')
+    .map((size) => {
+      const b = bySize[size];
+      return {
+        size,
+        label: SIZE_LABELS[size] || size,
+        value: b.p50 != null ? formatMoney(b.p50) : 'n/a — no data',
+        band: bandText(b.p20, b.p80, formatMoney),
+        target: b.target != null ? formatMoney(b.target) : null,
+        state: b.state || null,
+        n: b.n != null ? b.n : null,
+        definition,
+      };
+    });
 }

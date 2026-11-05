@@ -61,6 +61,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "cadence-quality.test.mjs",
+      "reason": "isolation audit FOC-1071: drives only the exported pure core (isoWeekRange, cadenceQuality) over in-memory fact/report fixtures with explicit timestamps; no fs, no ports, no socket binds, no telemetry DB — the CLI main that reads the real store is not exercised"
+    },
+    {
       "file": "check.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },

@@ -25,7 +25,8 @@ Models mirror `config/models.json` routing v2 (FOC-964) as of 2026-11-03 — the
 - Ingest flow-db (transcript metrics: step stats, bounces, repeats, failures).
 - Collector: Linear queries (throughput, WIP counts, blocked/escalated/over-budget, aging WIP, unlinked tasks, stale `needs:*`).
 - Retro: drift signals (no Initiative, stale needs, excess WIP); bounce analysis (`==2` vs `>2`); subagent cost share (target ≥40%).
-- Digest: Polish; top priorities, blockers, action items, squad metrics.
+- Quality/cost numbers (FOC-1071): collector runs `scripts/cadence-quality.mjs --json` — firstTimeRight, interventions per ticket, wall time to PR, cost per ticket by triage size, for the current and previous ISO week, with deltas.
+- Digest: Polish; top priorities, blockers, action items, squad metrics; the four weekly numbers with the delta in "Jak pracowały składy".
 </scope>
 
 <build>

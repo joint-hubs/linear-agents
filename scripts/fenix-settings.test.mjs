@@ -1113,3 +1113,57 @@ test("custom remains valid when patches delete its configuration; dry-run writes
     assert.equal(readFileSync(path, "utf8"), before);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── FOC-1071: the targets overlay section ────────────────────────────────────
+
+test("validateSettings: targets accepts the four metric keys and clears on null", () => {
+  assert.deepEqual(
+    validateSettings({
+      targets: {
+        firstTimeRight: 0.8,
+        costPerTicketBySize: { small: 5, medium: 15, large: 40 },
+        interventionsPerTicket: 2,
+        wallTimeToPr: 48,
+      },
+    }),
+    { ok: true, errors: [] },
+  );
+  assert.deepEqual(validateSettings({ targets: null }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ targets: { firstTimeRight: null } }), { ok: true, errors: [] });
+});
+
+test("validateSettings: targets rejects unknown metrics, bad shapes and out-of-range values", () => {
+  const bad = (t) => validateSettings({ targets: t });
+  assert.ok(bad({ sneaky: 1 }).errors.some((e) => e.includes("targets.sneaky") && e.includes("unknown key")));
+  assert.ok(bad({ firstTimeRight: 1.5 }).errors.some((e) => e.includes("targets.firstTimeRight")));
+  assert.ok(bad({ firstTimeRight: "high" }).errors.some((e) => e.includes("targets.firstTimeRight")));
+  assert.ok(bad({ interventionsPerTicket: -1 }).errors.some((e) => e.includes("targets.interventionsPerTicket")));
+  assert.ok(bad({ wallTimeToPr: -5 }).errors.some((e) => e.includes("targets.wallTimeToPr")));
+  assert.ok(bad({ costPerTicketBySize: 12 }).errors.some((e) => e.includes("targets.costPerTicketBySize")));
+  assert.ok(
+    bad({ costPerTicketBySize: { huge: 3 } }).errors.some((e) =>
+      e.includes("targets.costPerTicketBySize.huge"),
+    ),
+  );
+  assert.ok(
+    bad({ costPerTicketBySize: { small: -1 } }).errors.some((e) =>
+      e.includes("targets.costPerTicketBySize.small"),
+    ),
+  );
+  assert.ok(bad("nope").errors.some((e) => e.includes("targets")));
+});
+
+test("fenix settings set targets.firstTimeRight <value> persists through the dotted-path CLI", async () => {
+  const dir = tempDir();
+  const file = settingsFile(dir);
+  await runSet(file, "targets.firstTimeRight", "0.9");
+  const stored = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(stored.targets.firstTimeRight, 0.9);
+  // a second nested key deep-merges; nothing is lost
+  await runSet(file, "targets.costPerTicketBySize.medium", "15");
+  const stored2 = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(stored2.targets.firstTimeRight, 0.9);
+  assert.equal(stored2.targets.costPerTicketBySize.medium, 15);
+  // an unknown metric key is refused on the CLI path too
+  await assert.rejects(() => runSet(file, "targets.sneaky", "1"));
+});

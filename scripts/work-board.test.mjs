@@ -902,3 +902,52 @@ test("startText: header, truncation marker, control-char stripping", () => {
   const dirty = { ...issue, description: "a\u0007b\u001Fc\td\ne" };
   assert.equal(startText(dirty), "Start ticket FOC-123: Fix the thing\nhttps://linear.app/foc-123\n\nabc\td\ne");
 });
+
+// ── FOC-1071: triage size + PR open time on the ticket facts ─────────────────
+
+test("collectTicketFacts: the run's triage size lands on the triage ticket's facts", () => {
+  const run = fixtureRun("runsize");
+  writeRegistry(run, { cS1: childEntry("cS1", { taskId: "FOC-108" }) });
+  writeFileSync(join(HOME, run, "triage.json"), JSON.stringify({ issue: "FOC-108", size: "large" }, null, 2));
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  assert.equal(factsByTask(facts, "FOC-108").size, "large");
+});
+
+test("collectTicketFacts: an unknown triage size stays null — never invented", () => {
+  const run = fixtureRun("runbadsize");
+  writeFileSync(join(HOME, run, "triage.json"), JSON.stringify({ issue: "FOC-109", size: "huge" }, null, 2));
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  assert.equal(factsByTask(facts, "FOC-109").size, null);
+});
+
+test("collectTicketFacts: publishActionsPath — earliest successful PR record becomes prOpenAt", () => {
+  const run = fixtureRun("runpr");
+  writeRegistry(run, { cP1: childEntry("cP1", { taskId: "FOC-110" }) });
+  const path = join(HOME, "publish-actions.jsonl");
+  writeFileSync(
+    path,
+    [
+      JSON.stringify({ ts: iso(120), ticket: "FOC-110", action: "pr", ok: true }),
+      JSON.stringify({ ts: iso(200), ticket: "FOC-110", action: "pr", ok: true }), // earliest ok PR
+      JSON.stringify({ ts: iso(110), ticket: "FOC-110", action: "pr", ok: false }), // failed — ignored
+      JSON.stringify({ ts: iso(100), ticket: "FOC-110", action: "push", ok: true }), // not a PR — ignored
+      "torn line",
+    ].join("\n") + "\n",
+  );
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW, publishActionsPath: path });
+  assert.equal(factsByTask(facts, "FOC-110").prOpenAt, iso(200));
+});
+
+test("collectTicketFacts: no publishActionsPath (or missing file) → prOpenAt null", () => {
+  const run = fixtureRun("runnopr");
+  writeRegistry(run, { cP1: childEntry("cP1", { taskId: "FOC-111" }) });
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  assert.equal(factsByTask(facts, "FOC-111").prOpenAt, null);
+  const facts2 = collectTicketFacts({
+    stateHome: HOME,
+    days: 30,
+    now: NOW,
+    publishActionsPath: join(HOME, "does-not-exist.jsonl"),
+  });
+  assert.equal(factsByTask(facts2, "FOC-111").prOpenAt, null);
+});

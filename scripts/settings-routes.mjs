@@ -753,6 +753,52 @@ export async function handleSettingsRoute(req, res, url, ctx) {
       return await retentionPut(req, res, url, ctx);
     }
 
+    // --- GET/PUT /api/settings/targets ---------------------------------------
+    // FOC-1071: the per-metric target lines the Costs & quality screen draws
+    // its red/green states against. GET reads the overlay's `targets` section;
+    // PUT validates the patch through the overlay's own validator (an unknown
+    // or out-of-range metric is a 400) and deep-merges it — a null value
+    // deletes the key (the overlay's merge semantics), so clearing a target
+    // really removes the line.
+    if (path === "/api/settings/targets") {
+      if (method === "GET") {
+        try {
+          json(res, 200, { targets: deps.readSettings().targets ?? {} });
+          log(method, path, 200);
+        } catch (err) {
+          json(res, 500, { error: String(err?.message || err).split("\n")[0] });
+          log(method, path, 500);
+        }
+        return true;
+      }
+      if (method !== "PUT") return methodMismatch(res, method, path, ctx);
+      let body;
+      try {
+        body = await readJsonBody(req, BODY_CAP);
+      } catch (err) {
+        log(req.method, path, respondBodyError(res, err));
+        return true;
+      }
+      const refuse = (detail) => {
+        json(res, 400, { error: "invalid-targets", detail });
+        log(req.method, path, 400);
+        return true;
+      };
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return refuse("body must be a JSON object of metric targets");
+      }
+      const { ok, errors } = deps.validateSettings({ targets: body });
+      if (!ok) return refuse(errors.join("; "));
+      try {
+        deps.writeSettings({ targets: body });
+      } catch (err) {
+        return refuse(String(err?.message || err).split("\n").join("; "));
+      }
+      json(res, 200, { targets: deps.readSettings().targets ?? {} });
+      log(req.method, path, 200);
+      return true;
+    }
+
     // --- GET /api/settings/agent-tools --------------------------------------
     // Read-only view of the effective root's agent permission settings
     // (FOC-906): one showAgent row per agent, the same checkFindings summary

@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 219 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 220 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 219 test files before you start; a red file invalidates the walk,
+node scripts/test-all.mjs                       # 220 test files before you start; a red file invalidates the walk,
                                                 # except security-scan.test.mjs — load-sensitive, seen red (13 probe
                                                 # misses) at base e3dea40 too, so its red alone is not a regression signal
 git diff --stat -- agents/orchestrator          # AC-10, see below
@@ -375,7 +375,7 @@ into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run
 `docs/scratch-and-fixtures.md`).
 
 ### Verification
-- `node scripts/test-all.mjs` → 219/219 files (the registered lane count: 200 parallel + 19 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 220/220 files (the registered lane count: 201 parallel + 19 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - Test timings (FOC-1252): the tracked `scripts/test-timings.json` is refreshed **only deliberately** — after a lane change or a split, committed **together with** that change, via `node scripts/test-all.mjs --record-timings` (or `FENIX_RECORD_TIMINGS=1`); a plain full run only reads it (longest-first lane admission) and never writes it, so a full run never dirties the tree.

@@ -38,7 +38,7 @@ import { readSettings } from "./fenix-settings.mjs";
 import { hostBase, hostRequest, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
 import { graphql, workspaceEnabled, integrationOffMessage } from "./linear-client.mjs";
 import { readRegistry, supervisorStateHome } from "./supervisor-lib.mjs";
-import { hostTokenPath, squadConfigDir } from "./fenix-paths.mjs";
+import { hostTokenPath, squadConfigDir, stateRoot } from "./fenix-paths.mjs";
 import { resolveTaskKey, issuePartOf, OWNER_STATUSES, taskSessionsDbPath } from "./task-sessions.mjs";
 import { pidAlive } from "./supervisor-current-run.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
@@ -126,13 +126,33 @@ function workFactsTtlMs() {
 }
 
 /**
+ * FOC-1071: the target lines the Costs & quality payloads carry — read from
+ * the settings overlay (`targets.<metric>`). A broken settings file costs the
+ * lines, never the payloads: every state comes back null, never a false green.
+ */
+function targetsForPayloads() {
+  try {
+    return readSettings().targets ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * collectTicketFacts for the default state home, cached for a short TTL —
  * exported for the tests that prove the sharing and the reset.
  */
 export function ticketFacts() {
   const now = Date.now();
   if (factsCache && now - factsCache.at < workFactsTtlMs()) return factsCache.facts;
-  const facts = collectTicketFacts({ stateHome: supervisorStateHome(), days: 30, now: new Date(now) });
+  const facts = collectTicketFacts({
+    stateHome: supervisorStateHome(),
+    days: 30,
+    now: new Date(now),
+    // FOC-1071: the PR-open records at the state root feed the wall-time
+    // metric — the same sink publish-exec appends to.
+    publishActionsPath: join(stateRoot(), "publish-actions.jsonl"),
+  });
   factsCache = { facts, at: now };
   return facts;
 }
@@ -979,16 +999,17 @@ export async function handleWorkRoute(req, res, url, ctx) {
     }
     const facts = ticketFacts();
     const snapshot = snapshotForPayloads();
+    const targets = targetsForPayloads();
     let payload;
     if (path === "/api/costs") {
-      payload = buildCostsPayload({ snapshot, facts, period, now: Date.now() });
+      payload = buildCostsPayload({ snapshot, facts, period, targets, now: Date.now() });
     } else {
       // landingYield needs the Linear state types; skipped while the snapshot
       // is still computing/erroring — the payload's signals are all null then.
       const linearStates = snapshot?.state === "ok"
         ? (await linearStatesFor(facts.map((f) => f.taskId))).states
         : {};
-      payload = buildQualityPayload({ snapshot, facts, linearStates, period, now: Date.now() });
+      payload = buildQualityPayload({ snapshot, facts, linearStates, period, targets, now: Date.now() });
     }
     json(res, 200, payload);
     log(method, path, 200);

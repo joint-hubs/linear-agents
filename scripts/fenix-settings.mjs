@@ -20,6 +20,14 @@ const RETENTION_MAX_CACHE_GB = 1024;
 const RETENTION_MAX_DAYS = 36500;
 const RETENTION_MIN_FREE_GIB = 0.5;
 
+// Targets (FOC-1071): the metric keys the Costs & quality screen draws a
+// red/green state against. Unset (absent or null) → NO state, never a false
+// green. Units follow the metric: firstTimeRight a share 0..1 (higher is
+// better), interventionsPerTicket a count, wallTimeToPr hours,
+// costPerTicketBySize USD per triage size (all three lower is better).
+export const TARGET_KEYS = ["firstTimeRight", "costPerTicketBySize", "interventionsPerTicket", "wallTimeToPr"];
+const TARGET_SIZE_KEYS = ["small", "medium", "large"];
+
 const PROVIDER_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const SQUAD_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const KEY_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
@@ -278,12 +286,62 @@ function checkRetention(retention, errors) {
   }
 }
 
+/** A finite number within [min, max] (max null = unbounded). */
+const targetNumberOk = (v, min, max = null) =>
+  typeof v === "number" && Number.isFinite(v) && v >= min && (max == null || v <= max);
+
+function checkTargets(targets, errors) {
+  if (targets === null) return; // explicit null = every target unset
+  if (!isPlainObject(targets)) {
+    errors.push("targets: must be an object or null");
+    return;
+  }
+  for (const key of Object.keys(targets)) {
+    if (!TARGET_KEYS.includes(key)) errors.push(`targets.${key}: unknown key`);
+  }
+  if (
+    targets.firstTimeRight !== undefined &&
+    targets.firstTimeRight !== null &&
+    !targetNumberOk(targets.firstTimeRight, 0, 1)
+  ) {
+    errors.push("targets.firstTimeRight: must be null or a number between 0 and 1");
+  }
+  if (
+    targets.interventionsPerTicket !== undefined &&
+    targets.interventionsPerTicket !== null &&
+    !targetNumberOk(targets.interventionsPerTicket, 0)
+  ) {
+    errors.push("targets.interventionsPerTicket: must be null or a number >= 0");
+  }
+  if (
+    targets.wallTimeToPr !== undefined &&
+    targets.wallTimeToPr !== null &&
+    !targetNumberOk(targets.wallTimeToPr, 0)
+  ) {
+    errors.push("targets.wallTimeToPr: must be null or a number >= 0 (hours)");
+  }
+  const bySize = targets.costPerTicketBySize;
+  if (bySize !== undefined && bySize !== null) {
+    if (!isPlainObject(bySize)) {
+      errors.push("targets.costPerTicketBySize: must be an object or null");
+    } else {
+      for (const key of Object.keys(bySize)) {
+        if (!TARGET_SIZE_KEYS.includes(key)) {
+          errors.push(`targets.costPerTicketBySize.${key}: unknown key`);
+        } else if (bySize[key] !== null && !targetNumberOk(bySize[key], 0)) {
+          errors.push(`targets.costPerTicketBySize.${key}: must be null or a number >= 0`);
+        }
+      }
+    }
+  }
+}
+
 export function validateSettings(obj) {
   const errors = [];
   if (!isPlainObject(obj)) return { ok: false, errors: ["settings: must be a JSON object"] };
 
   for (const key of Object.keys(obj)) {
-    if (key !== "provider" && key !== "routing" && key !== "publish" && key !== "ownership" && key !== "retention" && key !== "integrations" && key !== "taskSessions") errors.push(`${key}: unknown top-level key`);
+    if (key !== "provider" && key !== "routing" && key !== "publish" && key !== "ownership" && key !== "retention" && key !== "integrations" && key !== "taskSessions" && key !== "targets") errors.push(`${key}: unknown top-level key`);
   }
 
   // The publish overlay (FOC-788 follow-up): the dashboard's push/PR act as a
@@ -358,6 +416,8 @@ export function validateSettings(obj) {
     }
   }
   if (obj.retention !== undefined) checkRetention(obj.retention, errors);
+  // FOC-1071: the per-metric target lines, validated like every other section.
+  if (obj.targets !== undefined) checkTargets(obj.targets, errors);
   // The `ownership` key (FOC-848): owners → Linear projects, plus the policy
   // for unlisted projects. Same shape rules the task-ownership loader's schema
   // enforces; validated here too so a malformed map never lands on disk.

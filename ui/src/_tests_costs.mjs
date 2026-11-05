@@ -19,6 +19,7 @@ import {
   modelMixRows,
   expensiveRows,
   qualityCards,
+  costBySizeRows,
 } from './costsModel.js';
 
 // --- Minimal test harness (same shape as _tests_cockpit.mjs) ----------------
@@ -266,18 +267,27 @@ await test('qualityCards share -> %, count -> count text, null -> "n/a — no da
       value: '72 %',
       definition: 'Share of tickets whose round-1 review verdict is PASS.',
       evidenceCount: 2,
+      target: null,
+      state: null,
+      band: null,
     },
     {
       key: 'interventionsPerTicket',
       value: '1.4',
       definition: 'Gate / hold / ask answers recorded for the ticket.',
       evidenceCount: 0,
+      target: null,
+      state: null,
+      band: null,
     },
     {
       key: 'landingYield',
       value: 'n/a — no data',
       definition: 'Landed tickets / tickets with at least one dev child.',
       evidenceCount: 0,
+      target: null,
+      state: null,
+      band: null,
     },
   ]);
 });
@@ -286,6 +296,139 @@ await test('qualityCards null/empty quality -> []', () => {
   eq(qualityCards(null), []);
   eq(qualityCards({}), []);
   eq(qualityCards({ signals: [] }), []);
+});
+
+// --- FOC-1071: target lines, red/green states, cost by size -------------------
+
+// The quality fixture gains the FOC-1071 fields the payload now carries.
+const quality1071 = {
+  ...quality,
+  signals: [
+    {
+      key: 'firstTimeRight',
+      ...quality.signals[0],
+      target: 0.9,
+      state: 'bad',
+    },
+    {
+      key: 'wallTimeToPr',
+      value: 10,
+      p20: 2,
+      p80: 30,
+      n: 3,
+      numerator: null,
+      denominator: null,
+      unit: 'hours',
+      definition: 'Wall time from first activity to first successful PR open.',
+      evidence: ['FOC-403'],
+      target: 48,
+      state: 'good',
+    },
+    quality.signals[1],
+    quality.signals[2],
+  ],
+};
+
+await test('qualityCards hours unit -> "10 h" text with the p20–p80 band and the target', () => {
+  const cards = qualityCards(quality1071);
+  const wall = cards.find((c) => c.key === 'wallTimeToPr');
+  eq(wall.value, '10 h');
+  eq(wall.band, 'p20–p80 2 h–30 h');
+  eq(wall.target, '48 h');
+  eq(wall.state, 'good');
+});
+
+await test('qualityCards target text follows the unit: share -> %, count -> number', () => {
+  const cards = qualityCards(quality1071);
+  const ftr = cards.find((c) => c.key === 'firstTimeRight');
+  eq(ftr.target, '90 %');
+  eq(ftr.state, 'bad');
+  const iv = cards.find((c) => c.key === 'interventionsPerTicket');
+  eq(iv.target, null); // no target set for this metric
+  eq(iv.state, null);
+  eq(iv.band, null);
+});
+
+await test('qualityCards fractional hours keep one decimal', () => {
+  const cards = qualityCards({
+    signals: [{ key: 'wallTimeToPr', value: 2.25, p20: null, p80: null, n: 1, unit: 'hours', target: null, state: null, evidence: [] }],
+  });
+  eq(cards[0].value, '2.3 h');
+  eq(cards[0].band, null);
+});
+
+// costPerTicketBySize fixture block, shaped like the payload's kpis entry.
+const costs1071 = {
+  ...costs,
+  kpis: {
+    ...costs.kpis,
+    costPerTicketBySize: {
+      small: { p20: 0.5, p50: 1.0, p80: 3.0, n: 3, target: 2, state: 'bad' },
+      medium: { p20: 10, p50: 14, p80: 15, n: 1, target: 15, state: 'good' },
+      large: { p20: null, p50: null, p80: null, n: 0, target: null, state: null },
+    },
+  },
+  definitions: { ...costs.definitions, costPerTicketBySize: 'All-in cost per ticket split by triage size.' },
+};
+
+await test('costBySizeRows renders one row per size: p50, band, target, state', () => {
+  eq(costBySizeRows(costs1071), [
+    {
+      size: 'small',
+      label: 'Small',
+      value: '$1.00',
+      band: 'p20–p80 $0.50–$3.00',
+      target: '$2.00',
+      state: 'bad',
+      n: 3,
+      definition: 'All-in cost per ticket split by triage size.',
+    },
+    {
+      size: 'medium',
+      label: 'Medium',
+      value: '$14.00',
+      band: 'p20–p80 $10.00–$15.00',
+      target: '$15.00',
+      state: 'good',
+      n: 1,
+      definition: 'All-in cost per ticket split by triage size.',
+    },
+    {
+      size: 'large',
+      label: 'Large',
+      value: 'n/a — no data',
+      band: null,
+      target: null,
+      state: null,
+      n: 0,
+      definition: 'All-in cost per ticket split by triage size.',
+    },
+  ]);
+});
+
+await test('costBySizeRows: empty bucket WITH a target set -> target shown, state null (REVIEW r1: the table row then renders no chip and no "no target set" text)', () => {
+  const rows = costBySizeRows({
+    kpis: { costPerTicketBySize: { large: { p20: null, p50: null, p80: null, n: 0, target: 20, state: null } } },
+    definitions: {},
+  });
+  eq(rows.length, 1);
+  eq(rows[0].value, 'n/a — no data');
+  eq(rows[0].target, '$20.00');
+  eq(rows[0].state, null);
+});
+
+await test('costBySizeRows without the kpi block -> [] (computing state shows no section data)', () => {
+  eq(costBySizeRows(costs), []);
+  eq(costBySizeRows(null), []);
+});
+
+await test('costBySizeRows band without both ends -> null, p50 still shown', () => {
+  const rows = costBySizeRows({
+    kpis: { costPerTicketBySize: { small: { p20: null, p50: 2, p80: null, n: 1, target: null, state: null }, medium: null, large: null } },
+    definitions: {},
+  });
+  eq(rows[0].value, '$2.00');
+  eq(rows[0].band, null);
 });
 
 // --- Summary -----------------------------------------------------------------------------------
