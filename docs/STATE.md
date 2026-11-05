@@ -163,6 +163,7 @@ lint 903 plików / 0 naruszeń — wszystko zielone.
 <!-- state-index:start -->
 ## Task journals (generated)
 
+- FOC-1251 — in progress — last entry 2026-11-05 07:19 — foc-1251-dev-1040226df6e7 — -
 - FOC-1072 — done — last entry 2026-11-05 06:12 — foc-1072-dev-e1f477b5b22c — #223
 - FOC-1253 — done — last entry 2026-11-05 04:14 — foc-1253-dev-d59b13dd06d2 — #222
 - FOC-1071 — done — last entry 2026-11-05 01:55 — foc-1071-dev-f7947a0674d1 — #221
