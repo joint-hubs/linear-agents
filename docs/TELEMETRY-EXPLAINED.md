@@ -606,14 +606,17 @@ jest wykluczany. `numerator`/`denominator` są uczciwie `null` — to rozkład, 
 (`collectTicketFacts`) biorą najstarszy stempel PR-open per ticket z TRZECH źródeł,
 w kolejności: **(a)** najstarszy rekord `action === "pr", ok === true` w
 `<stateRoot>/publish-actions.jsonl` — PRAWDZIWY moment otwarcia; **(b)** rekord
-delivery-verdict (`recordedBy: "delivery"`) z najstarszym `recordedAt` — moment
-merga, czyli górne ograniczenie czasu otwarcia PR; **(c)** journal zadania
-(`docs/state/<TASK>.md`): pole `PR: #N` z bloku metadanych plus wpis
-`## <stamp> — closed: merged in #N`, którego stempel (lokalny, minutowy —
-`formatStamp`) jest momentem merge'a; wiele wpisów close dla tego samego PR
-zachowuje najnowszy. Pierwsze źródło, które pokrywa ticket, wygrywa — fallbacki
-wypełniają tylko tickety, których wcześniejsze źródła nie mają (górne ograniczenie
-nigdy nie bije prawdziwego stempla). Fakta niosą `prOpenSource`
+delivery-verdict (`recordedBy: "delivery"`) **tylko gdy przyjął delivery**
+(`verdict: PASS` — odrzucenie `reason: design|ci` to nie merge) z najstarszym
+`recordedAt` — moment merga, czyli górne ograniczenie czasu otwarcia PR; **(c)**
+journal zadania (`docs/state/<TASK>.md`): pole `PR: #N` z bloku metadanych plus
+wpis `## <stamp> — closed: merged in #N` z numerem zgodnym z metadanymi, którego
+stempel (lokalny, minutowy — `formatStamp`) jest momentem merge'a. Obie gałęzie
+(b) i (c) proxy ten sam moment merga i liczą spójnie NAJSTARSZY akceptowany
+stempel — pierwsze przyjęte delivery / pierwszy close kończy zegar ściany; późniejszy
+re-land tego samego PR-a go nie przesuwa. Pierwsze źródło, które pokrywa ticket,
+wygrywa — fallbacki wypełniają tylko tickety, których wcześniejsze źródła nie mają
+(górne ograniczenie nigdy nie bije prawdziwego stempla). Fakta niosą `prOpenSource`
 (`"publish-action" | "delivery-record" | "journal"`), a ticket bez żadnego źródła
 zostaje z `prOpenAt: null` — nic nie jest wymyślane. Kolekcjoner nie dzwoni po
 GitHub — działa na lokalnych store'ach przy każdym odświeżeniu dashboardu.

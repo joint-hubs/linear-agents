@@ -1084,3 +1084,89 @@ test("collectTicketFacts: a journal without a matching close entry stays null �
   assert.equal(f.prOpenAt, null);
   assert.equal(f.prOpenSource, null);
 });
+
+// ── FOC-1253 round 2 (review findings) ───────────────────────────────────────
+
+test("collectTicketFacts: a REJECTED delivery record never becomes prOpenAt — the accepted one wins", () => {
+  // REVIEW round 1: recordedBy "delivery" is stamped on FAIL records too
+  // (supervisor-verdict.mjs stamps it unconditionally), so the branch must
+  // filter on the verdict — a delivery-FAIL at iso(10) plus a delivery-PASS
+  // at iso(25) must stamp iso(25), never the rejection.
+  const run = fixtureRun("rundfp");
+  writeRegistry(run, { cDF: childEntry("cDF", { taskId: "FOC-118" }) });
+  writeVerdict(run, "FOC-118", 1, {
+    round: 1,
+    verdict: "fail",
+    reason: "design",
+    taskId: "FOC-118",
+    squad: "delivery",
+    recordedBy: "delivery",
+    recordedAt: iso(25),
+  });
+  writeVerdict(run, "FOC-118", 2, {
+    round: 2,
+    verdict: "pass",
+    taskId: "FOC-118",
+    squad: "delivery",
+    recordedBy: "delivery",
+    recordedAt: iso(10),
+    candidate: "abc1234",
+  });
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  const f = factsByTask(facts, "FOC-118");
+  assert.equal(f.prOpenAt, iso(10));
+  assert.equal(f.prOpenSource, "delivery-record");
+});
+
+test("collectTicketFacts: a fail-only delivery ticket stays null — no PR-open invented from a rejection", () => {
+  const run = fixtureRun("rundfo");
+  writeRegistry(run, { cDO: childEntry("cDO", { taskId: "FOC-119" }) });
+  writeVerdict(run, "FOC-119", 1, {
+    round: 1,
+    verdict: "fail",
+    reason: "ci",
+    taskId: "FOC-119",
+    squad: "delivery",
+    recordedBy: "delivery",
+    recordedAt: iso(10),
+  });
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  const f = factsByTask(facts, "FOC-119");
+  assert.equal(f.prOpenAt, null);
+  assert.equal(f.prOpenSource, null);
+});
+
+test("collectTicketFacts: multiple close entries for the same PR keep the EARLIEST — same semantics as the delivery branch", () => {
+  const run = fixtureRun("runmc");
+  writeRegistry(run, { cMC: childEntry("cMC", { taskId: "FOC-122" }) });
+  const journalDir = join(HOME, "journals-foc-1253f");
+  writeJournal(
+    journalDir,
+    "FOC-122",
+    "# FOC-122 — journal\n\nTask: FOC-122\nPR: #227\n\n" +
+      "## 2026-10-13 09:00 — closed: merged in #227\n\n" +
+      "reopened and re-closed, same PR\n\n## 2026-10-13 12:00 — closed: merged in #227\n",
+  );
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW, journalDir });
+  const f = factsByTask(facts, "FOC-122");
+  // the FIRST accepted close of the pinned PR ends the wall clock, not a
+  // later re-close
+  assert.equal(f.prOpenAt, new Date("2026-10-13T09:00").toISOString());
+  assert.equal(f.prOpenSource, "journal");
+});
+
+test("collectTicketFacts: a close entry for a DIFFERENT PR than the metadata stays null", () => {
+  const run = fixtureRun("rundp");
+  writeRegistry(run, { cDP: childEntry("cDP", { taskId: "FOC-124" }) });
+  const journalDir = join(HOME, "journals-foc-1253g");
+  writeJournal(
+    journalDir,
+    "FOC-124",
+    "# FOC-124 — journal\n\nTask: FOC-124\nPR: #228\n\n" +
+      "## 2026-10-13 10:00 — closed: merged in #999\n",
+  );
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW, journalDir });
+  const f = factsByTask(facts, "FOC-124");
+  assert.equal(f.prOpenAt, null);
+  assert.equal(f.prOpenSource, null);
+});

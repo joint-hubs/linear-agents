@@ -174,8 +174,10 @@ function readPublishActions(path) {
  * appended a heading straight after prose with no newline (FOC-1071's real
  * journal carries `…is lifted.## 2026-11-05 01:22 — closed: merged in #221`),
  * so a line-anchored parser would miss the only entry that has the stamp.
- * Several close entries for the same PR (a re-land) keep the LATEST — the
- * final merge is the moment the work actually landed.
+ * Several close entries for the same PR keep the EARLIEST — both this and the
+ * delivery-record branch proxy the SAME merge moment, and the first accepted
+ * close (like the first accepted delivery) is the moment the work actually
+ * landed; a later re-close is a re-land, not the wall clock's end.
  */
 function journalPrStamp(dir, taskId) {
   if (!dir || !isTicketId(taskId)) return null;
@@ -192,7 +194,7 @@ function journalPrStamp(dir, taskId) {
   for (const m of text.matchAll(/##\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*[—–-]\s*closed: merged in #(\d+)/g)) {
     if (m[2] !== pr.slice(1)) continue;
     const ms = Date.parse(`${m[1].replace(" ", "T")}`);
-    if (Number.isFinite(ms) && (best == null || ms > best)) best = ms;
+    if (Number.isFinite(ms) && (best == null || ms < best)) best = ms;
   }
   return best;
 }
@@ -447,7 +449,8 @@ export function collectTicketFacts({
           runId: record.unreadable ? null : record.runId ?? null,
           // FOC-1253: recordedBy === "delivery" marks the delivery verdict
           // record whose recordedAt is the merge moment — the second PR-open
-          // source (an upper bound of the actual PR-open).
+          // source (an upper bound of the actual PR-open). stamped on FAIL
+          // records too, so the branch pairs it with verdict === "PASS".
           recordedBy: record.unreadable ? null : record.recordedBy ?? null,
           reason: record.unreadable ? null : record.reason ?? null,
           at: record.recordedAt ?? null,
@@ -479,8 +482,9 @@ export function collectTicketFacts({
     facts.interventions = facts.interventionRows.length;
     // FOC-1253: the PR-open stamp's three sources, in precedence order — first
     // hit wins, a fallback only fills a ticket the earlier sources miss. (a)
-    // The publish-action record IS the PR-open moment. (b) The delivery
-    // verdict record's recordedAt is the merge moment — an UPPER bound of the
+    // The publish-action record IS the PR-open moment. (b) An ACCEPTED
+    // delivery verdict record's recordedAt (verdict PASS; a FAIL record is a
+    // rejection, not a merge) is the merge moment — an UPPER bound of the
     // PR-open, so it must never beat a real stamp. (c) The journal's close
     // entry is the same bound, read off docs/state. No source → null, and
     // prOpenSource stays null with it (no invention, no default).
@@ -492,8 +496,11 @@ export function collectTicketFacts({
       prSource = "publish-action";
     } else {
       let deliveryMs = null;
+      // A FAIL delivery record (`reason: design|ci`) carries recordedBy too —
+      // a rejection is not a merge, so only an ACCEPTED delivery (verdict
+      // PASS) may stamp the PR-open; a fail-only ticket stays null.
       for (const v of facts.verdicts) {
-        if (v.recordedBy !== "delivery") continue;
+        if (v.recordedBy !== "delivery" || v.verdict !== "PASS") continue;
         const ms = isoMs(v.at);
         if (ms != null && (deliveryMs == null || ms < deliveryMs)) deliveryMs = ms;
       }
