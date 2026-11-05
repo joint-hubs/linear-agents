@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PRINT_BG_WAIT_CEILING_MS, PRINT_BG_WAIT_ENV, TURN_END_CONTRACT, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { BASH_MAX_OUTPUT_ENV, PRINT_BG_WAIT_CEILING_MS, PRINT_BG_WAIT_ENV, TURN_END_CONTRACT, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
 import { attemptIdFor } from "./agent-launch-profile.mjs";
 import { scrubbedEnv, waitForStatus } from "./supervisor-test-fixtures.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
@@ -597,6 +597,34 @@ test("the resumed turn's env carries the same ceiling — the second carrier (FO
     // shape this suite exists to catch).
     if (env.LA_TASK_OWNER !== "supervisor") {
       fail(`turn ${turn} env carried LA_TASK_OWNER=${JSON.stringify(env.LA_TASK_OWNER)}`);
+    }
+  }
+});
+
+// ── Bash output cap (FOC-1072) ───────────────────────────────────────────────
+// The cap is an overlay key, so BOTH carriers must pick it up: turn 0 through
+// spawn's settings read, the resumed turn through its own fresh read. A resume
+// that dropped it would run uncapped — the exact FOC-171 drift shape this
+// suite exists to catch.
+test("both turns carry the Bash output cap from the overlay (FOC-1072)", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const envFile = join(runDir(runId), "env.log");
+  const settingsFile = join(runDir(runId), "settings.json");
+  writeFileSync(settingsFile, JSON.stringify({ bashOutputCapChars: 8192 }), "utf8");
+  const capEnv = { LA_SETTINGS_FILE: settingsFile };
+
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ENV_FILE: envFile, ...capEnv });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  parseOk(followup(runId, child.childId, [], { MOCK_CLAUDE_ENV_FILE: envFile, ...capEnv }));
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const envs = readFileSync(envFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (envs.length !== 2) fail(`expected 2 claude invocations, got ${envs.length}`);
+  for (const [turn, env] of envs.entries()) {
+    if (env[BASH_MAX_OUTPUT_ENV] !== "8192") {
+      fail(`turn ${turn} env carried ${BASH_MAX_OUTPUT_ENV}=${JSON.stringify(env[BASH_MAX_OUTPUT_ENV])}`);
     }
   }
 });

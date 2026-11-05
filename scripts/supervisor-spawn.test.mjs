@@ -26,6 +26,8 @@ import {
   ensureWorktree,
   installWorktreeDeps,
   killTree,
+  BASH_MAX_OUTPUT_ENV,
+  bashOutputCapEnv,
   PRINT_BG_WAIT_CEILING_MS,
   PRINT_BG_WAIT_ENV,
   TURN_END_CONTRACT,
@@ -1513,6 +1515,33 @@ test("the ceiling is one finite constant above the full suite, exposed through o
   const env = printBgWaitCeilingEnv();
   if (JSON.stringify(env) !== `{"${PRINT_BG_WAIT_ENV}":"2700000"}`) {
     fail(`the helper does more than carry the value: ${JSON.stringify(env)}`);
+  }
+});
+
+// ── Bash output cap (FOC-1072) ───────────────────────────────────────────────
+// The overlay key bashOutputCapChars rides the spawn env as
+// BASH_MAX_OUTPUT_LENGTH — the same seam pattern as the bg-wait ceiling: one
+// pure helper is the single source, and unset injects nothing (the harness
+// default 30000 stays in force). The CLI resolves the env var with a hard
+// ceiling of 150000, so nothing above it may ever reach the env.
+test("bashOutputCapEnv: set cap becomes the env var, unset/invalid injects nothing (FOC-1072)", () => {
+  if (BASH_MAX_OUTPUT_ENV !== "BASH_MAX_OUTPUT_LENGTH") {
+    fail(`the env name drifted: ${BASH_MAX_OUTPUT_ENV}`);
+  }
+  if (JSON.stringify(bashOutputCapEnv(8192)) !== '{"BASH_MAX_OUTPUT_LENGTH":"8192"}') {
+    fail(`the helper does more than carry the value: ${JSON.stringify(bashOutputCapEnv(8192))}`);
+  }
+  // unset = harness default: no env var injected at all
+  for (const unset of [null, undefined]) {
+    if (JSON.stringify(bashOutputCapEnv(unset)) !== "{}") {
+      fail(`unset cap (${unset}) must inject nothing, got ${JSON.stringify(bashOutputCapEnv(unset))}`);
+    }
+  }
+  // garbage that a mis-validated overlay could carry must never become an env var
+  for (const badValue of [0, -1, 1.5, "8192", Infinity, NaN]) {
+    if (JSON.stringify(bashOutputCapEnv(badValue)) !== "{}") {
+      fail(`invalid cap ${String(badValue)} must inject nothing, got ${JSON.stringify(bashOutputCapEnv(badValue))}`);
+    }
   }
 });
 

@@ -341,7 +341,20 @@ export function validateSettings(obj) {
   if (!isPlainObject(obj)) return { ok: false, errors: ["settings: must be a JSON object"] };
 
   for (const key of Object.keys(obj)) {
-    if (key !== "provider" && key !== "routing" && key !== "publish" && key !== "ownership" && key !== "retention" && key !== "integrations" && key !== "taskSessions" && key !== "targets") errors.push(`${key}: unknown top-level key`);
+    if (key !== "provider" && key !== "routing" && key !== "publish" && key !== "ownership" && key !== "retention" && key !== "integrations" && key !== "taskSessions" && key !== "targets" && key !== "bashOutputCapChars") errors.push(`${key}: unknown top-level key`);
+  }
+
+  // FOC-1072: the Bash output cap, in characters, injected into children as
+  // BASH_MAX_OUTPUT_LENGTH. Bounds are the harness's own: the CLI resolves
+  // that env var with a hard ceiling of 150000 (values above are silently
+  // capped), so the overlay refuses anything above it instead of writing a
+  // value the harness would clamp; the floor 1000 keeps useless values out.
+  // null = unset = the harness default (30000), no env var injected.
+  if (obj.bashOutputCapChars !== undefined && obj.bashOutputCapChars !== null) {
+    const v = obj.bashOutputCapChars;
+    if (!Number.isInteger(v) || v < 1000 || v > 150000) {
+      errors.push("bashOutputCapChars: must be null or an integer between 1000 and 150000 (characters; the CLI caps the env var at 150000)");
+    }
   }
 
   // The publish overlay (FOC-788 follow-up): the dashboard's push/PR act as a

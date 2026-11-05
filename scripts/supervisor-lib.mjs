@@ -83,6 +83,21 @@ export const PRINT_BG_WAIT_ENV = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS";
 export const PRINT_BG_WAIT_CEILING_MS = 2_700_000; // 45 min — see rationale above
 export const printBgWaitCeilingEnv = () => ({ [PRINT_BG_WAIT_ENV]: String(PRINT_BG_WAIT_CEILING_MS) });
 
+// The Bash output cap (FOC-1072): the settings overlay key bashOutputCapChars
+// (fenix-settings.mjs validates it — integer 1000..150000) rides the spawn env
+// as BASH_MAX_OUTPUT_LENGTH, the Claude Code env var that sizes the inline
+// Bash result window in CHARACTERS (CLI default 30000; the CLI itself caps the
+// env value at 150000, hence the overlay ceiling). Unset in the overlay → the
+// helper returns {} and the harness default stays in force: no env var is
+// injected, so the child behaves exactly as an unmanaged Claude Code would.
+// The cap value comes from the measured distribution — see
+// docs/decisions/bash-output-distribution-2026-11-05.md (p50 512 B, p80 ~2 KB,
+// p95 ~6.6 KB → 8192 leaves ~96.7 % of calls untouched while the ~3.3 % tail
+// carries ~30 % of the bytes, middle-truncated with the harness's own notice).
+export const BASH_MAX_OUTPUT_ENV = "BASH_MAX_OUTPUT_LENGTH";
+export const bashOutputCapEnv = (capChars) =>
+  Number.isInteger(capChars) && capChars > 0 ? { [BASH_MAX_OUTPUT_ENV]: String(capChars) } : {};
+
 // The turn-end contract (FOC-522, option B): the rule the ceiling alone cannot
 // enforce — the ceiling bounds the WAIT, it does not make ending a turn on a
 // live background task safe. A child that ends its turn on one still loses it.

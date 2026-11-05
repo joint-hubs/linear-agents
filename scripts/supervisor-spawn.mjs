@@ -75,6 +75,7 @@ import {
   killTree,
   listWorktrees,
   printBgWaitCeilingEnv,
+  bashOutputCapEnv,
   readHeld,
   hasPriceRow,
   parseArgs,
@@ -1294,6 +1295,11 @@ const childEnv = {
   // see the rationale at PRINT_BG_WAIT_CEILING_MS in supervisor-lib.mjs. Built
   // through the helper so the value has exactly one source.
   ...printBgWaitCeilingEnv(),
+  // FOC-1072: the Bash output cap from the settings overlay (bashOutputCapChars),
+  // injected as BASH_MAX_OUTPUT_LENGTH. Unset in the overlay → {} — the harness
+  // default (30000) stays in force, no env var injected. The overlay key is
+  // read from `settings` above; the helper is the single source for the env name.
+  ...bashOutputCapEnv(settings?.bashOutputCapChars ?? null),
   // The launch-owned config dir assembled above — this child's own copy of the
   // squad sources plus this turn's tool-profile snapshot — no longer the
   // shared squad dir.

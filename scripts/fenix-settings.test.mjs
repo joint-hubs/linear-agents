@@ -1167,3 +1167,39 @@ test("fenix settings set targets.firstTimeRight <value> persists through the dot
   // an unknown metric key is refused on the CLI path too
   await assert.rejects(() => runSet(file, "targets.sneaky", "1"));
 });
+
+// ── FOC-1072: the Bash output cap ────────────────────────────────────────────
+// bashOutputCapChars rides the spawn env as BASH_MAX_OUTPUT_LENGTH. Bounds are
+// the harness's own: the CLI resolves the env var with default 30000 and a
+// hard ceiling of 150000 (values above are silently capped), so the overlay
+// refuses anything above 150000 instead of writing a value the harness would
+// clamp. The floor 1000 keeps useless values out of the file.
+
+test("validateSettings: bashOutputCapChars accepts null and integers 1000..150000", () => {
+  assert.deepEqual(validateSettings({ bashOutputCapChars: null }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ bashOutputCapChars: 8192 }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ bashOutputCapChars: 150000 }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({}), { ok: true, errors: [] }); // absent = unset
+});
+
+test("validateSettings: bashOutputCapChars rejects non-integers and out-of-bounds values", () => {
+  const bad = (v) => validateSettings({ bashOutputCapChars: v });
+  for (const value of [999, 150001, 2_000_000, 0, -5, 1024.5, "8192"]) {
+    const result = bad(value);
+    assert.equal(result.ok, false, `expected ${JSON.stringify(value)} to be refused`);
+    assert.ok(
+      result.errors.some((e) => e.includes("bashOutputCapChars")),
+      `error for ${JSON.stringify(value)} must name the key: ${JSON.stringify(result.errors)}`,
+    );
+  }
+});
+
+test("fenix settings set bashOutputCapChars persists; out-of-range refused on the CLI path", async () => {
+  const dir = tempDir();
+  const file = settingsFile(dir);
+  await runSet(file, "bashOutputCapChars", "8192");
+  const stored = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(stored.bashOutputCapChars, 8192);
+  // the value the harness would silently clamp is refused before it lands
+  await assert.rejects(() => runSet(file, "bashOutputCapChars", "2000000"));
+});

@@ -57,6 +57,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "bash-output-distribution.test.mjs",
+      "reason": "isolation audit FOC-1072: openTelemetryDb fixtures under mkdtemp/tmpdir only (the fixture carries the real store schema but lives in a temp file); no ports, no socket binds, no real-repo writes, no production telemetry DB — the CLI store path is only taken outside tests"
+    },
+    {
       "file": "bootstrap-linear.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
