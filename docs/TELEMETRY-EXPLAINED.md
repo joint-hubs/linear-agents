@@ -580,6 +580,17 @@ question answers recorded for the ticket" — dokładnie pokrywa się z zakresem
 intewencji człowieka (gate + hold + odpowiedzi na pytania), więc niczego nie
 przedefiniowywaliśmy; mianownik to tickety z dziećmi.
 
+**Skąd przychodzą odpowiedzi (FOC-1253)** — z JEDNEGO strumienia:
+`<stateHome>/<runId>/edits.jsonl` (wiersze `type` ∈ `gate-answer` / `hold-answer` /
+`ask-answer`), dopisywanego wyłącznie przez `recordAnswerRow` (`scripts/agent-records.mjs`).
+Piszą do niego obie drogi odpowiedzi: dashboard (Cockpit — po udanej odpowiedzi i
+notify, z realnym `notified`) oraz CLI (`supervisor-gate.mjs answer --gate|--hold`,
+które od FOC-1253 dopisują ten sam kształt wiersza: `who: "supervisor-cli"`,
+`notified: true` — odpowiedź CLI nie budzi supervisora, tak jak nigdy wcześniej nie
+robiono). Odpowiedź na gate jest policzona raz — gate odpowiada się raz; zapis
+best-effort: nieudany wiersz audytu nie psuje odpowiedzi i nie ginie po cichu
+(trafia na stderr). Klucz definicji bez zmian.
+
 **costPerTicketBySize** (nowy) — koszt all-in per ticket (`ticketCostReport`, `§11`),
 podzielony po **rozmiarze triage'u** runu (`.state/supervisor/<runId>/triage.json`,
 pole `size` ∈ small/medium/large, join po `triage.issue == taskId`; najnowszy run
@@ -587,10 +598,25 @@ wygrywa). Ticket bez rozmiaru triage'u i ticket zerowy kosztowo nie trafiają do
 żadnego kubełka. Per kubełek: **p50 (mediana) z pasmem p20–p80 (nearest rank)**.
 
 **wallTimeToPr** (nowy) — czas ściany od pierwszej zarejestrowanej aktywności ticketa
-(`firstActivityAt`) do otwarcia pierwszego udanego PR (najstarszy rekord
-`action === "pr", ok === true` w `<stateRoot>/publish-actions.jsonl`). W godzinach,
+(`firstActivityAt`) do otwarcia pierwszego udanego PR. W godzinach,
 jako rozkład: **p50 z pasmem p20–p80 (nearest rank)**; `pr < start` (przeskok zegara)
 jest wykluczany. `numerator`/`denominator` są uczciwie `null` — to rozkład, nie ułamek.
+
+**Moment otwarcia PR — trzy źródła z precepcją (FOC-1253).** Fakty kolekcjonera
+(`collectTicketFacts`) biorą najstarszy stempel PR-open per ticket z TRZECH źródeł,
+w kolejności: **(a)** najstarszy rekord `action === "pr", ok === true` w
+`<stateRoot>/publish-actions.jsonl` — PRAWDZIWY moment otwarcia; **(b)** rekord
+delivery-verdict (`recordedBy: "delivery"`) z najstarszym `recordedAt` — moment
+merga, czyli górne ograniczenie czasu otwarcia PR; **(c)** journal zadania
+(`docs/state/<TASK>.md`): pole `PR: #N` z bloku metadanych plus wpis
+`## <stamp> — closed: merged in #N`, którego stempel (lokalny, minutowy —
+`formatStamp`) jest momentem merge'a; wiele wpisów close dla tego samego PR
+zachowuje najnowszy. Pierwsze źródło, które pokrywa ticket, wygrywa — fallbacki
+wypełniają tylko tickety, których wcześniejsze źródła nie mają (górne ograniczenie
+nigdy nie bije prawdziwego stempla). Fakta niosą `prOpenSource`
+(`"publish-action" | "delivery-record" | "journal"`), a ticket bez żadnego źródła
+zostaje z `prOpenAt: null` — nic nie jest wymyślane. Kolekcjoner nie dzwoni po
+GitHub — działa na lokalnych store'ach przy każdym odświeżeniu dashboardu.
 
 Pasma **p20–p50–p80** liczy wyłącznie `percentileNearestRank` (`ceil(p/100·n)−1`);
 wariant z interpolacją liniową istnieje w innych raportach i NIE jest tu mieszany.
