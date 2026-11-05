@@ -35,9 +35,11 @@ import {
   gatesDir,
   hasPendingGate,
   runDir,
+  supervisorStateHome,
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
+import { collectTicketFacts } from "./work-board.mjs";
 import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -402,6 +404,53 @@ test("other kinds still take prose answers", () => {
   const runId = fixtureRun();
   const id = seedGate(runId);
   assert.equal(gate(["answer", "--run", runId, "--gate", id, "--text", "rób A, bo B wymaga instalacji globalnej"]).status, 0);
+});
+
+// FOC-1253: the CLI answer path must land in the SAME audit stream the
+// dashboard writes (edits.jsonl via recordAnswerRow) — otherwise a gate the
+// Supervisor answered from the console never counts as the ticket's
+// intervention and the /costs card reads 0 for a real answer.
+test("a CLI answer lands in edits.jsonl and counts as the ticket's intervention", () => {
+  // A unique taskId (FOC-998, not the default FOC-999): collectTicketFacts
+  // aggregates over EVERY run in the state home, and this suite's other
+  // fixtures answer FOC-999 gates — their rows must not land in this count.
+  const runId = fixtureRun({ child: false });
+  writeFileSync(join(runDir(runId), "triage.json"), JSON.stringify({ issue: "FOC-998", verdict: "dev" }));
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "dev-1": {
+        childId: "dev-1", squad: "dev", taskId: "FOC-998",
+        sessionId: "sess-1", status: "exited", turns: [{ pid: 1 }],
+        worktree: join(tmpdir(), "fake-worktree"), permissionMode: "bypassPermissions",
+      },
+    },
+    rounds: {},
+  });
+  const question = seedGate(runId);
+  const cleanup = seedGate(runId, { kind: "cleanup-approval" });
+  assert.equal(gate(["answer", "--run", runId, "--gate", question, "--text", "rób A"]).status, 0);
+  assert.equal(gate(["answer", "--run", runId, "--gate", cleanup, "--text", "tak"]).status, 0);
+
+  const editsPath = join(runDir(runId), "edits.jsonl");
+  assert.ok(existsSync(editsPath), "the CLI answer must append to edits.jsonl");
+  const rows = readFileSync(editsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.type), ["gate-answer", "gate-answer"]);
+  assert.deepEqual(
+    rows.map((r) => r.path).sort(),
+    [`gates/${cleanup}.json`, `gates/${question}.json`].sort(),
+  );
+  assert.ok(rows.every((r) => r.who === "supervisor-cli"), "the CLI names itself as the answerer");
+  assert.ok(rows.every((r) => r.notified === true), "a CLI answer wakes nobody — today's behaviour, kept");
+  assert.deepEqual(rows.map((r) => r.seq), [1, 2], "one row per answer, in the single-writer seq order");
+
+  // The dashboard-side reader: the rows must count toward the run's ticket.
+  const facts = collectTicketFacts({ stateHome: supervisorStateHome(), days: 30, now: Date.now() });
+  const f = facts.find((t) => t.taskId === "FOC-998");
+  const mine = f.interventionRows.filter((r) => r.path === `gates/${question}.json` || r.path === `gates/${cleanup}.json`);
+  assert.equal(mine.length, 2, "both CLI answers count as interventions for the ticket");
+  assert.equal(f.interventions, 2, "and nothing else lands on this ticket");
 });
 
 test("a draft-approval answer is free prose — reject with the reason attached", () => {

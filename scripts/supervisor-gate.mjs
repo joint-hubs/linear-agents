@@ -77,6 +77,10 @@ import {
   writeHolds,
 } from "./supervisor-lib.mjs";
 import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
+// FOC-1253: the CLI answer must land in the SAME audit stream the dashboard
+// writes — recordAnswerRow is edits.jsonl's single writer (its own header pins
+// the seq discipline), so the row goes through it, never a direct append.
+import { recordAnswerRow } from "./agent-records.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
 // The well-known set (§2.6). Extending it is a script edit plus a spec note —
@@ -800,6 +804,20 @@ function cmdAnswer(args) {
       failFromThrow(err);
     }
 
+    // FOC-1253: the CLI answer lands in edits.jsonl, the same stream the
+    // dashboard's route appends to — interventions count both. Best-effort:
+    // the answer IS recorded (the hold store is the primary flow), a failed
+    // audit row must not fail the answer, and it is never skipped silently —
+    // it goes to stderr like the autoLabel warnings below. `who` names the
+    // console path (the CLI has no --answered-by), and `notified: true` keeps
+    // today's wake behaviour: a CLI answer never produced a row, so it must
+    // not start one (the notice was delivered where the answer happened).
+    try {
+      recordAnswerRow({ runId, kind: "hold-answer", id: args.hold, text, who: "supervisor-cli", notified: true });
+    } catch (err) {
+      console.error("[hold] edit row failed:", err?.message ?? err);
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -827,6 +845,15 @@ function cmdAnswer(args) {
     gate = answerGate({ runId, gateId, text, note });
   } catch (err) {
     failFromThrow(err);
+  }
+
+  // FOC-1253: same audit row as the dashboard's gate answer — see the hold
+  // branch above for the best-effort / stderr / notified reasoning. The row
+  // is written AFTER the gate record update succeeded (answerGate returned).
+  try {
+    recordAnswerRow({ runId, kind: "gate-answer", id: gateId, text, who: "supervisor-cli", notified: true });
+  } catch (err) {
+    console.error("[gate] edit row failed:", err?.message ?? err);
   }
 
   // FOC-449 auto-join: the recorded answer IS the outcome for every decision
