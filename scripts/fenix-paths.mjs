@@ -31,6 +31,13 @@ export function runsDir(env = process.env) {
   return join(stateRoot(env), "runs");
 }
 
+// The per-task journals (FOC-1253): the repo tree's docs/state — NOT under the
+// mutable state root, because a journal is versioned repo content, not run
+// state. Resolved against this checkout's root, like stateRoot's default.
+export function docsStateDir() {
+  return join(REPO_ROOT, "docs", "state");
+}
+
 export function dataHome(env = process.env, platform = process.platform) {
   if (env.LA_DATA_HOME) return env.LA_DATA_HOME;
   if (platform === "win32") {

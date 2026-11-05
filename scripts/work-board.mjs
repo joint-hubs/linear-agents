@@ -163,6 +163,42 @@ function readPublishActions(path) {
   return rows;
 }
 
+/**
+ * The PR-open stamp from the task journal (FOC-1253, source c): the `PR: #N`
+ * metadata line names the PR and the `## <stamp> — closed: merged in #N`
+ * heading gives the merge moment — a LOCAL wall-clock stamp (state-journal's
+ * formatStamp), minute precision. A missing file, a missing `PR:` line or a
+ * close entry naming a DIFFERENT PR costs nothing: null, never invented.
+ *
+ * The close heading is NOT anchored on `^`: state-journal's addEntry once
+ * appended a heading straight after prose with no newline (FOC-1071's real
+ * journal carries `…is lifted.## 2026-11-05 01:22 — closed: merged in #221`),
+ * so a line-anchored parser would miss the only entry that has the stamp.
+ * Several close entries for the same PR keep the EARLIEST — both this and the
+ * delivery-record branch proxy the SAME merge moment, and the first accepted
+ * close (like the first accepted delivery) is the moment the work actually
+ * landed; a later re-close is a re-land, not the wall clock's end.
+ */
+function journalPrStamp(dir, taskId) {
+  if (!dir || !isTicketId(taskId)) return null;
+  let text;
+  try {
+    text = readFileSync(join(dir, `${taskId}.md`), "utf8");
+  } catch {
+    return null;
+  }
+  // The metadata block is everything before the first entry heading.
+  const pr = text.split("\n## ")[0].match(/^PR: (#\d+)\s*$/m)?.[1];
+  if (!pr) return null;
+  let best = null;
+  for (const m of text.matchAll(/##\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*[—–-]\s*closed: merged in #(\d+)/g)) {
+    if (m[2] !== pr.slice(1)) continue;
+    const ms = Date.parse(`${m[1].replace(" ", "T")}`);
+    if (Number.isFinite(ms) && (best == null || ms < best)) best = ms;
+  }
+  return best;
+}
+
 /** Every readable gate file in the run; unreadable ones are skipped (W1 rule). */
 function scanGatesHome(home, runId) {
   const dir = join(home, runId, "gates");
@@ -232,8 +268,11 @@ const emptyFacts = (taskId) => ({
   interventionRows: [],
   // FOC-1071: the run's triage size (small/medium/large) for the triage
   // ticket, and the earliest successful PR open for the wall-time metric.
+  // FOC-1253: prOpenSource names which of the three PR-open sources supplied
+  // it ("publish-action" | "delivery-record" | "journal"), null when unset.
   size: null,
   prOpenAt: null,
+  prOpenSource: null,
 });
 
 const childFact = (runId, child) => {
@@ -276,6 +315,10 @@ export function collectTicketFacts({
   days = 30,
   now = Date.now(),
   publishActionsPath = null,
+  // FOC-1253: the repo's docs/state directory, for the journal PR-open source.
+  // Injectable like publishActionsPath — the collector stays pure; callers that
+  // do not pass it simply never see the journal source (null, not a guess).
+  journalDir = null,
 } = {}) {
   const home = stateHome ?? supervisorStateHome();
   const useLib = home === supervisorStateHome();
@@ -404,6 +447,11 @@ export function collectTicketFacts({
           // to this run, so cross-run same-numbered rounds never pair. null
           // (legacy/unreadable) pairs positionally only.
           runId: record.unreadable ? null : record.runId ?? null,
+          // FOC-1253: recordedBy === "delivery" marks the delivery verdict
+          // record whose recordedAt is the merge moment — the second PR-open
+          // source (an upper bound of the actual PR-open). stamped on FAIL
+          // records too, so the branch pairs it with verdict === "PASS".
+          recordedBy: record.unreadable ? null : record.recordedBy ?? null,
           reason: record.unreadable ? null : record.reason ?? null,
           at: record.recordedAt ?? null,
           path: useLib
@@ -426,14 +474,49 @@ export function collectTicketFacts({
       if (taskId === triageIssue && triage.size != null && facts.size == null) {
         facts.size = triage.size;
       }
-      const prMs = prOpenByTicket.get(taskId);
-      if (prMs != null) facts.prOpenAt = new Date(prMs).toISOString();
     }
   }
 
   for (const facts of tickets.values()) {
     facts.rounds = facts.verdicts.length;
     facts.interventions = facts.interventionRows.length;
+    // FOC-1253: the PR-open stamp's three sources, in precedence order — first
+    // hit wins, a fallback only fills a ticket the earlier sources miss. (a)
+    // The publish-action record IS the PR-open moment. (b) An ACCEPTED
+    // delivery verdict record's recordedAt (verdict PASS; a FAIL record is a
+    // rejection, not a merge) is the merge moment — an UPPER bound of the
+    // PR-open, so it must never beat a real stamp. (c) The journal's close
+    // entry is the same bound, read off docs/state. No source → null, and
+    // prOpenSource stays null with it (no invention, no default).
+    let prMs = null;
+    let prSource = null;
+    const publishMs = prOpenByTicket.get(facts.taskId);
+    if (publishMs != null) {
+      prMs = publishMs;
+      prSource = "publish-action";
+    } else {
+      let deliveryMs = null;
+      // A FAIL delivery record (`reason: design|ci`) carries recordedBy too —
+      // a rejection is not a merge, so only an ACCEPTED delivery (verdict
+      // PASS) may stamp the PR-open; a fail-only ticket stays null.
+      for (const v of facts.verdicts) {
+        if (v.recordedBy !== "delivery" || v.verdict !== "PASS") continue;
+        const ms = isoMs(v.at);
+        if (ms != null && (deliveryMs == null || ms < deliveryMs)) deliveryMs = ms;
+      }
+      if (deliveryMs != null) {
+        prMs = deliveryMs;
+        prSource = "delivery-record";
+      } else {
+        const journalMs = journalPrStamp(journalDir, facts.taskId);
+        if (journalMs != null) {
+          prMs = journalMs;
+          prSource = "journal";
+        }
+      }
+    }
+    facts.prOpenAt = prMs != null ? new Date(prMs).toISOString() : null;
+    facts.prOpenSource = prSource;
     const stamps = [
       ...facts.children.flatMap((c) => [c.startedAt, c.endedAt, ...c.turns.flatMap((t) => [t.startedAt, t.endedAt])]),
       ...facts.verdicts.map((v) => v.at),

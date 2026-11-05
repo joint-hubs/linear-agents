@@ -38,7 +38,7 @@ import { readSettings } from "./fenix-settings.mjs";
 import { hostBase, hostRequest, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
 import { graphql, workspaceEnabled, integrationOffMessage } from "./linear-client.mjs";
 import { readRegistry, supervisorStateHome } from "./supervisor-lib.mjs";
-import { hostTokenPath, squadConfigDir, stateRoot } from "./fenix-paths.mjs";
+import { docsStateDir, hostTokenPath, squadConfigDir, stateRoot } from "./fenix-paths.mjs";
 import { resolveTaskKey, issuePartOf, OWNER_STATUSES, taskSessionsDbPath } from "./task-sessions.mjs";
 import { pidAlive } from "./supervisor-current-run.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
@@ -150,8 +150,10 @@ export function ticketFacts() {
     days: 30,
     now: new Date(now),
     // FOC-1071: the PR-open records at the state root feed the wall-time
-    // metric — the same sink publish-exec appends to.
+    // metric — the same sink publish-exec appends to. FOC-1253: the repo's
+    // task journals are the fallback PR-open source when the sink has no row.
     publishActionsPath: join(stateRoot(), "publish-actions.jsonl"),
+    journalDir: docsStateDir(),
   });
   factsCache = { facts, at: now };
   return facts;

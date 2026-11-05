@@ -24,7 +24,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { readSettings } from "./fenix-settings.mjs";
-import { stateRoot } from "./fenix-paths.mjs";
+import { docsStateDir, stateRoot } from "./fenix-paths.mjs";
 import { supervisorStateHome } from "./supervisor-lib.mjs";
 import { telemetryDbPath, ticketCostReport } from "./telemetry-store.mjs";
 import { collectTicketFacts } from "./work-board.mjs";
@@ -130,6 +130,7 @@ async function main() {
     days,
     now,
     publishActionsPath: resolve(stateRoot(), "publish-actions.jsonl"),
+    journalDir: docsStateDir(),
   });
   const db = new DatabaseSync(resolve(telemetryDbPath()), { readOnly: true });
   let reports;
