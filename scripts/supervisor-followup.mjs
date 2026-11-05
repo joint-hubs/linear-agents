@@ -18,7 +18,8 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { squadConfigDir } from "./fenix-paths.mjs";
+import { squadConfigDir, settingsPath } from "./fenix-paths.mjs";
+import { readSettings } from "./fenix-settings.mjs";
 import { childProviderEnv } from "./child-model.mjs";
 import {
   actorIdFor,
@@ -45,6 +46,7 @@ import {
   killTree,
   parseArgs,
   printBgWaitCeilingEnv,
+  bashOutputCapEnv,
   readRegistry,
   isPathSafeRunId,
   roundsAcross,
@@ -368,6 +370,22 @@ if (providerEnv.error) {
   });
 }
 
+// FOC-1072: the Bash output cap rides the resume env exactly as it rides turn
+// 0's — the overlay is read FRESH here (spawn refuses on an unreadable
+// overlay, and a resume must not quietly drop the cap an operator configured
+// between the two turns), so the two turn paths cannot drift on it (the
+// FOC-171 shape).
+const settings = (() => {
+  try {
+    return readSettings({ path: settingsPath() });
+  } catch (err) {
+    failJson(`settings overlay is unreadable — refusing the turn: ${err.message.split("\n")[0]}`, {
+      reason: "settings-unreadable",
+      settings: settingsPath(),
+    });
+  }
+})();
+
 // ── the launch: a fresh owned config dir for THIS turn ───────────────────────
 // A resumed turn is a new process, so it gets a new launch dir
 // (runDir/launch/<childId>/turn-<n>) assembled the same way spawn assembles
@@ -577,6 +595,9 @@ const watcher = spawn(process.execPath, watcherArgs, {
     // drifted before (FOC-171, RUN_ID) — so the value comes from the shared
     // helper, and supervisor-followup.test.mjs proves this carrier sets it.
     ...printBgWaitCeilingEnv(),
+    // FOC-1072: the same cap spawn injects — unset in the overlay → {} (the
+    // harness default stays in force).
+    ...bashOutputCapEnv(settings?.bashOutputCapChars ?? null),
     // THIS turn's launch-owned config dir — this child's own squad sources,
     // its own copied resume history and this turn's tool-profile snapshot.
     CLAUDE_CONFIG_DIR: launch.configDir,
