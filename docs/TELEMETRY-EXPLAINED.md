@@ -652,6 +652,32 @@ deltę `current − previous` (`null` po obu stronach delta zostaje `null` — n
 
 ---
 
+## 13. Cap na output Bash — FOC-1072
+
+Dzieci uwielbiają przepalać cache na ogromnych wynikach `Bash`. Cap jest kluczem
+overlaya **`bashOutputCapChars`** (walidowany jak reszta: `null` = unset, inaczej
+integer **1000..150000**), który supervisor-spawn wstrzykuje dzieciom jako env
+**`BASH_MAX_OUTPUT_LENGTH`** — ten sam kanał, co sufit na background-wait. Unset
+(ść. brak klucza) znaczy: nic nie wstrzykujemy, działa domyślny harness (30000).
+
+Definicja (zweryfikowana na zainstalowanym CLI 2.1.317, nie z dokumentacji): wartość
+liczona jest w **znakach**, nie tokenach. CLI rozwiązuje env z domyślną wartością
+30000 i twardym sufitem **150000** (wartości wyżej są po cichu przycięte — dlatego
+overlay odrzuca cokolwiek powyżej). Wynik Bash ponad limit jest zapisywany do pliku,
+a model dostaje wynik ścięty **środkowo** (głowa + marker
+`[… output cut here; the full output was saved to a file …]` + ~1500-znakowy ogon),
+więc pełny output pozostaje osiągalny (ścieżka jedzie w wyniku toola).
+
+Pomiar, z którego wypływa rekomendowana wartość **8192**: p50 = 512 B, p80 ≈ 2.07 KB,
+p95 ≈ 6.6 KB (89 582 wywołań Bash w 30 dni; >8 KB to 3.3% wywołań niosących ~29.8%
+bajtów; nic nie przekracza 32 KB) — 8192 zostawia nietknięte ~96.7% wywołań.
+Źródło: `node scripts/bash-output-distribution.mjs --days 30` (read-only; rola
+lead/subagent z `agent_key = '_lead'`; NULL `tool_result_bytes` = nieznane, nigdy
+zero) oraz `docs/decisions/bash-output-distribution-2026-11-05.md`. Before/after na
+share cache-read trzeba zmierzyć po ~10 ticketach pod capem — tego sam skrypt da.
+
+---
+
 ## Ściąga na Q&A
 
 **„Skąd wiesz, ile to kosztowało?"** — Claude Code zapisuje każdą turę do transkryptu
