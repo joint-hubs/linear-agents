@@ -17,8 +17,10 @@
 // — not the squad split — is the axis a cap decision reads.
 //
 // The 3.3 GB store is never loaded whole: the query drives off
-// idx_tool_facts_canon (tool_name_canon = 'Bash') and rows stream through
-// StatementSync.iterate(), accumulating only the byte values per role.
+// idx_tool_facts_canon (tool_name_canon = 'bash' — LOWERCASE: that is the
+// canon key config/tool-norm.json maps the raw names Bash/PowerShell/… onto;
+// the raw name keeps its capital, the canon column does not) and rows stream
+// through StatementSync.iterate(), accumulating only the byte values per role.
 //
 // Read-only per docs/TELEMETRY-EXPLAINED.md: the CLI opens the store with
 // { readOnly: true }; the exported core takes an open db handle, so the test
@@ -153,14 +155,16 @@ NOTES:
   console.log(text);
 }
 
+// Binary units, honestly labelled: the divisors are 1024, so the labels say
+// KiB/MiB — a "MB" label on a /1024 value misstates the measurement by ~4.9%.
 function fmtBytes(n) {
-  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KiB`;
   return `${n} B`;
 }
 
 function pct(n) {
-  return n == null ? "—" : `${(n / 1024).toFixed(1)} KB`;
+  return n == null ? "—" : `${(n / 1024).toFixed(1)} KiB`;
 }
 
 function printHuman(result) {

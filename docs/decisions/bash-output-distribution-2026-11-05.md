@@ -54,9 +54,15 @@ share). The cap is per-process, so lead/subagent is the axis that matters.
 | subagent | 29359 | 120  | 535  | 2000   | 6553  | 19.6 %      | 72.0 %      | 3.5 %       | 30.5 %      | 0      |
 | all      | 89582 | 122  | 512  | 2069   | 6594  | 20.2 %      | 73.0 %      | 3.3 %       | 29.8 %      | 0      |
 
-Total Bash bytes in the window: 136.0 MB (lead 92.0 MB, subagent 44.0 MB).
+Total Bash bytes in the window: **129.7 MiB** (lead 87.8 MiB, subagent 41.9 MiB;
+= 136,023,300 B). Unit convention on this page: binary, honestly labelled
+(KiB/MiB — divisors of 1024). The verbatim CLI quote below is kept as printed
+by the version that produced the measurement, which labelled the same binary
+units `KB`/`MB`; the script's labels were fixed to `KiB`/`MiB` in the review
+round (a `MB` label on a /1024 value misstates the size by ~4.9 %), so
+re-runs print the honest labels.
 
-Verbatim CLI output (`--days 30`):
+Verbatim CLI output (`--days 30`, the measurement run):
 
 ```
 Bash tool-result size distribution (window: since 2026-10-06T04:28:21.401Z)
