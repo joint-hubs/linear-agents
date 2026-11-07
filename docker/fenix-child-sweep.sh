@@ -1,12 +1,14 @@
 #!/bin/sh
 # FOC-808 slice B: root-side sweep of stray child processes.
 #
-# In the container the watcher runs as `node` while the child tree runs as
-# `fenix-child` (fenix-spawn-as-child does setpriv --reuid), so /proc/<pid>/
-# environ of the strays is EACCES to node and its in-process /proc scan finds
-# nothing. This helper runs as root (via sudo, sudoers-fenix-child) and does
-# the same scan with real permissions. It validates its inputs itself and
-# signals ONLY processes whose environment carries the exact mark.
+# In the container the watcher runs as `node` while the child tree runs as the
+# run's pool user (fenix-child-<n>, FOC-878 — fenix-spawn-as-child does setpriv
+# --reuid), so /proc/<pid>/environ of the strays is EACCES to node and its
+# in-process /proc scan finds nothing. This helper runs as root (via sudo,
+# sudoers-fenix-child) and does the same scan with real permissions. It
+# validates its inputs itself and signals ONLY processes whose environment
+# carries the exact mark — the scan is deliberately uid-agnostic, so every
+# pool user is covered without a name list.
 #
 # Usage:
 #   fenix-child-sweep.sh <mark> <signal> [exclude-pid...]
@@ -22,11 +24,11 @@
 # The caller (supervisor-lib.mjs) parses these lines to know whom it listed,
 # waits the grace period, and re-runs with KILL for survivors.
 #
-# VM probe (integrator, on the VM): create a stray AS fenix-child, then sweep
+# VM probe (integrator, on the VM): create a stray AS a pool user, then sweep
 # it. The full spawn path needs an env file + worktree; a bare setpriv line
 # is enough for the probe:
-#   docker compose exec -T -u root fenix-supervisor setpriv --reuid=fenix-child \
-#     --regid=fenix --init-groups --no-new-privs \
+#   docker compose exec -T -u root fenix-supervisor setpriv --reuid=fenix-child-0 \
+#     --regid=fenix-run-0 --init-groups --no-new-privs \
 #     env LA_CHILD_MARK=foc808-probe sh -c 'sleep 300' &
 #   docker compose exec -T fenix-supervisor sudo -n /usr/local/sbin/fenix-child-sweep \
 #     foc808-probe TERM

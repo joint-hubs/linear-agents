@@ -453,13 +453,13 @@ await test("the CLI prints one line per row (contract shape)", async () => {
   }
 });
 
-await test("edits.jsonl is created 0664 (children and the Supervisor both append)", () => {
+await test("edits.jsonl is created 0660 (the run's audit stream — FOC-878: no other run gets read)", () => {
   if (process.platform === "win32") return; // POSIX mode bits only; the Windows run asserts the write succeeds above
   const modeRun = `${RUN}-mode`;
   mkdirSync(join(home, modeRun), { recursive: true });
   recordAnswerRow({ runId: modeRun, kind: "gate-answer", id: "gate-mode-1", text: "ok", who: "test", notified: false });
   const mode = statSync(join(home, modeRun, "edits.jsonl")).mode & 0o777;
-  eq(mode, 0o664, "edits.jsonl mode on creation");
+  eq(mode, 0o660, "edits.jsonl mode on creation");
 });
 
 console.log("\nagent-records: answer notice rows (FOC-783)");

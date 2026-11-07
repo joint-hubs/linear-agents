@@ -11,6 +11,8 @@ USER root
 ARG FENIX_UID=1000
 ARG FENIX_GID=1000
 ARG FENIX_CHILD_UID
+ARG FENIX_CHILD_GID
+ARG FENIX_CHILD_POOL
 # The script also ships inside the base image; copying it again lets the layer
 # build on a base published before FOC-777.
 COPY docker/set-uid.sh /usr/local/sbin/fenix-set-uid

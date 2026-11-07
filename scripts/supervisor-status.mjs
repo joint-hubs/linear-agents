@@ -270,6 +270,36 @@ function noteIsolation(snap) {
   }
 }
 
+// FOC-878: the run's identity — the pool user the container's
+// fenix-spawn-as-child claimed for this run (root-written identity.json in the
+// container), or null for a run without one. Best effort: a missing or torn
+// file reads as "no identity yet", never as an error — status must not fail
+// on the very surface it reports.
+function runIdentity(runId) {
+  try {
+    const ident = JSON.parse(readFileSync(join(runDir(runId), "identity.json"), "utf8"));
+    if (ident && typeof ident.slot === "number" && typeof ident.user === "string") {
+      return { slot: ident.slot, user: ident.user, group: ident.group ?? null };
+    }
+  } catch {
+    /* no identity.json — legacy run or native host */
+  }
+  return null;
+}
+
+// FOC-878: the identity's human line — `fenix-child-<n> (slot n)` for a pooled
+// run, `- (shared fenix-child)` for a legacy one sharing the single old child.
+// Container-only, same reasoning as noteIsolation: on a native host there is
+// no pool at all, so the line would be pure noise on stderr.
+function noteIdentity(snap) {
+  if (process.env.FENIX_IN_CONTAINER !== "1") return;
+  console.error(
+    snap.identity
+      ? `identity: ${snap.identity.user} (slot ${snap.identity.slot})`
+      : "identity: - (shared fenix-child)",
+  );
+}
+
 // FOC-607: requested vs served, per child. `model`/`modelSource` are the
 // registry pin spawn wrote; `initModel` is what the child's system/init
 // reported — taken from the latest turn that has one, else null (the event
@@ -365,9 +395,14 @@ function snapshot(runId, { childFilter, tail }) {
   // nothing has been declared — the snapshot carries both the object and the
   // one-line summary the briefing prints.
   const focus = readFocus(runId).current;
+  // FOC-878: run-level — one identity per run, beside the per-child registry
+  // copies (entry.identity), because the file is the live source and the run,
+  // not the child, is what claimed it.
+  const identity = runIdentity(runId);
   return {
     ok: true,
     runId,
+    identity,
     children,
     pendingGates: pendingGates(runId),
     focus,
@@ -711,6 +746,7 @@ if (!args.wait) {
   const snap = { ...snapshot(runId, { childFilter, tail }), mode: "snapshot" };
   noteUnverifiedCost(snap);
   noteIsolation(snap);
+  noteIdentity(snap);
   noteModelDrift(snap.children);
   noteStrayWorktrees(snap);
   noteDirtyExit(snap);
@@ -816,6 +852,7 @@ const final = snapshot(runId, { childFilter, tail });
 
 noteUnverifiedCost(final);
 noteIsolation(final);
+noteIdentity(final);
 noteModelDrift(final.children);
 noteStrayWorktrees(final);
 noteDirtyExit(final);

@@ -131,6 +131,11 @@ for active sessions vs cap and for journal files without an index entry. CLI out
 - `supervisor-orphans.mjs` marks as crashed only children whose recorded process identity (PID + boot id) belongs to
   this container; foreign identities are listed, never touched.
 - The host token and port stay per stack (documented as the boundary of this PRD).
+- FOC-878 (2026-11-07) closes the uid half: each run's children run as the run's own pool identity
+  (`fenix-child-<n>`, primary group `fenix-run-<n>`) — a static pool baked into the image, claimed at the run's first
+  spawn through `fenix-spawn-as-child` (root-written `identity.json`) — so cross-run writes to gates, verdicts,
+  `edits.jsonl`, the worktree and the kept-alive `child.env` are EACCES, while `node` (a member of every `fenix-run-<n>`)
+  keeps every write. Design: `docs/plans/foc-878-per-run-child-identity.md`; journal: `docs/state/FOC-878.md`.
 
 ### 6.6 Agent tool registry (ask 6)
 - `scripts/agent-tools.mjs`: `show <agent>` (allow / ask / deny from `agents/<agent>/settings.json`, MCP servers from

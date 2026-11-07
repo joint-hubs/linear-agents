@@ -17,7 +17,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve, posix } from "node:path";
+import { basename, join, dirname, resolve, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
@@ -159,13 +159,24 @@ export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(chi
 // true for the owner's primary group and for `fenix` when the node user is a
 // member of it; a mismatch is a real EPERM and is NOT swallowed. Windows has
 // no POSIX mode bits and may refuse the call outright, so it is skipped there.
+//
+// FOC-878: once the container's fenix-spawn-as-child has claimed this run a
+// pool identity (root-written identity.json), the four shared subdirs are the
+// HELPER's surface — chowned node:fenix-run-<n>, mode 02770 — and the 02775
+// re-pin here would hand them straight back to every run: `fenix` is a
+// supplementary group of every pool user, so 02775/group-fenix is
+// child-world-writable again. A run WITH an identity is therefore left
+// untouched; a run without one (fresh, legacy, native host) keeps the
+// original 02775 shape. writeRegistry calls this on every write, so the
+// skip is what keeps the helper's surface from being reverted mid-run.
 export function ensureRunDir(runId) {
   const base = runDir(runId);
   mkdirSync(base, { recursive: true, mode: 0o755 });
+  const hasIdentity = existsSync(join(base, "identity.json"));
   for (const sub of ["children", "gates", "verdicts", "launch"]) {
     const dir = join(base, sub);
     mkdirSync(dir, { recursive: true, mode: 0o2775 });
-    if (process.platform !== "win32") chmodSync(dir, 0o2775);
+    if (process.platform !== "win32" && !hasIdentity) chmodSync(dir, 0o2775);
   }
   // FOC-905: stamp who created this run dir — the orphan scan marks only what
   // this container owns, so the owner must be recorded at creation. Best
@@ -3356,29 +3367,56 @@ function parseSweepHelperLines(stdout) {
 }
 
 // FOC-980: inside the container the child's claude writes its transcripts
-// (<configDir>/projects/<slug>/<session>.jsonl) as fenix-child with mode 0600 —
-// the launch-time handover covered only what existed at spawn, so files created
-// DURING the turn are unreadable to node (the watcher's cost pricing, followup's
-// history copy, telemetry ingest all hit EACCES). This helper runs as the
-// child user (via `sudo -u fenix-child`, not root — the transcripts are
-// fenix-child-owned files and the owner may chmod its own files, so a raced
-// symlink can only touch files the child could chmod anyway) and grants ONLY
-// g+r on the launch dir's *.jsonl files. Same trust path
-// as CHILD_SWEEP_HELPER: the helper validates its inputs itself and refuses
-// anything that is not exactly one supervisor launch dir.
+// (<configDir>/projects/<slug>/<session>.jsonl) as its run's pool user
+// (fenix-child-<n>, FOC-878) with mode 0600 — the launch-time handover covered
+// only what existed at spawn, so files created DURING the turn are unreadable
+// to node (the watcher's cost pricing, followup's history copy, telemetry
+// ingest all hit EACCES). This helper runs as that same pool user (via
+// `sudo -u fenix-child-<n>`, not root — the transcripts are child-owned files
+// and the owner may chmod its own files, so a raced symlink can only touch
+// files the child could chmod anyway) and grants ONLY g+r on the launch dir's
+// *.jsonl files. Same trust path as CHILD_SWEEP_HELPER: the helper validates
+// its inputs itself and refuses anything that is not exactly one supervisor
+// launch dir.
 export const CHILD_SHARE_HELPER = "/usr/local/sbin/fenix-child-share";
-// FOC-980: the runas identity, the same name as CHILD_USER in
-// docker/fenix-spawn-as-child.sh — the sudoers entry keys on it.
-export const CHILD_SHARE_RUNAS = "fenix-child";
+// FOC-878: the fallback runas — slot 0, the pool slot that KEEPS the
+// pre-pool child's uid, so transcripts a legacy run left behind (owned by the
+// old single `fenix-child`) are still chmodded by their owner. The sudoers
+// runas is the %fenix-children umbrella, so one entry covers the whole pool.
+export const CHILD_SHARE_RUNAS = "fenix-child-0";
+
+// FOC-878: the runas for ONE run — its own pool user, resolved from the
+// identity.json the container's fenix-spawn-as-child claims for the run
+// (root:root 0644, one line of JSON). Anything unexpected (no file yet — a
+// run before its first spawn — an unreadable file, a name that is not a pool
+// user) falls back to CHILD_SHARE_RUNAS; sudoers then refuses anything the
+// umbrella does not cover, so a bogus identity file cannot widen the call.
+export function childShareRunas(runId) {
+  try {
+    const ident = JSON.parse(readFileSync(join(runDir(runId), "identity.json"), "utf8"));
+    if (typeof ident?.user === "string" && /^fenix-child-\d+$/.test(ident.user)) {
+      return ident.user;
+    }
+  } catch {
+    /* no identity yet — legacy run, the fallback runas applies */
+  }
+  return CHILD_SHARE_RUNAS;
+}
 
 // Exported so tests can pin the exact argv the production spawn passes to
 // sudo — the sudoers entry only matches this shape.
-export function childShareHelperArgv(args) {
-  return ["-n", "-u", CHILD_SHARE_RUNAS, CHILD_SHARE_HELPER, ...args];
+export function childShareHelperArgv(runas, args) {
+  return ["-n", "-u", runas, CHILD_SHARE_HELPER, ...args];
 }
 
 function runChildShareHelper(args) {
-  const r = spawnSync("sudo", childShareHelperArgv(args), { encoding: "utf8", timeout: 15_000 });
+  // The helper's single argument is the launch dir — inside the container
+  // <stateHome>/<run>/launch/<childId>/turn-N, exactly the shape the helper
+  // itself validates. The run (and with it the identity) comes from that
+  // prefix; any other shape keeps the fallback runas.
+  const m = /^(.*)\/launch(\/|$)/.exec(String(args[0] ?? ""));
+  const runas = m ? childShareRunas(basename(m[1])) : CHILD_SHARE_RUNAS;
+  const r = spawnSync("sudo", childShareHelperArgv(runas, args), { encoding: "utf8", timeout: 15_000 });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error ?? null };
 }
 

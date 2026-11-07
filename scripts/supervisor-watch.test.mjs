@@ -29,7 +29,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  CHILD_SHARE_RUNAS,
   childShareHelperArgv,
+  childShareRunas,
   descendantsInProcessTable,
   ensureRunDir,
   enumerateWin32Processes,
@@ -1796,19 +1798,39 @@ test("shareChildTranscripts passes the launch dir to the helper and reports the 
   );
 });
 
-// The production spawn is `sudo -n -u fenix-child /usr/local/sbin/fenix-child-share <dir>`
-// — the sudoers entry (docker/sudoers-fenix-child) only matches that exact
-// shape, so it is pinned here by value, not via the constants it would change
-// with (a silent constant change would break every share until sudo starts
-// refusing).
+// The production spawn is `sudo -n -u fenix-child-<n> /usr/local/sbin/fenix-child-share
+// <dir>` — the runas is the RUN's own pool user (FOC-878), and the sudoers entry
+// (docker/sudoers-fenix-child) only matches that exact shape, so the argv is
+// pinned here by value, not via the constants it would change with (a silent
+// constant change would break every share until sudo starts refusing).
 test("childShareHelperArgv pins the production sudo argv shape (FOC-980)", () => {
-  assert.deepEqual(childShareHelperArgv(["/data/state/supervisor/run-1/launch/dev-1"]), [
+  assert.deepEqual(childShareHelperArgv("fenix-child-3", ["/data/state/supervisor/run-1/launch/dev-1"]), [
     "-n",
     "-u",
-    "fenix-child",
+    "fenix-child-3",
     "/usr/local/sbin/fenix-child-share",
     "/data/state/supervisor/run-1/launch/dev-1",
   ]);
+});
+
+// FOC-878: the share runas is resolved per run from the identity.json the
+// container's spawn helper claims — and NOTHING ELSE can move it. The regex is
+// the whole attack surface: a pool user passes, everything else (root first)
+// falls back to the slot-0 default.
+test("childShareRunas resolves the run's pool user, with a hard fallback (FOC-878)", () => {
+  const run = "foc878-share";
+  ensureRunDir(run);
+  const identPath = join(stateHome, run, "identity.json");
+  // No identity yet (a run before its first spawn): the slot-0 fallback.
+  assert.equal(childShareRunas(run), CHILD_SHARE_RUNAS);
+  writeFileSync(identPath, JSON.stringify({ slot: 7, user: "fenix-child-7", group: "fenix-run-7" }) + "\n");
+  assert.equal(childShareRunas(run), "fenix-child-7");
+  // A name outside the pool is never forwarded to sudo — the fallback applies.
+  writeFileSync(identPath, JSON.stringify({ slot: 0, user: "root", group: "root" }) + "\n");
+  assert.equal(childShareRunas(run), CHILD_SHARE_RUNAS);
+  // Torn JSON reads as "no identity", not as an error.
+  writeFileSync(identPath, '{"slot": 9, "user": "fenix-chi');
+  assert.equal(childShareRunas(run), CHILD_SHARE_RUNAS);
 });
 
 test("shareChildTranscripts never throws on a failing helper — a structured skip instead", () => {

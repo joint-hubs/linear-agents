@@ -54,6 +54,7 @@ import {
   readRegistry,
   reapChildDescendants,
   rememberChildLineage,
+  runDir,
   shareChildTranscripts,
   stallSilenceMs,
   sweepChildProcesses,
@@ -235,6 +236,26 @@ const isolationWanted =
 const isolated = isolationWanted && !!process.env.CLAUDE_CONFIG_DIR && existsSync(HELPER);
 
 const childEnvFile = isolated ? join(process.env.CLAUDE_CONFIG_DIR, "child.env") : null;
+
+// FOC-878: the run's pool identity — claimed by the container's
+// fenix-spawn-as-child at the run's first spawn (root-written identity.json,
+// one line of JSON). The watcher outlives every spawn helper, so the turn end
+// is where the registry entry records it; identity.json's slot is REUSED by a
+// later run once this one is swept, so the entry is the durable record of
+// which pool user this child actually ran as. Best effort by design: a
+// missing/torn file (legacy run, native host) reads as "no identity", never as
+// an error — nothing here may gate the turn's bookkeeping.
+const readRunIdentity = () => {
+  try {
+    const ident = JSON.parse(readFileSync(join(runDir(runId), "identity.json"), "utf8"));
+    if (ident && typeof ident.slot === "number" && typeof ident.user === "string") {
+      return { slot: ident.slot, user: ident.user, group: ident.group ?? null };
+    }
+  } catch {
+    /* no identity.json — legacy run or native host */
+  }
+  return null;
+};
 const removeEnvFile = () => {
   if (!childEnvFile) return;
   try {
@@ -1215,6 +1236,11 @@ function finalizeTurn(code, signal) {
     note({ subtype: "agent_state_prune_skipped", message: reason });
   }
 
+  // FOC-878: read the run's identity once, at the same turn end that writes
+  // the entry — an isolated spawn has claimed it by now (the helper runs
+  // before the child), a legacy run reads as none.
+  const runIdentity = readRunIdentity();
+
   // The watcher's LAST registry write for this turn (see the FOC-1010 note
   // above): terminal status, exit details, cost, the closed turn record and the
   // prune record, in one read-modify-write.
@@ -1228,6 +1254,10 @@ function finalizeTurn(code, signal) {
     ...(isolationRefused
       ? { error: "isolated spawn refused by fenix-spawn-as-child (exit 97) — child not launched, no unisolated fallback" }
       : {}),
+    // FOC-878: the pool identity this run's children run under, recorded on
+    // the entry — the snapshot's per-child view of `who this child was`.
+    // Null (patch omitted) outside the container: no helper ever ran.
+    ...(runIdentity ? { identity: runIdentity } : {}),
     ...turnEndCostPatch({ entry, transcriptCost, results: resultCosts }),
     turns,
     // FOC-1222: the dirt the child left behind, visible on the entry itself.

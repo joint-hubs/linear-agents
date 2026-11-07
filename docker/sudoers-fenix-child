@@ -8,10 +8,18 @@ Defaults!/usr/local/sbin/fenix-spawn-as-child !requiretty
 # signal itself and signals only marked processes.
 node ALL=(root) NOPASSWD: /usr/local/sbin/fenix-child-sweep
 Defaults!/usr/local/sbin/fenix-child-sweep !requiretty
-# FOC-980: the transcript-share helper runs as the child user (fenix-child),
-# not root: the transcripts are fenix-child-owned files and the owner may
-# chmod its own files, so even a raced-in symlink can only touch files the
+# FOC-980 / FOC-878: the transcript-share helper runs as the child's own pool
+# user (fenix-child-<n> for the run's slot — the lib resolves it per run from
+# identity.json), not root: the transcripts are child-owned files and the owner
+# may chmod its own files, so even a raced-in symlink can only touch files the
 # child could chmod anyway. The helper validates the launch dir itself and
-# grants only g+r on *.jsonl files.
-node ALL=(fenix-child) NOPASSWD: /usr/local/sbin/fenix-child-share
+# grants only g+r on *.jsonl files. The runas is the %fenix-children umbrella
+# (every pool user is a member), so one entry covers the whole pool.
+node ALL=(%fenix-children) NOPASSWD: /usr/local/sbin/fenix-child-share
 Defaults!/usr/local/sbin/fenix-child-share !requiretty
+# FOC-878: the pool size reaches the spawn helper through env_keep — sudo
+# strips the caller's env, the image pins FENIX_CHILD_POOL (ENV), and the
+# isolation lane overrides it per invocation (FENIX_CHILD_POOL=1 for the
+# exhaustion probe). The helper re-validates every slot it scans against
+# /etc/passwd, so a spoofed larger pool buys nothing.
+Defaults!/usr/local/sbin/fenix-spawn-as-child env_keep += "FENIX_CHILD_POOL"

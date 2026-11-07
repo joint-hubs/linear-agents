@@ -73,15 +73,25 @@ COPY docker/set-uid.sh /usr/local/sbin/fenix-set-uid
 ARG FENIX_UID=1000
 ARG FENIX_GID=1000
 ARG FENIX_CHILD_UID
+ARG FENIX_CHILD_GID
+# FOC-878: the pool size (default 16). Also pinned as ENV below so the
+# entrypoint's pool-group skip and the spawn helper's slot scan see the same
+# number at runtime (sudo strips the caller's env; sudoers env_keep puts this
+# one variable through for the helper).
+ARG FENIX_CHILD_POOL=16
 
-# FOC-802: an unprivileged child identity so spawned agents do not run as the
-# Supervisor's user. `fenix` is the shared group: children and the Supervisor
-# (node joins as a supplementary member) cooperate through setgid + g+rwX on
-# the shared /data trees only. Group `fenix` gets gid $FENIX_GID when that gid
-# is free — normally it is NOT, because FOC-803 already gave it to node's
-# primary group, so groupadd assigns the next free gid; that is fine, nothing
-# keys on the fenix gid itself. Children keep a supplementary-group-free
-# identity of their own.
+# FOC-802: unprivileged child identities so spawned agents do not run as the
+# Supervisor's user. FOC-878 replaces the one child with a POOL,
+# fenix-child-<n>, primary group fenix-run-<n> (one pair per concurrent run,
+# assigned by fenix-spawn-as-child at the run's first spawn), supplementary
+# `fenix` — the shared group: children and the Supervisor (node joins as a
+# supplementary member) cooperate through setgid + g+rwX on the shared /data
+# trees only — and `fenix-children`, the sudoers runas umbrella for
+# fenix-child-share. Group `fenix` gets gid $FENIX_GID when that gid is free —
+# normally it is NOT, because FOC-803 already gave it to node's primary group,
+# so groupadd assigns the next free gid; that is fine, nothing keys on the
+# fenix gid itself. Pool uids/gids are deterministic (FENIX_CHILD_UID/GID + n,
+# slot 0 keeps today's numbers) so the thin uid layer remaps them by number.
 RUN sh /usr/local/sbin/fenix-set-uid
 # The child commits through gitdirs inside the node-owned main clones
 # (.git/worktrees/<name>), so git's dubious-ownership check needs the child's
@@ -159,6 +169,7 @@ ENV LA_ROOT=/opt/fenix \
     LA_SQUAD_HOME=/data/agents \
     GITHUB_ROOT=/data/workspaces \
     LA_WORKTREE_HOME=/data/workspaces/la-wt \
+    FENIX_CHILD_POOL=16 \
     TELEMETRY_HOST=0.0.0.0 \
     TELEMETRY_PORT=7331 \
     FENIX_IN_CONTAINER=1

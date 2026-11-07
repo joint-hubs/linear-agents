@@ -1,8 +1,8 @@
 # FOC-878 — per-run child identity in the container
 
-Status: **design for Mateusz's acceptance** (2026-11-07, delivery owner). No code yet. Phase 1 item
-(FOC-1070), the last one in the queue; it changes the image's privileged path (`fenix-spawn-as-child`,
-sudoers), so the approach is accepted first.
+Status: **accepted 2026-11-07** (Mateusz). Delivered on branch `foc-878-dev-ee47527427dd` —
+the delivery journal is `docs/state/FOC-878.md`. This document is the design basis of the
+implementation; every resolved ambiguity and deviation is recorded in the journal.
 
 ## 1. What is true today (FOC-802)
 
