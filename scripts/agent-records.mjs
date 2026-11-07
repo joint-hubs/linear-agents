@@ -218,17 +218,22 @@ function readEditRows(runId) {
 
 const nextEditSeq = (runId) => readEditRows(runId).reduce((max, r) => Math.max(max, r.seq), 0) + 1;
 
-// 0664 on creation so a file created by a child stays writable by the
-// Supervisor's group and vice versa; `mode` only applies when the file does
-// not exist yet, so appends keep the existing file's mode. `mode` is also
-// masked by the umask (0022 → 0644), so after the creating append the mode is
-// pinned with chmod — the owner can always chmod its own file, which makes the
-// group-writable shape hold under any umask.
+// 0660 on creation (FOC-878): edits.jsonl is the RUN's audit stream — the
+// run's children (members of fenix-run-<n> once the container's spawn helper
+// has claimed the run's identity) and the Supervisor append; every other run
+// gets nothing, not even read. `mode` only applies when the file does not
+// exist yet, so appends keep the existing file's mode. `mode` is also masked
+// by the umask (0022 → 0640), so after the creating append the mode is pinned
+// with chmod — the owner can always chmod its own file, which makes the shape
+// hold under any umask. The GROUP is deliberately not set here: in the
+// container the helper is the single writer of the identity surface and
+// re-pins the file to node:fenix-run-<n> on every spawn; on a native host the
+// creating process's group is correct as it stands.
 const appendEditRow = (runId, row) => {
   const path = editsPath(runId);
   const created = !existsSync(path);
-  appendFileSync(path, JSON.stringify(row) + "\n", { mode: 0o664 });
-  if (created && process.platform !== "win32") chmodSync(path, 0o664);
+  appendFileSync(path, JSON.stringify(row) + "\n", { mode: 0o660 });
+  if (created && process.platform !== "win32") chmodSync(path, 0o660);
 };
 
 // ── change description ───────────────────────────────────────────────────────
