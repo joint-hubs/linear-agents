@@ -130,21 +130,22 @@ test("docker/test-in-container.sh runs the prove-isolation proof only behind FEN
   }
 });
 
-// The proof has its own workflow step (FOC-1074) and lands ADVISORY: TEST's
-// proof run in the blocking shape exited 1 (193/200 — six load-signature reds
-// of the FOC-1232/1235 family plus the FOC-161 semaphore red under 2-CPU
-// starvation), so a blocking step turns the linux job red on every PR from
-// the first one. FOC-1251 measures the flakes per cause and makes the step
-// blocking again; the --cpus=2 cap is dropped with it — the runner's own shape
-// is the proof's shape, and the cap only reproduces the starvation.
-test("the linux workflow runs the prove-isolation proof as its own advisory step (FOC-1074)", () => {
+// The proof has its own workflow step (FOC-1074) and is BLOCKING since
+// FOC-1251: the advisory proof concluded success on the runner for five
+// consecutive PRs (#219–#223), so the per-cause fixes FOC-1074 waited for
+// are done — the runner never reproduced the seven reds (they reproduce only
+// under a --cpus=2 cap, the FOC-1074 measurement; that cap is a starvation
+// artifact, not the proof's shape, and stays out). A step that cannot fail
+// proves nothing, so the pin now INVERTS on continue-on-error: the yaml must
+// NOT carry it. The proof is the proof — red is a finding, not noise.
+test("the linux workflow runs the prove-isolation proof as its own blocking step (FOC-1074)", () => {
   const yml = readFileSync(join(HERE, "..", ".github", "workflows", "linux.yml"), "utf8");
   const lines = yml.split("\n");
   const run = lines.findIndex((l) => l.includes("FENIX_TEST_PROVE_ISOLATION=1"));
   if (run === -1) fail("the proof step lost its env passthrough — -e FENIX_TEST_PROVE_ISOLATION=1 must ride the docker run line (a step env: block stays in the runner shell)");
   const step = lines.slice(Math.max(0, run - 4), run + 2).join("\n");
-  if (!step.includes("continue-on-error: true")) {
-    fail("the proof step must be advisory (continue-on-error: true) until FOC-1251 lands its per-cause fixes — blocking, it goes red on every PR from the load-timing flakes");
+  if (step.includes("continue-on-error")) {
+    fail("the proof step must be blocking since FOC-1251 — continue-on-error:true makes it advisory, and a step that cannot fail proves nothing (the runner held five consecutive greens)");
   }
   if (step.includes("--cpus=2")) {
     fail("the proof step must not cap the container at --cpus=2 — the cap only reproduces the 2-CPU starvation reds; the runner's own shape is the proof's shape");
