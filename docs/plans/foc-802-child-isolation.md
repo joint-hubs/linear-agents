@@ -34,6 +34,13 @@ A per-child sandbox (bubblewrap/firejail), isolating the api container, moving t
 
 Split-uid breaks every single-uid assumption at once: atomic writes and lock files in the shared run dir (group write + setgid handles the common path; `*.lock` files created by a child must be removable by node — `g+w` on the dir suffices), FOC-803's uid remap at build (the child uid is derived from `FENIX_UID`), and the Docker lane's single-user harness (hence a separate root-started script).
 
-## Residual (documented)
+## Residual (closed by FOC-878, 2026-11-07)
 
-All children share one uid (`fenix-child`) and one group (`fenix`), so a compromised child of run A can write run B's gates, verdicts and `edits.jsonl` — cross-run forgery is possible inside the shared surface. The Supervisor's own files, token and tmux socket are protected, which is this ticket's scope. Per-run child identity (a uid per run or per child) is a follow-up.
+All children used to share one uid (`fenix-child`) and one group (`fenix`), so a compromised child
+of run A could write run B's gates, verdicts and `edits.jsonl` — cross-run forgery was possible
+inside the shared surface. The Supervisor's own files, token and tmux socket were protected, which
+was this ticket's scope. **Closed by FOC-878**: every run now claims its own pool identity
+(`fenix-child-<n>`, primary group `fenix-run-<n>`) through `fenix-spawn-as-child` at its first
+spawn, and the isolation lane proves every cross-run write and the cross-run `child.env` read are
+EACCES while `node` keeps each write. Design: `docs/plans/foc-878-per-run-child-identity.md`;
+delivery journal: `docs/state/FOC-878.md`.

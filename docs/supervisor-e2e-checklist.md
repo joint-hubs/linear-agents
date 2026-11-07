@@ -169,6 +169,13 @@ deny-list-only posture (ADR-0009).
 - [ ] Gates, verdicts and edits still work from a child — same script.
 - [ ] `supervisor-status` shows `isolation: off` only when `FENIX_CHILD_ISOLATION=off` or the
       helper is missing.
+- [ ] Two runs claim different pool slots; run A's child gets EACCES on run B's gates, verdicts,
+      `edits.jsonl`, worktree and kept-alive `child.env` while its own-run writes succeed; `node`
+      keeps every write into both runs — same script (FOC-878).
+- [ ] A `FENIX_CHILD_POOL=1` spawn of a fresh run is refused — exit 97,
+      `identity-pool-exhausted`, nothing modified — same script (FOC-878).
+- [ ] `supervisor-status` reports `identity: fenix-child-<n> (slot n)` inside the container
+      (FOC-878).
 
 ---
 
