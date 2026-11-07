@@ -286,6 +286,11 @@ else
         refuse "cannot write identity file: $identity_file"
     chmod 0644 "$identity_tmp"
     mv -f "$identity_tmp" "$identity_file"
+    # root:root by NAME, not by inheritance: the run dir sits under the
+    # setgid state home (the entrypoint's fix_permissions), so a file root
+    # creates there inherits the run dir's group otherwise. The identity is
+    # the helper's own metadata — root-owned, world-readable, never run data.
+    chown root:root "$identity_file" || refuse "cannot chown identity file: $identity_file"
     identity_fresh=1
     # Cross-run race: two spawns may have chosen the same free slot in the
     # same milliseconds (the checks above say "free", not "staying free").

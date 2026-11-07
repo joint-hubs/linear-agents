@@ -4,7 +4,8 @@
 #   docker run --rm --user root -v <checkout>:/src:ro fenix:dev sh /src/docker/test-isolation.sh
 # Inside, it builds the /data volume layout by hand, applies the entrypoint's
 # REAL fix_permissions (as node), then drives the REAL privileged path —
-# node -> sudo -> fenix-spawn-as-child -> setpriv -> fenix-child — with a fake
+# node -> sudo -> fenix-spawn-as-child -> setpriv -> the run's fenix-child-<n>
+# — with a fake
 # `claude` that probes what a child must and must not reach:
 #   must FAIL:   write /data/agents/supervisor/settings.json (EACCES),
 #                read /data/run/host.token (EACCES),
@@ -21,11 +22,17 @@
 # the helper's dedicated refusal code — without starting anything.
 #
 # FOC-980: the transcript-share helper is exercised directly through its
-# production sudo path (node -> sudo -n -u fenix-child) against a hostile
+# production sudo path (node -> sudo -n -u fenix-child-0) against a hostile
 # fixture: child-controlled filenames (a newline with /etc/passwd-like text,
 # a glob character), a symlink to a root-owned file, and refusals for /etc,
 # a ".." path, a symlinked launch dir and a root run (the share helper's
 # refusal code is 2).
+#
+# FOC-878: a two-run block drives the per-run identity probes — different pool
+# slots for two runs through the real helper, cross-run EACCES on gates,
+# verdicts, edits.jsonl, the worktree and the kept-alive child.env, node
+# keeping every write, supervisor-status reporting the run identity, and pool
+# exhaustion refusing (exit 97) while modifying nothing.
 set -eu
 
 SRC=${FENIX_TEST_SRC:-/src}
@@ -102,7 +109,7 @@ pass 'fix_permissions idempotent over state created after the first run'
 # The fake claude: a node script probing every surface from the child uid.
 cat > "$CONFIG_DIR/fake-claude.mjs" <<'PROBE'
 #!/usr/local/bin/node
-// FOC-802 isolation probe — runs as fenix-child, reports one JSON object.
+// FOC-802 isolation probe — runs as its run's pool user, reports one JSON object.
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -145,11 +152,12 @@ run_as_node 'umask 027; printf "LA_TEST_WORKTREE=/data/workspaces/la-wt/t1\nLA_T
 [ "$(stat -c '%a' "$CONFIG_DIR/child.env")" = "640" ] || fail 'child.env is not 0640'
 [ "$(stat -c '%u' "$CONFIG_DIR/child.env")" = "$(id -u node)" ] || fail 'child.env not owned by node'
 
-# ── the real spawn path: node -> sudo -> helper -> setpriv -> fenix-child ────
+# ── the real spawn path: node -> sudo -> helper -> setpriv -> fenix-child-0 ──
 run_as_node "sudo -n $HELPER $CONFIG_DIR/child.env $WORKTREE $CONFIG_DIR -- $CONFIG_DIR/fake-claude.mjs" \
     || fail 'the helper spawn failed'
 RESULT_JSON=$(cat "$CONFIG_DIR/result.json")
-CHILD_UID=$(id -u fenix-child)
+# FOC-878: the first spawn of the container claims pool slot 0 (lowest free).
+CHILD_UID=$(id -u fenix-child-0)
 printf 'probe result: %s\n' "$RESULT_JSON"
 
 # ── assertions (readable diff on any mismatch) ───────────────────────────────
@@ -160,7 +168,7 @@ const tmuxErr = String(out.tmuxErr || "");
 const tmuxOk = out.tmux !== "exit0"
   && /error connecting|no such file|permission denied/i.test(tmuxErr);
 const checks = [
-  ["uid is fenix-child", out.uid, childUid],
+  ["uid is fenix-child-0 (run pool slot 0)", out.uid, childUid],
   ["cannot write supervisor settings", out.supervisorSettings, "EACCES"],
   ["cannot read host.token", out.hostToken, "EACCES"],
   ["git commit in its worktree", out.gitCommit, "exit0"],
@@ -234,21 +242,27 @@ run_as_node "sudo -n $HELPER $REFUSAL_ENV /data/workspaces/la-wt/evil-wt $CONFIG
 pass 'helper refuses a gitdir pointing at another repo .git, store stays node-owned (exit 97)'
 
 # ── FOC-980: the transcript-share helper, against a hostile fixture ──────────
-# Production path: node -> sudo -n -u fenix-child -> fenix-child-share <dir>.
-# The helper runs as the child user, never root: the transcripts are
-# fenix-child-owned files and the owner may chmod its own files, so a
-# raced-in symlink can only touch files the child could chmod anyway. The
-# fixture proves both halves of that design: filenames the child controls
-# reach chmod as single find arguments (the old `for f in $(find …)` loop
-# would have word-split the newline-carrying path so that one token is
-# $SHARE_TARGET itself — the `root 600` assertion below proves that split
-# never happens — and would have glob-expanded the star name), and a symlink
-# to a root-owned 0600 file is never followed.
+# Production path: node -> sudo -n -u fenix-child-<n> -> fenix-child-share <dir>.
+# The runas is the run's own pool user (FOC-878), resolved by supervisor-lib's
+# runChildShareHelper from the run's identity.json — the fixture claims slot 0
+# below, exactly as the container's spawn helper writes it. The helper runs as
+# the child user, never root: the transcripts are child-owned files and the
+# owner may chmod its own files, so a raced-in symlink can only touch files
+# the child could chmod anyway. The fixture proves both halves of that design:
+# filenames the child controls reach chmod as single find arguments (the old
+# `for f in $(find …)` loop would have word-split the newline-carrying path so
+# that one token is $SHARE_TARGET itself — the `root 600` assertion below
+# proves that split never happens — and would have glob-expanded the star
+# name), and a symlink to a root-owned 0600 file is never followed.
 SHARE_RUN=/data/state/supervisor/t980run
 SHARE_DIR=$SHARE_RUN/launch/dev-9/turn-0
 SHARE_PROJECT=$SHARE_DIR/projects/p
 SHARE_TARGET=/data/state/supervisor/t980share-target
 mkdir -p "$SHARE_PROJECT" || fail 'share fixture setup failed'
+# The run's identity (slot 0) as the spawn helper writes it — what the lib's
+# childShareRunas reads to pick the runas.
+printf '{"slot":0,"user":"fenix-child-0","group":"fenix-run-0","assignedAt":"2026-11-07T00:00:00.000Z"}\n' > "$SHARE_RUN/identity.json"
+chmod 0644 "$SHARE_RUN/identity.json"
 printf '{"transcript":true}' > "$SHARE_PROJECT/s.jsonl"
 # The real word-splitting attack is a child-created DIRECTORY whose name
 # contains a newline: split on it, one token of the find output is exactly
@@ -264,13 +278,14 @@ chmod 0600 "$SHARE_PROJECT/s.jsonl" "$weird" "$SHARE_PROJECT/star-*.jsonl"
 printf 'root-secret' > "$SHARE_TARGET"
 chmod 0600 "$SHARE_TARGET"
 ln -s "$SHARE_TARGET" "$SHARE_PROJECT/link.jsonl"
-# fenix-child's primary group in the image is fenix (the group node belongs
-# to and the share helper widens for) — there is no fenix-child group.
-chown -R fenix-child:fenix "$SHARE_DIR"
-pass 'share fixture created (0600 fenix-child files, newline/star names, symlink)'
+# The transcripts carry the child's own identity (FOC-878): owner
+# fenix-child-0, primary group fenix-run-0 — the group node is a member of,
+# which is exactly what the share helper widens for.
+chown -R fenix-child-0:fenix-run-0 "$SHARE_DIR"
+pass 'share fixture created (0600 fenix-child-0 files, newline/star names, symlink)'
 
 rc=0
-SHARE_COUNT=$(run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_DIR") || rc=$?
+SHARE_COUNT=$(run_as_node "sudo -n -u fenix-child-0 $SHARE_HELPER $SHARE_DIR") || rc=$?
 [ "$rc" = "0" ] || fail "the share helper failed (rc=$rc)"
 [ "$SHARE_COUNT" = "3" ] || fail "share helper reported $SHARE_COUNT files changed, expected 3"
 [ "$(stat -c '%a' "$SHARE_PROJECT/s.jsonl")" = "640" ] \
@@ -279,21 +294,21 @@ SHARE_COUNT=$(run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_DIR") || 
     || fail 'the newline-named file was not widened as a single path'
 [ "$(stat -c '%a' "$SHARE_PROJECT/star-*.jsonl")" = "640" ] \
     || fail 'the glob-named file was not widened as a single path'
-[ "$(stat -c '%U' "$SHARE_PROJECT/s.jsonl")" = "fenix-child" ] \
+[ "$(stat -c '%U' "$SHARE_PROJECT/s.jsonl")" = "fenix-child-0" ] \
     || fail 'the share changed the file ownership'
 [ "$(stat -c '%U %a' "$SHARE_TARGET")" = "root 600" ] \
     || fail "the root-owned symlink target was touched ($(stat -c '%U %a' "$SHARE_TARGET"))"
-pass 'share helper widened only the real fenix-child files, root target untouched'
+pass 'share helper widened only the real fenix-child-0 files, root target untouched'
 
 # Refusals — each must exit 2 (the share helper's refusal code) before any
 # chmod runs. First /etc: not a supervisor launch dir.
 rc=0
-run_as_node "sudo -n -u fenix-child $SHARE_HELPER /etc" 2>/dev/null || rc=$?
+run_as_node "sudo -n -u fenix-child-0 $SHARE_HELPER /etc" 2>/dev/null || rc=$?
 [ "$rc" = "2" ] || fail "share helper accepted /etc (rc=$rc)"
 # A path with ..: refused even though realpath would canonicalize it back to
 # the same directory — the lexical argument is never trusted.
 rc=0
-run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_DIR/../turn-0" 2>/dev/null || rc=$?
+run_as_node "sudo -n -u fenix-child-0 $SHARE_HELPER $SHARE_DIR/../turn-0" 2>/dev/null || rc=$?
 [ "$rc" = "2" ] || fail "share helper accepted a .. path (rc=$rc)"
 # A symlinked launch dir: the lexical name matches the run regex, the
 # canonical path does not — the realpath check must trip.
@@ -301,7 +316,7 @@ run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_DIR/../turn-0" 2>/dev/n
 # a node-run ln -s here cannot create it.
 ln -s "$SHARE_DIR" "$SHARE_RUN/launch/dev-evil" || fail 'symlink fixture setup failed'
 rc=0
-run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_RUN/launch/dev-evil" 2>/dev/null || rc=$?
+run_as_node "sudo -n -u fenix-child-0 $SHARE_HELPER $SHARE_RUN/launch/dev-evil" 2>/dev/null || rc=$?
 [ "$rc" = "2" ] || fail "share helper accepted a symlinked launch dir (rc=$rc)"
 # A root run would resurrect the arbitrary-file chmod the runas design exists
 # to prevent — refused outright, even on a perfectly valid directory.
@@ -312,6 +327,183 @@ pass 'share helper refuses /etc, .., a symlinked launch dir, and a root run'
 
 rm -rf "$SHARE_RUN" "$SHARE_TARGET"
 
+# ── FOC-878: one pool identity per run — two runs, one container ─────────────
+# The accepted design's cross-run probes (§5), driven through the REAL helper
+# path (node -> sudo -> helper -> setpriv -> the run's own fenix-child-<n>).
+# run-1 above claimed slot 0; two fresh runs claim two different slots, run
+# A's child proves from its own uid that nothing of run B's is reachable,
+# node — a member of every fenix-run-<n> — keeps every write,
+# supervisor-status reports the run identity, and pool exhaustion refuses
+# (exit 97) while modifying nothing.
+RUN_A=/data/state/supervisor/run-2
+RUN_B=/data/state/supervisor/run-3
+RUN_C=/data/state/supervisor/run-4
+WT_A=/data/workspaces/la-wt/t2
+WT_B=/data/workspaces/la-wt/t3
+LAUNCH_A=$RUN_A/launch/dev-a/turn-1
+LAUNCH_B=$RUN_B/launch/dev-b/turn-1
+LAUNCH_C=$RUN_C/launch/dev-c/turn-1
+UID_BASE=$(id -u fenix-child-0)
+RUN_A_ID=$(basename "$RUN_A")
+PATH_LINE='PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+for r in "$RUN_A" "$RUN_B" "$RUN_C"; do
+    mkdir -p "$r/children" "$r/gates" "$r/verdicts"
+done
+mkdir -p "$LAUNCH_A" "$LAUNCH_B" "$LAUNCH_C"
+run_as_node 'git -C /data/workspaces/seed-repo worktree add -q -b iso-t2 /data/workspaces/la-wt/t2 \
+    && git -C /data/workspaces/seed-repo worktree add -q -b iso-t3 /data/workspaces/la-wt/t3' \
+    || fail 'run-2/run-3 worktree setup failed'
+chown -R node:node "$RUN_A" "$RUN_B" "$RUN_C"
+
+# Run B's light probe: claims its slot, writes its own surface, records its uid.
+cat > "$LAUNCH_B/probe-b.mjs" <<'PROBE_B'
+#!/usr/local/bin/node
+// FOC-878 probe B — runs as run B's own pool user.
+import { appendFileSync, writeFileSync } from "node:fs";
+const probeWrite = (path) => {
+    try { appendFileSync(path, "x"); return "WRITE_ALLOWED"; } catch (err) { return err.code || String(err); }
+};
+const out = { uid: process.getuid() };
+out.ownGate = probeWrite(process.env.LA_TEST_GATES);
+out.ownEdits = probeWrite(process.env.LA_TEST_EDITS);
+writeFileSync(process.env.LA_TEST_RESULT, JSON.stringify(out, null, 2));
+PROBE_B
+
+# Run A's hostile probe: everything of run B's must be EACCES from A's uid.
+cat > "$LAUNCH_A/probe-a.mjs" <<'PROBE_A'
+#!/usr/local/bin/node
+// FOC-878 probe A — runs as run A's own pool user, reaching for run B.
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const probeWrite = (path) => {
+    try { appendFileSync(path, "x"); return "WRITE_ALLOWED"; } catch (err) { return err.code || String(err); }
+};
+const probeRead = (path) => {
+    try { readFileSync(path, "utf8"); return "READ_ALLOWED"; } catch (err) { return err.code || String(err); }
+};
+const out = { uid: process.getuid() };
+// Probe 3: the own-run writes a child needs — gate, verdict, edits, worktree.
+out.ownGate = probeWrite(process.env.LA_TEST_GATES);
+out.ownVerdict = probeWrite(process.env.LA_TEST_VERDICTS);
+out.ownEdits = probeWrite(process.env.LA_TEST_EDITS);
+out.ownWorktree = probeWrite(process.env.LA_TEST_WORKTREE_FILE);
+// Probe 2: run B's gates, verdicts, edits, worktree and kept-alive child.env.
+out.crossGate = probeWrite(process.env.LA_TEST_B_GATES);
+out.crossVerdict = probeWrite(process.env.LA_TEST_B_VERDICTS);
+out.crossEdits = probeWrite(process.env.LA_TEST_B_EDITS);
+out.crossWorktree = probeWrite(process.env.LA_TEST_B_WORKTREE_FILE);
+out.crossEnv = probeRead(process.env.LA_TEST_B_CHILD_ENV);
+writeFileSync(process.env.LA_TEST_RESULT, JSON.stringify(out, null, 2));
+PROBE_A
+chmod 0755 "$LAUNCH_A/probe-a.mjs" "$LAUNCH_B/probe-b.mjs"
+chown -R node:node "$RUN_A" "$RUN_B"
+
+run_as_node "umask 027; printf 'LA_TEST_GATES=$RUN_B/gates/b-probe.json\nLA_TEST_EDITS=$RUN_B/edits.jsonl\nLA_TEST_RESULT=$LAUNCH_B/result-b.json\n$PATH_LINE\n' > $LAUNCH_B/child.env" \
+    || fail 'run B env file setup failed'
+[ "$(stat -c '%a' "$LAUNCH_B/child.env")" = "640" ] || fail 'run B child.env is not 0640'
+
+# Spawn B FIRST: its surface (subdirs at the run group, edits.jsonl) must
+# exist before A's hostile probe reaches for it.
+run_as_node "sudo -n $HELPER $LAUNCH_B/child.env $WT_B $LAUNCH_B -- $LAUNCH_B/probe-b.mjs" \
+    || fail 'run B spawn through the helper failed'
+RESULT_B=$(cat "$LAUNCH_B/result-b.json")
+
+# B's kept-alive env file for the read probe: a second-turn env file exactly
+# as the watcher writes it (node-owned 0640) that no spawn consumes.
+run_as_node "umask 0002; mkdir -p $RUN_B/launch/dev-b/turn-2 && umask 027; printf 'KEPT=1\n$PATH_LINE\n' > $RUN_B/launch/dev-b/turn-2/child.env" \
+    || fail 'run B kept-alive env setup failed'
+
+run_as_node "umask 027; printf 'LA_TEST_GATES=$RUN_A/gates/a-probe.json\nLA_TEST_VERDICTS=$RUN_A/verdicts/a-probe.json\nLA_TEST_EDITS=$RUN_A/edits.jsonl\nLA_TEST_WORKTREE_FILE=$WT_A/probe-a.txt\nLA_TEST_B_GATES=$RUN_B/gates/cross-probe.json\nLA_TEST_B_VERDICTS=$RUN_B/verdicts/cross-probe.json\nLA_TEST_B_EDITS=$RUN_B/edits.jsonl\nLA_TEST_B_WORKTREE_FILE=$WT_B/cross-probe.txt\nLA_TEST_B_CHILD_ENV=$RUN_B/launch/dev-b/turn-2/child.env\nLA_TEST_RESULT=$LAUNCH_A/result-a.json\n$PATH_LINE\n' > $LAUNCH_A/child.env" \
+    || fail 'run A env file setup failed'
+[ "$(stat -c '%a' "$LAUNCH_A/child.env")" = "640" ] || fail 'run A child.env is not 0640'
+run_as_node "sudo -n $HELPER $LAUNCH_A/child.env $WT_A $LAUNCH_A -- $LAUNCH_A/probe-a.mjs" \
+    || fail 'run A spawn through the helper failed'
+RESULT_A=$(cat "$LAUNCH_A/result-a.json")
+
+SLOT_A=$(node -p "JSON.parse(require('fs').readFileSync('$RUN_A/identity.json','utf8')).slot")
+SLOT_B=$(node -p "JSON.parse(require('fs').readFileSync('$RUN_B/identity.json','utf8')).slot")
+
+# ── FOC-878 assertions: slots, cross-run EACCES, own-run writes ──────────────
+node -e '
+const a = JSON.parse(process.argv[1]);
+const b = JSON.parse(process.argv[2]);
+const slotA = Number(process.argv[3]);
+const slotB = Number(process.argv[4]);
+const uidBase = Number(process.argv[5]);
+const checks = [
+  ["run A child runs its slot uid", a.uid, uidBase + slotA],
+  ["run B child runs its slot uid", b.uid, uidBase + slotB],
+  ["the two runs hold different slots", slotA < slotB || slotB < slotA, true],
+  ["A writes its own gate", a.ownGate, "WRITE_ALLOWED"],
+  ["A writes its own verdict", a.ownVerdict, "WRITE_ALLOWED"],
+  ["A appends its own edits.jsonl", a.ownEdits, "WRITE_ALLOWED"],
+  ["A creates a file in its own worktree", a.ownWorktree, "WRITE_ALLOWED"],
+  ["A cannot write B gate", a.crossGate, "EACCES"],
+  ["A cannot write B verdict", a.crossVerdict, "EACCES"],
+  ["A cannot append B edits.jsonl", a.crossEdits, "EACCES"],
+  ["A cannot create a file in B worktree", a.crossWorktree, "EACCES"],
+  ["A cannot read B child.env", a.crossEnv, "EACCES"],
+  ["B writes its own gate", b.ownGate, "WRITE_ALLOWED"],
+  ["B appends its own edits.jsonl", b.ownEdits, "WRITE_ALLOWED"],
+];
+let rc = 0;
+for (const [name, got, want] of checks) {
+  const ok = String(got) === String(want);
+  if (ok) { console.log(`PASS ${name}`); continue; }
+  console.log(`FAIL ${name}: expected ${want}, got ${got}`);
+  rc = 1;
+}
+process.exit(rc);
+' "$RESULT_A" "$RESULT_B" "$SLOT_A" "$SLOT_B" "$UID_BASE" || fail 'FOC-878 cross-run assertions failed'
+
+# The helper's own surface claims, read back from the tree.
+[ "$(stat -c '%U:%G %a' "$RUN_A/children")" = "node:fenix-run-$SLOT_A 2770" ] \
+    || fail "run A children dir is not node:fenix-run-$SLOT_A 2770 ($(stat -c '%U:%G %a' "$RUN_A/children"))"
+[ "$(stat -c '%U:%G %a' "$RUN_A/edits.jsonl")" = "node:fenix-run-$SLOT_A 660" ] \
+    || fail "run A edits.jsonl is not node:fenix-run-$SLOT_A 0660 ($(stat -c '%U:%G %a' "$RUN_A/edits.jsonl"))"
+[ "$(stat -c '%U:%G' "$WT_A")" = "fenix-child-$SLOT_A:fenix-run-$SLOT_A" ] \
+    || fail "run A worktree is not owned by its pool identity ($(stat -c '%U:%G' "$WT_A"))"
+[ "$(stat -c '%U:%G' "$RUN_A/identity.json")" = "root:root" ] || fail 'identity.json is not root:root'
+[ "$(stat -c '%a' "$RUN_A/identity.json")" = "644" ] || fail 'identity.json is not 0644'
+pass "two runs hold different pool slots ($SLOT_A vs $SLOT_B); cross-run writes and reads are EACCES"
+
+# Probe 4: node keeps every write — into both runs' subdirs and worktrees.
+run_as_node "printf x >> $RUN_A/gates/node-probe.json && printf x >> $RUN_B/gates/node-probe.json && printf x >> $RUN_A/verdicts/node-probe.json && printf x >> $RUN_B/verdicts/node-probe.json && printf x >> $RUN_A/edits.jsonl && printf x >> $RUN_B/edits.jsonl && touch $WT_A/node-probe.txt && touch $WT_B/node-probe.txt" \
+    || fail 'node lost a write into a run surface (probe 4)'
+pass 'node still writes into both runs: subdirs, edits.jsonl, worktrees'
+
+# §5: supervisor-status reports the run's identity on its parseable channels —
+# the run-level `identity` JSON field and the container-only stderr line. The
+# state home is the container's, and FENIX_IN_CONTAINER gates the note on.
+rc=0
+stat_out=$(run_as_node "LA_SUPERVISOR_STATE_HOME=/data/state/supervisor FENIX_IN_CONTAINER=1 node $SRC/scripts/supervisor-status.mjs --run $RUN_A_ID 2>&1 1>/dev/null") || rc=$?
+[ "$rc" = "0" ] || fail "supervisor-status failed on the lane fixture (rc=$rc): $stat_out"
+printf '%s\n' "$stat_out" | grep -q "identity: fenix-child-$SLOT_A (slot $SLOT_A)" \
+    || fail "supervisor-status stderr did not report the run identity: $stat_out"
+pass "supervisor-status reports the run identity (fenix-child-$SLOT_A, slot $SLOT_A)"
+
+# Probe 5: pool exhaustion refuses and leaves NOTHING modified — a fresh run
+# with FENIX_CHILD_POOL=1 cannot get a slot (slot 0 of the shrunk pool is
+# held), the refusal is exit 97 with the identity-pool-exhausted reason, and
+# neither the fresh run's dirs nor the reused worktree argument changed.
+run_as_node "umask 027; printf 'LA_TEST_REFUSAL=1\n$PATH_LINE\n' > $LAUNCH_C/child.env" \
+    || fail 'run C env file setup failed'
+# The surface snapshot the refusal must leave untouched (the dirs carry the
+# setgid bit from the state home — compare against what is there, not a
+# hand-picked mode).
+RUN_C_BEFORE=$(stat -c '%U %G %a' "$RUN_C/children")
+rc=0
+exh=$(run_as_node "env FENIX_CHILD_POOL=1 sudo -n $HELPER $LAUNCH_C/child.env $WT_A $LAUNCH_C -- $LAUNCH_A/probe-a.mjs" 2>&1) || rc=$?
+[ "$rc" = "97" ] || fail "pool exhaustion was not a refusal 97 (rc=$rc): $exh"
+printf '%s\n' "$exh" | grep -q 'identity-pool-exhausted' || fail "the refusal did not name identity-pool-exhausted: $exh"
+[ ! -e "$RUN_C/identity.json" ] || fail 'the exhaustion refusal left an identity.json behind'
+[ ! -e "$RUN_C/edits.jsonl" ] || fail 'the exhaustion refusal created edits.jsonl'
+[ "$(stat -c '%U %G %a' "$RUN_C/children")" = "$RUN_C_BEFORE" ] \
+    || fail "the exhaustion refusal modified run C ($(stat -c '%U %G %a' "$RUN_C/children") was $RUN_C_BEFORE)"
+[ "$(stat -c %U "$WT_A")" = "fenix-child-$SLOT_A" ] \
+    || fail 'the exhaustion refusal touched the worktree argument'
+pass 'pool exhaustion refuses (exit 97, identity-pool-exhausted) and modifies nothing'
+
 # FOC-1001/988: production node processes run with HOME=/home/node; this lane's
 # root shell has HOME=/root, which node cannot read (git would warn about it).
 as_node_home() {
@@ -319,13 +511,13 @@ as_node_home() {
 }
 
 # ── FOC-1001: the Supervisor reads a child-owned worktree without trusting it ─
-# By now the worktree and its per-worktree gitdir belong to fenix-child (the
+# By now the worktree and its per-worktree gitdir belong to fenix-child-0 (the
 # real handover). git run there as node stops at "dubious ownership"; the
 # workaround the Supervisor used on the FOC-789 run — a safe.directory — lets
 # whatever the child planted run as node. The scripts read such a tree through
 # supervisor-lib's one-shot, sanitised invocation instead.
 WT_GITDIR=/data/workspaces/seed-repo/.git/worktrees/t1
-[ "$(stat -c %U "$WORKTREE")" = "fenix-child" ] || fail "the worktree is not child-owned ($(stat -c %U "$WORKTREE")) — the handover precondition is gone"
+[ "$(stat -c %U "$WORKTREE")" = "fenix-child-0" ] || fail "the worktree is not child-owned ($(stat -c %U "$WORKTREE")) — the handover precondition is gone"
 [ -d "$WT_GITDIR" ] || fail "no per-worktree gitdir at $WT_GITDIR"
 rc=0
 out=$(as_node_home "git -C $WORKTREE status --porcelain 2>&1") || rc=$?
@@ -338,7 +530,7 @@ pass 'plain git in a child-owned worktree stops at dubious ownership'
 # the worst case — and make the planted file the child's.
 as_node_home 'git -C /data/workspaces/seed-repo config extensions.worktreeConfig true' || fail 'could not enable extensions.worktreeConfig'
 printf '[core]\n\tfsmonitor = "echo planted > /tmp/iso-fsmonitor; true"\n' > "$WT_GITDIR/config.worktree"
-chown fenix-child:fenix "$WT_GITDIR/config.worktree"
+chown fenix-child-0:fenix-run-0 "$WT_GITDIR/config.worktree"
 
 # Control: trusting the tree by hand (what the Supervisor did) runs the plant.
 rm -f /tmp/iso-fsmonitor
