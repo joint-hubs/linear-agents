@@ -94,8 +94,9 @@ mark_orphans() {
     node "$LA_ROOT/scripts/supervisor-orphans.mjs" --container || true
 }
 
-# FOC-802: children spawned by the Supervisor run as `fenix-child` (own uid,
-# group `fenix`), not as `node`. Apply the shared-write surface idempotently on
+# FOC-802 / FOC-878: children spawned by the Supervisor run as their run's
+# pool user (fenix-child-<n>, own uid, primary group fenix-run-<n>), not as
+# `node`. Apply the shared-write surface idempotently on
 # every start: the trees children must write get group `fenix`, setgid dirs and
 # g+rwX; the Supervisor-only paths get 0700. Runs as node (the owner of /data,
 # and a member of fenix, so chgrp needs no root). Best effort — a chmod failure
@@ -113,9 +114,32 @@ fix_permissions() {
             try chmod 0700 "$node_only"
         fi
     done
+    # FOC-878: the per-run identity groups (fenix-run-<n>, all created by
+    # fenix-set-uid). Everything already under one is EXCLUDED from the chgrp
+    # walk below: the walk hands the shared /data trees to group fenix, and
+    # fenix is supplementary for every pool user — a chgrp -R over a run's
+    # node:fenix-run-<n> trees (on this container restart, before the run's
+    # next spawn re-chowns them) would revert them to the shared group and
+    # re-open the run's gates/verdicts/launch/worktree to every other run's
+    # child. The chmod walks stay: g+rwX/g+s only add to the group an entry
+    # already has, they never move it.
+    run_group_prune=''
+    while IFS=: read -r _gname _gpass _ggid _grest; do
+        case $_gname in
+            fenix-run-*) run_group_prune="$run_group_prune${run_group_prune:+ -o }-gid $_ggid" ;;
+        esac
+    done < /etc/group
     for shared_tree in /data/state/supervisor /data/telemetry /data/workspaces /data/state/runs; do
         if [ -d "$shared_tree" ]; then
-            try chgrp -R fenix "$shared_tree"
+            if [ -n "$run_group_prune" ]; then
+                # find -prune skips every pool-group entry (a directory: its
+                # whole subtree; a file such as the run's edits.jsonl: the entry
+                # itself); chgrp -h never follows a raced-in link — the -R walk
+                # it replaces never widened the group either.
+                try find "$shared_tree" \( $run_group_prune \) -prune -o -exec chgrp -h fenix -- {} +
+            else
+                try chgrp -R fenix "$shared_tree"
+            fi
             try chmod -R g+rwX "$shared_tree"
             try find "$shared_tree" -type d -exec chmod g+s {} +
         fi
@@ -139,10 +163,14 @@ mkdir -p "$LA_TELEMETRY_HOME" "$LA_SUPERVISOR_STATE_HOME" "$LA_SQUAD_HOME" "$GIT
 mkdir -p "$XDG_CACHE_HOME" "$npm_config_cache" "$PIP_CACHE_DIR" "$UV_CACHE_DIR" \
     "$PLAYWRIGHT_BROWSERS_PATH" /tmp/fenix-child 2>/dev/null || true
 
-# FOC-808: make the cache volume and the child tmp root group-writable for
-# `fenix-child` with the same setgid pattern fix_permissions uses on the /data
-# shared trees (FOC-802). Top level + one level only — a full -R walk over a
-# years-old npm cache would stall every start. Best effort, like fix_permissions.
+# FOC-808: make the cache volume and the child tmp root group-writable with
+# the same setgid pattern fix_permissions uses on the /data shared trees
+# (FOC-802). Top level + one level only — a full -R walk over a years-old npm
+# cache would stall every start. Best effort, like fix_permissions.
+# FOC-878: the per-child cache subtrees fenix-spawn-as-child makes
+# (/home/node/.cache/fenix-child-<n>, group fenix-run-<n>, 2770) are left
+# alone: chgrp fenix + 0775 on them would hand every other run's child
+# (supplementary fenix) a write into this run's package caches.
 fix_cache_permissions() {
     try() {
         "$@" || printf 'fenix: fix_cache_permissions: failed: %s\n' "$*" >&2
@@ -154,6 +182,7 @@ fix_cache_permissions() {
         try chmod g+s "$tree"
         for sub in "$tree"/*; do
             [ -d "$sub" ] || continue
+            case $(stat -c '%G' "$sub" 2>/dev/null) in fenix-run-*) continue ;; esac
             try chgrp fenix "$sub"
             try chmod 0775 "$sub"
             try chmod g+s "$sub"
